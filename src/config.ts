@@ -24,7 +24,7 @@ export function authFilePath(): string {
 }
 
 export function newKeyURL(): string {
-  return "https://app.heyditto.ai/mcp/newkey";
+  return "https://app.heyditto.ai/connect/openclaw";
 }
 
 export type ApiKeySource = "env" | "config" | "none";
