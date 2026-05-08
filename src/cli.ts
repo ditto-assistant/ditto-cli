@@ -1,15 +1,19 @@
 #!/usr/bin/env node
+import { spawn } from "node:child_process";
+import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
   apiBaseURL,
-  apiKey,
+  authFilePath,
   mcpServerURL,
   newKeyURL,
   packageName,
   packageVersion,
+  resolveApiKey,
 } from "./config.js";
+import { clearStoredKey, writeStoredKey } from "./store.js";
 
 function usage(): string {
   return `${packageName} ${packageVersion}
@@ -21,21 +25,33 @@ Usage:
   ditto subjects <query> [--top-k <n>]
   ditto memories <subject-id>...
   ditto network <pair-id> [--limit <n>]
-  ditto status
-  ditto config
-  ditto help
+
+Auth:
+  ditto login [<key>] [--paste] [--stdin]   Save an API key to ${authFilePath()}
+  ditto logout                              Delete the saved key
+  ditto status                              Show endpoint, key source, live tools
+  ditto config                              Print MCP client config snippet
+
+Other:
+  ditto help                                Show this message
 
 Environment:
-  DITTO_API_KEY    Required. Get one at ${newKeyURL()}.
+  DITTO_API_KEY    Optional override (takes precedence over the saved key).
+                   Get one at ${newKeyURL()}.
   DITTO_API_BASE   Optional. Defaults to https://api.heyditto.ai.
+  DITTO_CONFIG_DIR Optional. Defaults to $XDG_CONFIG_HOME/heyditto/cli or
+                   ~/.config/heyditto/cli.
 `;
 }
 
 async function getClient(): Promise<Client> {
-  const key = apiKey();
+  const { key, source } = await resolveApiKey();
   if (!key) {
     process.stderr.write(
-      `error: DITTO_API_KEY is not set.\nGet a key at ${newKeyURL()}, then export DITTO_API_KEY=ditto_mcp_…\n`,
+      `error: no Ditto API key configured.\n\n` +
+        `  1. Get a key at ${newKeyURL()}\n` +
+        `  2. Save it with: ditto login <key>\n` +
+        `     (or export DITTO_API_KEY=ditto_mcp_…)\n`,
     );
     process.exit(1);
   }
@@ -45,7 +61,15 @@ async function getClient(): Promise<Client> {
       headers: { Authorization: `Bearer ${key}` },
     },
   });
-  await client.connect(transport);
+  try {
+    await client.connect(transport);
+  } catch (err) {
+    process.stderr.write(
+      `error: failed to connect to ${mcpServerURL()} (key source: ${source}).\n` +
+        `${err instanceof Error ? err.message : String(err)}\n`,
+    );
+    process.exit(1);
+  }
   return client;
 }
 
@@ -70,6 +94,90 @@ function requirePositionals(positionals: string[], minimum: number, label: strin
   }
 }
 
+async function readKeyFromStdin(): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let buf = "";
+    process.stdin.setEncoding("utf-8");
+    process.stdin.on("data", (chunk) => (buf += chunk));
+    process.stdin.on("end", () => resolve(buf));
+    process.stdin.on("error", reject);
+  });
+}
+
+async function promptForKey(message: string): Promise<string> {
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  try {
+    return await rl.question(message);
+  } finally {
+    rl.close();
+  }
+}
+
+function openInBrowser(url: string): void {
+  const cmd =
+    process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
+  const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
+  const child = spawn(cmd, args, { stdio: "ignore", detached: true });
+  child.on("error", () => {
+    /* swallow — best-effort */
+  });
+  child.unref();
+}
+
+async function cmdLogin(rest: string[]): Promise<void> {
+  const { values, positionals } = parseArgs({
+    args: rest,
+    options: {
+      paste: { type: "boolean", default: false },
+      stdin: { type: "boolean", default: false },
+    },
+    allowPositionals: true,
+  });
+
+  let key = positionals[0]?.trim();
+
+  if (!key && values.stdin) {
+    key = (await readKeyFromStdin()).trim();
+  } else if (!key) {
+    if (values.paste) {
+      process.stderr.write(`Opening ${newKeyURL()} in your browser…\n`);
+      openInBrowser(newKeyURL());
+    }
+    if (!process.stdin.isTTY) {
+      throw new Error(
+        `no key provided and stdin is not a TTY. Pass the key as an argument or pipe it via --stdin.`,
+      );
+    }
+    key = (await promptForKey(`Paste your Ditto API key (from ${newKeyURL()}): `)).trim();
+  }
+
+  if (!key) throw new Error("no key provided");
+  if (!key.startsWith("ditto_mcp_")) {
+    process.stderr.write(`warning: key does not start with "ditto_mcp_" — proceeding anyway\n`);
+  }
+
+  await writeStoredKey(key);
+  process.stdout.write(`Saved key to ${authFilePath()}\n`);
+  if (process.env.DITTO_API_KEY) {
+    process.stderr.write(
+      `note: DITTO_API_KEY is set in your environment and will override the saved key for this session.\n`,
+    );
+  }
+  process.stdout.write(`Run 'ditto status' to verify.\n`);
+}
+
+async function cmdLogout(): Promise<void> {
+  const removed = await clearStoredKey();
+  if (removed) {
+    process.stdout.write(`Removed ${authFilePath()}\n`);
+  } else {
+    process.stdout.write(`No saved key found at ${authFilePath()}\n`);
+  }
+  if (process.env.DITTO_API_KEY) {
+    process.stderr.write(`note: DITTO_API_KEY is still set in your environment and will continue to be used.\n`);
+  }
+}
+
 async function cmdSave(rest: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
     args: rest,
@@ -88,21 +196,13 @@ async function cmdSave(rest: string[]): Promise<void> {
 }
 
 async function cmdSearch(rest: string[]): Promise<void> {
-  const { positionals } = parseArgs({
-    args: rest,
-    options: {},
-    allowPositionals: true,
-  });
+  const { positionals } = parseArgs({ args: rest, options: {}, allowPositionals: true });
   requirePositionals(positionals, 1, "search");
   await callAndPrint("search_memories", { queries: positionals });
 }
 
 async function cmdFetch(rest: string[]): Promise<void> {
-  const { positionals } = parseArgs({
-    args: rest,
-    options: {},
-    allowPositionals: true,
-  });
+  const { positionals } = parseArgs({ args: rest, options: {}, allowPositionals: true });
   requirePositionals(positionals, 1, "fetch");
   await callAndPrint("fetch_memories", { pairIds: positionals });
 }
@@ -110,9 +210,7 @@ async function cmdFetch(rest: string[]): Promise<void> {
 async function cmdSubjects(rest: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
     args: rest,
-    options: {
-      "top-k": { type: "string" },
-    },
+    options: { "top-k": { type: "string" } },
     allowPositionals: true,
   });
   requirePositionals(positionals, 1, "subjects");
@@ -126,11 +224,7 @@ async function cmdSubjects(rest: string[]): Promise<void> {
 }
 
 async function cmdMemories(rest: string[]): Promise<void> {
-  const { positionals } = parseArgs({
-    args: rest,
-    options: {},
-    allowPositionals: true,
-  });
+  const { positionals } = parseArgs({ args: rest, options: {}, allowPositionals: true });
   requirePositionals(positionals, 1, "memories");
   await callAndPrint("search_memories_in_subjects", { subjectIds: positionals });
 }
@@ -138,9 +232,7 @@ async function cmdMemories(rest: string[]): Promise<void> {
 async function cmdNetwork(rest: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
     args: rest,
-    options: {
-      limit: { type: "string" },
-    },
+    options: { limit: { type: "string" } },
     allowPositionals: true,
   });
   requirePositionals(positionals, 1, "network");
@@ -154,14 +246,14 @@ async function cmdNetwork(rest: string[]): Promise<void> {
 }
 
 async function cmdStatus(): Promise<void> {
-  const key = apiKey();
+  const { key, source } = await resolveApiKey();
   const lines = [
     `${packageName} ${packageVersion}`,
     `endpoint:  ${mcpServerURL()}`,
-    `api key:   ${key ? "set" : "MISSING (export DITTO_API_KEY)"}`,
+    `api key:   ${key ? "set" : "MISSING"}  (source: ${source})`,
   ];
   if (!key) {
-    lines.push(`new key:   ${newKeyURL()}`);
+    lines.push(``, `Get a key at ${newKeyURL()} and run 'ditto login <key>'.`);
     process.stdout.write(`${lines.join("\n")}\n`);
     process.exitCode = 1;
     return;
@@ -186,15 +278,10 @@ function cmdConfig(): void {
     mcpServers: {
       ditto: {
         url: mcpServerURL(),
-        headers: {
-          Authorization: "Bearer ${DITTO_API_KEY}",
-        },
+        headers: { Authorization: "Bearer ${DITTO_API_KEY}" },
       },
     },
-    notes: {
-      apiBase: apiBaseURL(),
-      newKey: newKeyURL(),
-    },
+    notes: { apiBase: apiBaseURL(), newKey: newKeyURL() },
   };
   process.stdout.write(`${JSON.stringify(config, null, 2)}\n`);
 }
@@ -222,6 +309,12 @@ async function main(): Promise<void> {
       return;
     case "network":
       await cmdNetwork(rest);
+      return;
+    case "login":
+      await cmdLogin(rest);
+      return;
+    case "logout":
+      await cmdLogout();
       return;
     case "status":
       await cmdStatus();
