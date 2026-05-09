@@ -19,6 +19,26 @@ npm install -g @heyditto/cli
 npx -y @heyditto/cli search "what did I say about X"
 ```
 
+The package installs two equivalent binaries: `ditto` and `heyditto`. They run the same CLI — use whichever you prefer.
+
+### macOS: name collision with Apple's `/usr/bin/ditto`
+
+On macOS, Apple ships `/usr/bin/ditto` (a file-copy utility). On a default `PATH` that puts `/usr/bin` ahead of `/opt/homebrew/bin`, plain `ditto` will run Apple's tool instead of this one — which produces confusing errors like `unrecognized option '--output'`.
+
+Two ways to disambiguate:
+
+```bash
+# 1. Use the alias bin shipped by this package:
+heyditto status
+
+# 2. Or check which 'ditto' binary your shell resolves first:
+type -a ditto
+# /usr/bin/ditto                    ← Apple's tool
+# /opt/homebrew/bin/ditto           ← @heyditto/cli (use this)
+```
+
+You can also reorder your `PATH` so the npm global bin comes before `/usr/bin`, or invoke `@heyditto/cli` directly via its full path.
+
 ## Auth
 
 Set `DITTO_API_KEY` in your environment. Get a key at **https://app.heyditto.ai/connect/openclaw**.
@@ -108,10 +128,16 @@ Print a Claude Desktop / Cursor / generic-MCP-client config snippet for the Ditt
 
 ## Output
 
-Defaults to JSON. Pipe through `jq` for filtering:
+Every data command and `status` accepts `--output <format>`, where `<format>` is one of:
+
+- `json` — guaranteed structured JSON (parses the server text block, re-emits pretty-printed JSON).
+- `text` — the server's text block as-is (the default; for data commands this is already JSON).
+- `markdown` — same as `text`; reserved for future markdown rendering.
+- `raw` — the full MCP response envelope as JSON.
 
 ```bash
-ditto search "X" | jq '.results[] | {id, similarity, preview: .userPreview}'
+ditto search "X" --output json | jq '.results[] | {id, similarity, preview: .userPreview}'
+ditto status --output json | jq '.tools'
 ```
 
 ## Related

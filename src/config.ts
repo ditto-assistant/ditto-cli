@@ -1,9 +1,13 @@
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { readStoredKey } from "./store.js";
 
-export const packageName = "@heyditto/cli";
-export const packageVersion = "1.0.0";
+const requirePkg = createRequire(import.meta.url);
+const pkg = requirePkg("../package.json") as { name: string; version: string };
+
+export const packageName = pkg.name;
+export const packageVersion = pkg.version;
 
 export function apiBaseURL(): string {
   return (process.env.DITTO_API_BASE || "https://api.heyditto.ai").replace(/\/+$/, "");

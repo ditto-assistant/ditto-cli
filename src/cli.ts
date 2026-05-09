@@ -5,6 +5,7 @@ import { parseArgs } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
+  type ApiKeySource,
   apiBaseURL,
   authFilePath,
   mcpServerURL,
@@ -14,6 +15,41 @@ import {
   resolveApiKey,
 } from "./config.js";
 import { clearStoredKey, writeStoredKey } from "./store.js";
+
+type OutputFormat = "json" | "text" | "markdown" | "raw";
+const OUTPUT_FORMATS: readonly OutputFormat[] = ["json", "text", "markdown", "raw"];
+const outputOption = { type: "string" } as const;
+
+function parseOutputFormat(value: string | undefined): OutputFormat {
+  if (!value) return "text";
+  if ((OUTPUT_FORMATS as readonly string[]).includes(value)) return value as OutputFormat;
+  throw new Error(`--output must be one of: ${OUTPUT_FORMATS.join(", ")}`);
+}
+
+function extractTextBlock(result: unknown): string | undefined {
+  const r = result as { content?: unknown };
+  if (!Array.isArray(r.content)) return undefined;
+  const block = r.content[0];
+  if (block && typeof block === "object" && "type" in block && (block as { type: unknown }).type === "text" && "text" in block) {
+    return String((block as { text: unknown }).text);
+  }
+  return undefined;
+}
+
+function formatToolResult(result: unknown, format: OutputFormat): string {
+  if (format === "raw") return JSON.stringify(result, null, 2);
+  const text = extractTextBlock(result);
+  if (format === "json") {
+    if (text === undefined) return JSON.stringify(result, null, 2);
+    try {
+      return JSON.stringify(JSON.parse(text), null, 2);
+    } catch {
+      return JSON.stringify({ text }, null, 2);
+    }
+  }
+  // text / markdown — pass the text block through; fall back to raw envelope.
+  return text ?? JSON.stringify(result, null, 2);
+}
 
 function usage(): string {
   return `${packageName} ${packageVersion}
@@ -26,14 +62,23 @@ Usage:
   ditto memories <subject-id>...
   ditto network <pair-id> [--limit <n>]
 
+All data commands (and 'status') accept --output <format>, where <format>
+is one of: json, text, markdown, raw. Default is 'text' (passthrough of
+the server's text block, which is JSON for data commands). Use --output json
+to guarantee structured JSON output suitable for piping into 'jq'.
+
 Auth:
   ditto login [<key>] [--paste] [--stdin]   Save an API key to ${authFilePath()}
   ditto logout                              Delete the saved key
-  ditto status                              Show endpoint, key source, live tools
+  ditto status [--output <format>]          Show endpoint, key source, live tools
   ditto config                              Print MCP client config snippet
 
 Other:
   ditto help                                Show this message
+
+Note: on macOS, Apple ships /usr/bin/ditto (a file-copy utility). If 'ditto'
+runs the wrong tool, install with 'npm i -g @heyditto/cli' and invoke as
+'heyditto' (alias bin), or check 'type -a ditto' to disambiguate.
 
 Environment:
   DITTO_API_KEY    Optional override (takes precedence over the saved key).
@@ -73,16 +118,15 @@ async function getClient(): Promise<Client> {
   return client;
 }
 
-async function callAndPrint(name: string, args: Record<string, unknown>): Promise<void> {
+async function callAndPrint(
+  name: string,
+  args: Record<string, unknown>,
+  format: OutputFormat,
+): Promise<void> {
   const client = await getClient();
   try {
     const result = await client.callTool({ name, arguments: args });
-    const block = Array.isArray(result.content) ? result.content[0] : undefined;
-    if (block && typeof block === "object" && "type" in block && block.type === "text" && "text" in block) {
-      process.stdout.write(`${block.text}\n`);
-    } else {
-      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-    }
+    process.stdout.write(`${formatToolResult(result, format)}\n`);
   } finally {
     await client.close();
   }
@@ -130,9 +174,11 @@ async function cmdLogin(rest: string[]): Promise<void> {
     options: {
       paste: { type: "boolean", default: false },
       stdin: { type: "boolean", default: false },
+      output: outputOption,
     },
     allowPositionals: true,
   });
+  parseOutputFormat(values.output); // validate but ignored — login is interactive
 
   let key = positionals[0]?.trim();
 
@@ -166,7 +212,13 @@ async function cmdLogin(rest: string[]): Promise<void> {
   process.stdout.write(`Run 'ditto status' to verify.\n`);
 }
 
-async function cmdLogout(): Promise<void> {
+async function cmdLogout(rest: string[]): Promise<void> {
+  const { values } = parseArgs({
+    args: rest,
+    options: { output: outputOption },
+    allowPositionals: true,
+  });
+  parseOutputFormat(values.output);
   const removed = await clearStoredKey();
   if (removed) {
     process.stdout.write(`Removed ${authFilePath()}\n`);
@@ -184,35 +236,52 @@ async function cmdSave(rest: string[]): Promise<void> {
     options: {
       source: { type: "string", default: "cli" },
       "source-context": { type: "string" },
+      output: outputOption,
     },
     allowPositionals: true,
   });
+  const format = parseOutputFormat(values.output);
   requirePositionals(positionals, 1, "save");
-  await callAndPrint("save_memory", {
-    content: positionals.join(" "),
-    source: values.source,
-    sourceContext: values["source-context"],
-  });
+  await callAndPrint(
+    "save_memory",
+    {
+      content: positionals.join(" "),
+      source: values.source,
+      sourceContext: values["source-context"],
+    },
+    format,
+  );
 }
 
 async function cmdSearch(rest: string[]): Promise<void> {
-  const { positionals } = parseArgs({ args: rest, options: {}, allowPositionals: true });
+  const { values, positionals } = parseArgs({
+    args: rest,
+    options: { output: outputOption },
+    allowPositionals: true,
+  });
+  const format = parseOutputFormat(values.output);
   requirePositionals(positionals, 1, "search");
-  await callAndPrint("search_memories", { queries: positionals });
+  await callAndPrint("search_memories", { queries: positionals }, format);
 }
 
 async function cmdFetch(rest: string[]): Promise<void> {
-  const { positionals } = parseArgs({ args: rest, options: {}, allowPositionals: true });
+  const { values, positionals } = parseArgs({
+    args: rest,
+    options: { output: outputOption },
+    allowPositionals: true,
+  });
+  const format = parseOutputFormat(values.output);
   requirePositionals(positionals, 1, "fetch");
-  await callAndPrint("fetch_memories", { pairIds: positionals });
+  await callAndPrint("fetch_memories", { pairIds: positionals }, format);
 }
 
 async function cmdSubjects(rest: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
     args: rest,
-    options: { "top-k": { type: "string" } },
+    options: { "top-k": { type: "string" }, output: outputOption },
     allowPositionals: true,
   });
+  const format = parseOutputFormat(values.output);
   requirePositionals(positionals, 1, "subjects");
   const args: Record<string, unknown> = { query: positionals.join(" ") };
   if (values["top-k"]) {
@@ -220,21 +289,27 @@ async function cmdSubjects(rest: string[]): Promise<void> {
     if (!Number.isFinite(n)) throw new Error("--top-k must be an integer");
     args.topK = n;
   }
-  await callAndPrint("search_subjects", args);
+  await callAndPrint("search_subjects", args, format);
 }
 
 async function cmdMemories(rest: string[]): Promise<void> {
-  const { positionals } = parseArgs({ args: rest, options: {}, allowPositionals: true });
+  const { values, positionals } = parseArgs({
+    args: rest,
+    options: { output: outputOption },
+    allowPositionals: true,
+  });
+  const format = parseOutputFormat(values.output);
   requirePositionals(positionals, 1, "memories");
-  await callAndPrint("search_memories_in_subjects", { subjectIds: positionals });
+  await callAndPrint("search_memories_in_subjects", { subjectIds: positionals }, format);
 }
 
 async function cmdNetwork(rest: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
     args: rest,
-    options: { limit: { type: "string" } },
+    options: { limit: { type: "string" }, output: outputOption },
     allowPositionals: true,
   });
+  const format = parseOutputFormat(values.output);
   requirePositionals(positionals, 1, "network");
   const args: Record<string, unknown> = { pairId: positionals[0] };
   if (values.limit) {
@@ -242,38 +317,79 @@ async function cmdNetwork(rest: string[]): Promise<void> {
     if (!Number.isFinite(n)) throw new Error("--limit must be an integer");
     args.limit = n;
   }
-  await callAndPrint("get_memory_network", args);
+  await callAndPrint("get_memory_network", args, format);
 }
 
-async function cmdStatus(): Promise<void> {
+interface StatusReport {
+  package: string;
+  version: string;
+  endpoint: string;
+  apiKey: { present: boolean; source: ApiKeySource };
+  tools?: string[];
+  connect?: { ok: boolean; error?: string };
+}
+
+async function cmdStatus(rest: string[]): Promise<void> {
+  const { values } = parseArgs({
+    args: rest,
+    options: { output: outputOption },
+    allowPositionals: true,
+  });
+  const format = parseOutputFormat(values.output);
+
   const { key, source } = await resolveApiKey();
-  const lines = [
-    `${packageName} ${packageVersion}`,
-    `endpoint:  ${mcpServerURL()}`,
-    `api key:   ${key ? "set" : "MISSING"}  (source: ${source})`,
-  ];
-  if (!key) {
-    lines.push(``, `Get a key at ${newKeyURL()} and run 'ditto login <key>'.`);
-    process.stdout.write(`${lines.join("\n")}\n`);
+  const report: StatusReport = {
+    package: packageName,
+    version: packageVersion,
+    endpoint: mcpServerURL(),
+    apiKey: { present: !!key, source },
+  };
+
+  if (key) {
+    try {
+      const client = await getClient();
+      try {
+        const tools = await client.listTools();
+        report.tools = tools.tools.map((t) => t.name);
+        report.connect = { ok: true };
+      } finally {
+        await client.close();
+      }
+    } catch (err) {
+      report.connect = { ok: false, error: err instanceof Error ? err.message : String(err) };
+      process.exitCode = 1;
+    }
+  } else {
     process.exitCode = 1;
+  }
+
+  if (format === "json" || format === "raw") {
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
     return;
   }
-  try {
-    const client = await getClient();
-    try {
-      const tools = await client.listTools();
-      lines.push(`tools:     ${tools.tools.map((t) => t.name).join(", ")}`);
-    } finally {
-      await client.close();
-    }
-  } catch (err) {
-    lines.push(`connect:   FAILED — ${err instanceof Error ? err.message : String(err)}`);
-    process.exitCode = 1;
+
+  const lines = [
+    `${report.package} ${report.version}`,
+    `endpoint:  ${report.endpoint}`,
+    `api key:   ${report.apiKey.present ? "set" : "MISSING"}  (source: ${report.apiKey.source})`,
+  ];
+  if (!report.apiKey.present) {
+    lines.push(``, `Get a key at ${newKeyURL()} and run 'ditto login <key>'.`);
+  } else if (report.tools) {
+    lines.push(`tools:     ${report.tools.join(", ")}`);
+  } else if (report.connect && !report.connect.ok) {
+    lines.push(`connect:   FAILED — ${report.connect.error}`);
   }
   process.stdout.write(`${lines.join("\n")}\n`);
 }
 
-function cmdConfig(): void {
+function cmdConfig(rest: string[]): void {
+  const { values } = parseArgs({
+    args: rest,
+    options: { output: outputOption },
+    allowPositionals: true,
+  });
+  parseOutputFormat(values.output); // accepted; output is always JSON
   const config = {
     mcpServers: {
       ditto: {
@@ -314,13 +430,13 @@ async function main(): Promise<void> {
       await cmdLogin(rest);
       return;
     case "logout":
-      await cmdLogout();
+      await cmdLogout(rest);
       return;
     case "status":
-      await cmdStatus();
+      await cmdStatus(rest);
       return;
     case "config":
-      cmdConfig();
+      cmdConfig(rest);
       return;
     case undefined:
     case "help":
