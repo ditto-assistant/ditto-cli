@@ -4,7 +4,7 @@
 
 ```bash
 npm install -g @heyditto/cli
-export DITTO_API_KEY=ditto_mcp_…   # https://app.heyditto.ai/connect/openclaw
+export DITTO_API_KEY=ditto_mcp_…   # https://app.heyditto.ai/mcp/newkey
 
 ditto save "I prefer TypeScript over JS for new projects"
 ditto search "language preferences"
@@ -41,7 +41,7 @@ You can also reorder your `PATH` so the npm global bin comes before `/usr/bin`, 
 
 ## Auth
 
-Set `DITTO_API_KEY` in your environment. Get a key at **https://app.heyditto.ai/connect/openclaw**.
+Set `DITTO_API_KEY` in your environment. Get a key at **https://app.heyditto.ai/mcp/newkey**.
 
 ```bash
 export DITTO_API_KEY=ditto_mcp_…
@@ -123,7 +123,7 @@ Print a Claude Desktop / Cursor / generic-MCP-client config snippet for the Ditt
 
 ## Environment
 
-- `DITTO_API_KEY` (required) — MCP API key. https://app.heyditto.ai/connect/openclaw
+- `DITTO_API_KEY` (required) — MCP API key. https://app.heyditto.ai/mcp/newkey
 - `DITTO_API_BASE` (optional) — API base URL. Defaults to `https://api.heyditto.ai`. Useful for local dev (`http://localhost:3400`).
 
 ## Output
