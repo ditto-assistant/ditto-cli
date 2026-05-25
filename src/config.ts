@@ -32,7 +32,7 @@ export function newKeyURL(): string {
 }
 
 export function agentSignupURL(): string {
-  return `${apiBaseURL()}/api/v2/agents/signup`;
+  return `${apiBaseURL()}/api/v5/agents/signup`;
 }
 
 export type ApiKeySource = "env" | "config" | "none";
