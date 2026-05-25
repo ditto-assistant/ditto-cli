@@ -204,7 +204,7 @@ just build       # tsc to dist/
 just verify      # check + build + pack --dry-run
 ```
 
-Releases are automated via [semantic-release](https://github.com/semantic-release/semantic-release) on push to `main`. npm provenance is enabled — every published version is signed by the GitHub Actions OIDC identity. Trusted publishing is configured at the npm registry.
+Releases are automated via [semantic-release](https://github.com/semantic-release/semantic-release) on push to `main`. npm provenance is enabled — every published version is signed by the GitHub Actions OIDC identity. Trusted publishing is configured at the npm registry. The published package version is computed from git tags and conventional commits during the release job; source manifests are not committed back to `main`.
 
 ## License
 

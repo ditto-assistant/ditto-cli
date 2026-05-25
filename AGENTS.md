@@ -30,9 +30,9 @@ Rebase merging is allowed but only if every individual commit on the branch is c
 
 ## Versions are computed, never edited
 
-- Do NOT edit `package.json` `version` manually. It is bumped automatically on each release by semantic-release and committed back to `main` via `@semantic-release/git` as `chore(release): X.Y.Z [skip ci]`. Any manual edit will be overwritten.
+- Do NOT edit `package.json` `version` manually. semantic-release computes the package version during release; source manifests stay on the last committed version so branch protection does not block publishing.
 - Do NOT run `npm version` or manually create release tags.
-- semantic-release computes the next version from git tags + commit messages, bumps `package.json` (and `package-lock.json`), builds via `prepack: npm run build`, publishes to npm with provenance, creates a GitHub release, and commits the bumped manifests back to `main`.
+- semantic-release computes the next version from git tags + commit messages, writes it into the release workspace, builds via `prepack: npm run build`, publishes to npm with provenance, creates a GitHub release, and tags the release.
 - The runtime version is read from `package.json` at startup (see `createRequire` in `src/config.ts`), so the installed CLI always reports the correct published version.
 
 ## Local development
