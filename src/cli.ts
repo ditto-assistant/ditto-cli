@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -20,10 +21,42 @@ type OutputFormat = "json" | "text" | "markdown" | "raw";
 const OUTPUT_FORMATS: readonly OutputFormat[] = ["json", "text", "markdown", "raw"];
 const outputOption = { type: "string" } as const;
 
+type MemoryFormat = "full" | "outline" | "blocks";
+const MEMORY_FORMATS: readonly MemoryFormat[] = ["full", "outline", "blocks"];
+
 function parseOutputFormat(value: string | undefined): OutputFormat {
   if (!value) return "text";
   if ((OUTPUT_FORMATS as readonly string[]).includes(value)) return value as OutputFormat;
   throw new Error(`--output must be one of: ${OUTPUT_FORMATS.join(", ")}`);
+}
+
+function parseMemoryFormat(value: string | undefined): MemoryFormat {
+  if (!value) return "full";
+  if ((MEMORY_FORMATS as readonly string[]).includes(value)) return value as MemoryFormat;
+  throw new Error(`--memory-format must be one of: ${MEMORY_FORMATS.join(", ")}`);
+}
+
+function parseIntegerOption(value: string | undefined, name: string): number | undefined {
+  if (!value) return undefined;
+  const n = Number.parseInt(value, 10);
+  if (!Number.isFinite(n)) throw new Error(`${name} must be an integer`);
+  return n;
+}
+
+function parseJSONOption(value: string, name: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch (err) {
+    throw new Error(`${name} must be valid JSON: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+async function readTextFile(path: string, name: string): Promise<string> {
+  try {
+    return await readFile(path, "utf-8");
+  } catch (err) {
+    throw new Error(`failed to read ${name} at ${path}: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 function extractTextBlock(result: unknown): string | undefined {
@@ -56,10 +89,16 @@ function usage(): string {
 
 Usage:
   ditto save <content> [--source <s>] [--source-context <c>]
-  ditto search <query>...
-  ditto fetch <pair-id>...
+  ditto search <query>... [--include-public] [--filter-username <u>]
+  ditto fetch <id>... [--memory-format full|outline|blocks]
+  ditto list [--username <u>] [--limit <n>] [--offset <n>] [--source <s>]
+  ditto update <id> [--content <text>|--content-file <path>] [--title <t>]
+               [--source-context <c>] [--edits-json <json>|--edits-file <path>]
+               [--base-revision <n>]
+  ditto publish <id> [--title <t>] [--privacy-mode scan_and_block|scan_and_warn|scan_and_redact]
+  ditto unpublish (--memory-id <id>|--share-id <id>|<id>)
   ditto subjects <query> [--top-k <n>]
-  ditto memories <subject-id>...
+  ditto memories <subject-id>... [--query <q>]
   ditto network <pair-id> [--limit <n>]
 
 All data commands (and 'status') accept --output <format>, where <format>
@@ -256,23 +295,147 @@ async function cmdSave(rest: string[]): Promise<void> {
 async function cmdSearch(rest: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
     args: rest,
-    options: { output: outputOption },
+    options: {
+      "include-public": { type: "boolean", default: false },
+      "filter-username": { type: "string" },
+      output: outputOption,
+    },
     allowPositionals: true,
   });
   const format = parseOutputFormat(values.output);
   requirePositionals(positionals, 1, "search");
-  await callAndPrint("search_memories", { queries: positionals }, format);
+  const args: Record<string, unknown> = { queries: positionals };
+  if (values["include-public"]) args.includePublic = true;
+  if (values["filter-username"]) args.filterUsername = values["filter-username"];
+  await callAndPrint("search_memories", args, format);
 }
 
 async function cmdFetch(rest: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
     args: rest,
-    options: { output: outputOption },
+    options: { "memory-format": { type: "string" }, output: outputOption },
     allowPositionals: true,
   });
   const format = parseOutputFormat(values.output);
+  const memoryFormat = parseMemoryFormat(values["memory-format"]);
   requirePositionals(positionals, 1, "fetch");
-  await callAndPrint("fetch_memories", { pairIds: positionals }, format);
+  await callAndPrint("fetch_memories", { ids: positionals, format: memoryFormat }, format);
+}
+
+async function cmdList(rest: string[]): Promise<void> {
+  const { values } = parseArgs({
+    args: rest,
+    options: {
+      username: { type: "string" },
+      limit: { type: "string" },
+      offset: { type: "string" },
+      source: { type: "string" },
+      output: outputOption,
+    },
+    allowPositionals: true,
+  });
+  const format = parseOutputFormat(values.output);
+  const args: Record<string, unknown> = {};
+  if (values.username) args.username = values.username;
+  const limit = parseIntegerOption(values.limit, "--limit");
+  if (limit !== undefined) args.limit = limit;
+  const offset = parseIntegerOption(values.offset, "--offset");
+  if (offset !== undefined) args.offset = offset;
+  if (values.source) args.source = values.source;
+  await callAndPrint("list_memories", args, format);
+}
+
+async function cmdUpdate(rest: string[]): Promise<void> {
+  const { values, positionals } = parseArgs({
+    args: rest,
+    options: {
+      content: { type: "string" },
+      "content-file": { type: "string" },
+      title: { type: "string" },
+      "source-context": { type: "string" },
+      "edits-json": { type: "string" },
+      "edits-file": { type: "string" },
+      "base-revision": { type: "string" },
+      output: outputOption,
+    },
+    allowPositionals: true,
+  });
+  const format = parseOutputFormat(values.output);
+  requirePositionals(positionals, 1, "update");
+  if (values.content && values["content-file"]) {
+    throw new Error("update: use either --content or --content-file, not both");
+  }
+  if (values["edits-json"] && values["edits-file"]) {
+    throw new Error("update: use either --edits-json or --edits-file, not both");
+  }
+  if ((values.content || values["content-file"]) && (values["edits-json"] || values["edits-file"])) {
+    throw new Error("update: content replacement and block edits are mutually exclusive");
+  }
+
+  const args: Record<string, unknown> = { memoryId: positionals[0] };
+  if (values.content) args.content = values.content;
+  if (values["content-file"]) args.content = await readTextFile(values["content-file"], "--content-file");
+  if (values.title !== undefined) args.title = values.title;
+  if (values["source-context"] !== undefined) args.sourceContext = values["source-context"];
+
+  if (values["edits-json"] || values["edits-file"]) {
+    const raw = values["edits-json"] ?? (await readTextFile(values["edits-file"]!, "--edits-file"));
+    args.edits = parseJSONOption(raw, values["edits-json"] ? "--edits-json" : "--edits-file");
+    const baseRevision = parseIntegerOption(values["base-revision"], "--base-revision");
+    if (baseRevision === undefined) {
+      throw new Error("update: --base-revision is required with block edits");
+    }
+    args.baseRevision = baseRevision;
+  } else {
+    const baseRevision = parseIntegerOption(values["base-revision"], "--base-revision");
+    if (baseRevision !== undefined) args.baseRevision = baseRevision;
+  }
+
+  await callAndPrint("update_memory", args, format);
+}
+
+async function cmdPublish(rest: string[]): Promise<void> {
+  const { values, positionals } = parseArgs({
+    args: rest,
+    options: {
+      title: { type: "string" },
+      "privacy-mode": { type: "string" },
+      output: outputOption,
+    },
+    allowPositionals: true,
+  });
+  const format = parseOutputFormat(values.output);
+  requirePositionals(positionals, 1, "publish");
+  const args: Record<string, unknown> = { memoryId: positionals[0] };
+  if (values.title !== undefined) args.title = values.title;
+  if (values["privacy-mode"] !== undefined) args.privacyMode = values["privacy-mode"];
+  await callAndPrint("publish_memory", args, format);
+}
+
+async function cmdUnpublish(rest: string[]): Promise<void> {
+  const { values, positionals } = parseArgs({
+    args: rest,
+    options: {
+      "memory-id": { type: "string" },
+      "share-id": { type: "string" },
+      output: outputOption,
+    },
+    allowPositionals: true,
+  });
+  const format = parseOutputFormat(values.output);
+  const provided = [values["memory-id"], values["share-id"], positionals[0]].filter(Boolean);
+  if (provided.length !== 1) {
+    throw new Error("unpublish: provide exactly one of --memory-id, --share-id, or positional id");
+  }
+  const args: Record<string, unknown> = {};
+  if (values["memory-id"]) {
+    args.memoryId = values["memory-id"];
+  } else if (values["share-id"]) {
+    args.shareId = values["share-id"];
+  } else {
+    args.memoryId = positionals[0];
+  }
+  await callAndPrint("unpublish_memory", args, format);
 }
 
 async function cmdSubjects(rest: string[]): Promise<void> {
@@ -284,23 +447,22 @@ async function cmdSubjects(rest: string[]): Promise<void> {
   const format = parseOutputFormat(values.output);
   requirePositionals(positionals, 1, "subjects");
   const args: Record<string, unknown> = { query: positionals.join(" ") };
-  if (values["top-k"]) {
-    const n = Number.parseInt(values["top-k"], 10);
-    if (!Number.isFinite(n)) throw new Error("--top-k must be an integer");
-    args.topK = n;
-  }
+  const topK = parseIntegerOption(values["top-k"], "--top-k");
+  if (topK !== undefined) args.topK = topK;
   await callAndPrint("search_subjects", args, format);
 }
 
 async function cmdMemories(rest: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
     args: rest,
-    options: { output: outputOption },
+    options: { query: { type: "string" }, output: outputOption },
     allowPositionals: true,
   });
   const format = parseOutputFormat(values.output);
   requirePositionals(positionals, 1, "memories");
-  await callAndPrint("search_memories_in_subjects", { subjectIds: positionals }, format);
+  const args: Record<string, unknown> = { subjectIds: positionals };
+  if (values.query) args.query = values.query;
+  await callAndPrint("search_memories_in_subjects", args, format);
 }
 
 async function cmdNetwork(rest: string[]): Promise<void> {
@@ -312,11 +474,8 @@ async function cmdNetwork(rest: string[]): Promise<void> {
   const format = parseOutputFormat(values.output);
   requirePositionals(positionals, 1, "network");
   const args: Record<string, unknown> = { pairId: positionals[0] };
-  if (values.limit) {
-    const n = Number.parseInt(values.limit, 10);
-    if (!Number.isFinite(n)) throw new Error("--limit must be an integer");
-    args.limit = n;
-  }
+  const limit = parseIntegerOption(values.limit, "--limit");
+  if (limit !== undefined) args.limit = limit;
   await callAndPrint("get_memory_network", args, format);
 }
 
@@ -416,6 +575,18 @@ async function main(): Promise<void> {
       return;
     case "fetch":
       await cmdFetch(rest);
+      return;
+    case "list":
+      await cmdList(rest);
+      return;
+    case "update":
+      await cmdUpdate(rest);
+      return;
+    case "publish":
+      await cmdPublish(rest);
+      return;
+    case "unpublish":
+      await cmdUnpublish(rest);
       return;
     case "subjects":
       await cmdSubjects(rest);

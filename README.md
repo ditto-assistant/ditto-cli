@@ -8,6 +8,7 @@ export DITTO_API_KEY=ditto_mcp_…   # https://app.heyditto.ai/mcp/newkey
 
 ditto save "I prefer TypeScript over JS for new projects"
 ditto search "language preferences"
+ditto fetch <id> --memory-format outline
 ditto subjects "memory architecture" --top-k 5
 ```
 
@@ -52,10 +53,16 @@ export DITTO_API_KEY=ditto_mcp_…
 
 ```
 ditto save <content> [--source <s>] [--source-context <c>]
-ditto search <query>...
-ditto fetch <pair-id>...
+ditto search <query>... [--include-public] [--filter-username <u>]
+ditto fetch <id>... [--memory-format full|outline|blocks]
+ditto list [--username <u>] [--limit <n>] [--offset <n>] [--source <s>]
+ditto update <id> [--content <text>|--content-file <path>] [--title <t>]
+             [--source-context <c>] [--edits-json <json>|--edits-file <path>]
+             [--base-revision <n>]
+ditto publish <id> [--title <t>] [--privacy-mode <mode>]
+ditto unpublish (--memory-id <id>|--share-id <id>|<id>)
 ditto subjects <query> [--top-k <n>]
-ditto memories <subject-id>...
+ditto memories <subject-id>... [--query <q>]
 ditto network <pair-id> [--limit <n>]
 ditto status
 ditto config
@@ -74,18 +81,59 @@ ditto save "$(cat note.md)" --source document --source-context note.md
 ### `search`
 
 Semantic search across memories. Multiple positional args become an array of queries.
+Use `--include-public` to also search public DittoHub memories, optionally scoped
+with `--filter-username <u>`.
 
 ```bash
 ditto search "typescript preferences"
 ditto search "typescript" "language choices"
+ditto search "launch notes" --include-public --filter-username peyton
 ```
 
 ### `fetch`
 
-Fetch the full conversation text for memory pair ids (output of `search`).
+Fetch memory content for private pair ids or public share ids. The default
+`--memory-format full` returns the full body. Use `outline` to get stable block
+ids before a structured `update`, or `blocks` when you need each block body.
 
 ```bash
 ditto fetch 3a1084ae-235a-433d-9493-2335a0dfeb57
+ditto fetch 3a1084ae-235a-433d-9493-2335a0dfeb57 --memory-format outline --output json
+```
+
+### `list`
+
+List saved memories, or public DittoHub publishes for a username.
+
+```bash
+ditto list --limit 10
+ditto list --username peyton --limit 10 --output json
+```
+
+### `update`
+
+Edit a saved memory in place. Replace the full body with `--content` or
+`--content-file`, or use block edits after fetching `--memory-format outline`.
+Block edits require the current revision returned by `save` or a previous
+`update`.
+
+```bash
+ditto update <memory-id> --content-file revised.md --output json
+ditto fetch <memory-id> --memory-format outline --output json
+ditto update <memory-id> \
+  --edits-json '[{"op":"replace_text","blockId":"2","find":"old","replace":"new","expectedCount":1}]' \
+  --base-revision 3 \
+  --output json
+```
+
+### `publish` / `unpublish`
+
+Publish a saved memory to the user's public DittoHub profile, or disable an
+existing share without deleting the private memory.
+
+```bash
+ditto publish <memory-id> --title "Launch notes" --privacy-mode scan_and_block --output json
+ditto unpublish --share-id abc123def4 --output json
 ```
 
 ### `subjects`
@@ -103,6 +151,7 @@ Fetch memory previews scoped to specific subjects.
 
 ```bash
 ditto memories <subject-id>
+ditto memories <subject-id> --query "deployment tradeoffs"
 ```
 
 ### `network`
