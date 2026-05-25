@@ -7,6 +7,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
   type ApiKeySource,
+  agentSignupURL,
   apiBaseURL,
   authFilePath,
   mcpServerURL,
@@ -15,7 +16,7 @@ import {
   packageVersion,
   resolveApiKey,
 } from "./config.js";
-import { clearStoredKey, writeStoredKey } from "./store.js";
+import { clearStoredKey, readStoredAuth, writeStoredAuth, writeStoredKey } from "./store.js";
 
 type OutputFormat = "json" | "text" | "markdown" | "raw";
 const OUTPUT_FORMATS: readonly OutputFormat[] = ["json", "text", "markdown", "raw"];
@@ -100,6 +101,7 @@ Usage:
   ditto subjects <query> [--top-k <n>]
   ditto memories <subject-id>... [--query <q>]
   ditto network <pair-id> [--limit <n>]
+  ditto init --agent [--agent-caller <name>] [--json]
 
 All data commands (and 'status') accept --output <format>, where <format>
 is one of: json, text, markdown, raw. Default is 'text' (passthrough of
@@ -107,6 +109,7 @@ the server's text block, which is JSON for data commands). Use --output json
 to guarantee structured JSON output suitable for piping into 'jq'.
 
 Auth:
+  ditto init --agent [--json]                 Create a free, claimable agent account
   ditto login [<key>] [--paste] [--stdin]   Save an API key to ${authFilePath()}
   ditto logout                              Delete the saved key
   ditto status [--output <format>]          Show endpoint, key source, live tools
@@ -121,7 +124,8 @@ runs the wrong tool, install with 'npm i -g @heyditto/cli' and invoke as
 
 Environment:
   DITTO_API_KEY    Optional override (takes precedence over the saved key).
-                   Get one at ${newKeyURL()}.
+                   Run 'ditto init --agent --json' for no-human setup, or get
+                   a human-owned key at ${newKeyURL()}.
   DITTO_API_BASE   Optional. Defaults to https://api.heyditto.ai.
   DITTO_CONFIG_DIR Optional. Defaults to $XDG_CONFIG_HOME/heyditto/cli or
                    ~/.config/heyditto/cli.
@@ -133,9 +137,9 @@ async function getClient(): Promise<Client> {
   if (!key) {
     process.stderr.write(
       `error: no Ditto API key configured.\n\n` +
-        `  1. Get a key at ${newKeyURL()}\n` +
-        `  2. Save it with: ditto login <key>\n` +
-        `     (or export DITTO_API_KEY=ditto_mcp_…)\n`,
+        `  Run: ditto init --agent --json\n` +
+        `  Or save an existing key with: ditto login <key>\n` +
+        `  Human-owned keys are available at ${newKeyURL()}.\n`,
     );
     process.exit(1);
   }
@@ -249,6 +253,113 @@ async function cmdLogin(rest: string[]): Promise<void> {
     );
   }
   process.stdout.write(`Run 'ditto status' to verify.\n`);
+}
+
+interface AgentSignupResponse {
+  accountID: string;
+  userID: string;
+  apiKeyID: number;
+  apiKey: string;
+  agentCaller?: string;
+  claimURL: string;
+  status: "unclaimed";
+  createdAt: string;
+}
+
+function defaultAgentCaller(): string {
+  return process.env.DITTO_AGENT_CALLER?.trim() || process.env.CURSOR_AGENT?.trim() || "agent";
+}
+
+async function cmdInit(rest: string[]): Promise<void> {
+  const { values } = parseArgs({
+    args: rest,
+    options: {
+      agent: { type: "boolean", default: false },
+      "agent-caller": { type: "string" },
+      json: { type: "boolean", default: false },
+      output: outputOption,
+    },
+    allowPositionals: true,
+  });
+  const output = values.json ? "json" : parseOutputFormat(values.output);
+  if (!values.agent) {
+    throw new Error("init currently supports only --agent");
+  }
+
+  const stored = await readStoredAuth();
+  if (stored?.apiKey && stored.agentMode) {
+    const existing = {
+      created: false,
+      accountID: stored.agentAccountID,
+      userID: stored.agentUserID,
+      apiKey: stored.apiKey,
+      agentCaller: stored.agentCaller,
+      claimURL: stored.claimURL,
+      status: "configured",
+      configPath: authFilePath(),
+    };
+    if (output === "json" || output === "raw") {
+      process.stdout.write(`${JSON.stringify(existing, null, 2)}\n`);
+    } else {
+      process.stdout.write(`Agent account already configured at ${authFilePath()}\n`);
+      if (stored.claimURL) process.stdout.write(`Claim later: ${stored.claimURL}\n`);
+    }
+    return;
+  }
+  if (stored?.apiKey) {
+    throw new Error(`a Ditto API key is already saved at ${authFilePath()}; run 'ditto logout' before creating an agent account`);
+  }
+
+  const agentCaller = values["agent-caller"]?.trim() || defaultAgentCaller();
+  const response = await fetch(agentSignupURL(), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "User-Agent": `${packageName}/${packageVersion}`,
+    },
+    body: JSON.stringify({
+      agentCaller,
+      metadata: {
+        package: packageName,
+        version: packageVersion,
+        platform: process.platform,
+        arch: process.arch,
+      },
+    }),
+  });
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new Error(`agent signup failed: HTTP ${response.status}${body ? ` - ${body}` : ""}`);
+  }
+  const signup = (await response.json()) as AgentSignupResponse;
+  await writeStoredAuth({
+    apiKey: signup.apiKey,
+    agentMode: true,
+    agentAccountID: signup.accountID,
+    agentUserID: signup.userID,
+    agentCaller: signup.agentCaller || agentCaller,
+    claimURL: signup.claimURL,
+    createdAt: signup.createdAt,
+  });
+
+  const result = {
+    created: true,
+    accountID: signup.accountID,
+    userID: signup.userID,
+    apiKeyID: signup.apiKeyID,
+    apiKey: signup.apiKey,
+    agentCaller: signup.agentCaller || agentCaller,
+    claimURL: signup.claimURL,
+    status: signup.status,
+    configPath: authFilePath(),
+  };
+  if (output === "json" || output === "raw") {
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
+  process.stdout.write(`Created agent account ${signup.userID}\n`);
+  process.stdout.write(`Saved key to ${authFilePath()}\n`);
+  process.stdout.write(`Claim later: ${signup.claimURL}\n`);
 }
 
 async function cmdLogout(rest: string[]): Promise<void> {
@@ -484,6 +595,13 @@ interface StatusReport {
   version: string;
   endpoint: string;
   apiKey: { present: boolean; source: ApiKeySource };
+  agent?: {
+    enabled: boolean;
+    accountID?: string;
+    userID?: string;
+    caller?: string;
+    claimURL?: string;
+  };
   tools?: string[];
   connect?: { ok: boolean; error?: string };
 }
@@ -496,13 +614,22 @@ async function cmdStatus(rest: string[]): Promise<void> {
   });
   const format = parseOutputFormat(values.output);
 
-  const { key, source } = await resolveApiKey();
+  const [{ key, source }, stored] = await Promise.all([resolveApiKey(), readStoredAuth()]);
   const report: StatusReport = {
     package: packageName,
     version: packageVersion,
     endpoint: mcpServerURL(),
     apiKey: { present: !!key, source },
   };
+  if (source === "config" && stored?.agentMode) {
+    report.agent = {
+      enabled: true,
+      accountID: stored.agentAccountID,
+      userID: stored.agentUserID,
+      caller: stored.agentCaller,
+      claimURL: stored.claimURL,
+    };
+  }
 
   if (key) {
     try {
@@ -533,11 +660,14 @@ async function cmdStatus(rest: string[]): Promise<void> {
     `api key:   ${report.apiKey.present ? "set" : "MISSING"}  (source: ${report.apiKey.source})`,
   ];
   if (!report.apiKey.present) {
-    lines.push(``, `Get a key at ${newKeyURL()} and run 'ditto login <key>'.`);
+    lines.push(``, `Run 'ditto init --agent --json' for no-human setup, or get a key at ${newKeyURL()} and run 'ditto login <key>'.`);
   } else if (report.tools) {
     lines.push(`tools:     ${report.tools.join(", ")}`);
   } else if (report.connect && !report.connect.ok) {
     lines.push(`connect:   FAILED — ${report.connect.error}`);
+  }
+  if (report.agent?.claimURL) {
+    lines.push(`agent:     unclaimed (${report.agent.caller || "agent"})`, `claim:     ${report.agent.claimURL}`);
   }
   process.stdout.write(`${lines.join("\n")}\n`);
 }
@@ -567,6 +697,9 @@ async function main(): Promise<void> {
   const rest = argv.slice(1);
 
   switch (command) {
+    case "init":
+      await cmdInit(rest);
+      return;
     case "save":
       await cmdSave(rest);
       return;

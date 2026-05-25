@@ -4,7 +4,7 @@
 
 ```bash
 npm install -g @heyditto/cli
-export DITTO_API_KEY=ditto_mcp_…   # https://app.heyditto.ai/mcp/newkey
+ditto init --agent --json
 
 ditto save "I prefer TypeScript over JS for new projects"
 ditto search "language preferences"
@@ -42,7 +42,18 @@ You can also reorder your `PATH` so the npm global bin comes before `/usr/bin`, 
 
 ## Auth
 
-Set `DITTO_API_KEY` in your environment. Get a key at **https://app.heyditto.ai/mcp/newkey**.
+Agents can self-provision without a browser, email, or OTP:
+
+```bash
+ditto init --agent --json
+```
+
+The command creates a free claimable agent account, stores the key in
+`~/.config/heyditto/cli/config.json`, and prints the agent key plus a claim URL.
+Humans claim the account later from `claimURL`; agents should share that link,
+not the `ditto_mcp_...` API key.
+
+For a human-owned key, get one at **https://app.heyditto.ai/mcp/newkey**.
 
 ```bash
 export DITTO_API_KEY=ditto_mcp_…
@@ -64,6 +75,7 @@ ditto unpublish (--memory-id <id>|--share-id <id>|<id>)
 ditto subjects <query> [--top-k <n>]
 ditto memories <subject-id>... [--query <q>]
 ditto network <pair-id> [--limit <n>]
+ditto init --agent [--agent-caller <name>] [--json]
 ditto status
 ditto config
 ditto help
@@ -166,13 +178,19 @@ ditto network <pair-id> --limit 30
 
 Print whether `DITTO_API_KEY` is set and the configured MCP endpoint resolves.
 
+### `init --agent`
+
+Create a free claimable agent account and save its key locally. Use `--json` for
+machine-readable output that includes `apiKey`, `userID`, and `claimURL`.
+Share `claimURL` with the human owner; keep `apiKey` local to the agent.
+
 ### `config`
 
 Print a Claude Desktop / Cursor / generic-MCP-client config snippet for the Ditto memory server.
 
 ## Environment
 
-- `DITTO_API_KEY` (required) — MCP API key. https://app.heyditto.ai/mcp/newkey
+- `DITTO_API_KEY` (optional) — MCP API key override. Agents can instead run `ditto init --agent --json` for no-human setup.
 - `DITTO_API_BASE` (optional) — API base URL. Defaults to `https://api.heyditto.ai`. Useful for local dev (`http://localhost:3400`).
 
 ## Output
