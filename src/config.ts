@@ -31,6 +31,10 @@ export function newKeyURL(): string {
   return "https://app.heyditto.ai/mcp/newkey";
 }
 
+export function agentSignupURL(): string {
+  return `${apiBaseURL()}/api/v5/agents/signup`;
+}
+
 export type ApiKeySource = "env" | "config" | "none";
 
 export interface ResolvedKey {
