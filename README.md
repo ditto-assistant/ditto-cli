@@ -69,10 +69,8 @@ init without `--agent-caller`, the name defaults to `agent` and every memory is
 labeled `agent` — generic and hard to tell apart from other agents.
 
 So: use the agent's own name, or a name the user has already chosen, and set it
-up front. Renaming after init is not yet supported from the CLI (it currently
-requires backend support — see
-[ditto-assistant/backend#1199](https://github.com/ditto-assistant/backend/issues/1199)),
-so picking the right name at init avoids a stuck label.
+up front. Renaming after init is not yet supported from the CLI, so picking the
+right name at init avoids a stuck label.
 
 For a human-owned key, get one at **https://app.heyditto.ai/mcp/newkey**.
 
