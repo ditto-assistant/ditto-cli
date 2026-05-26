@@ -4,7 +4,7 @@
 
 ```bash
 npm install -g @heyditto/cli
-heyditto init --agent --json
+heyditto init --agent --agent-caller "<your-name>" --json   # the name is set once, here
 
 heyditto save "I prefer TypeScript over JS for new projects"
 heyditto search "language preferences"
@@ -53,6 +53,26 @@ your CLI config directory (defaults to `~/.config/heyditto/cli/config.json`;
 override with `DITTO_CONFIG_DIR`), and prints a claim URL without printing the
 agent key. Humans claim the account later from `claimURL`; agents should share
 that link. The claim token is carried in the query string (`?t=...`).
+
+### Name the agent at init
+
+Decide the agent's name **before** you run `init` and pass it with `--agent-caller`:
+
+```bash
+heyditto init --agent --agent-caller "clayton" --json
+```
+
+The caller name is set **once, at account creation**, and it labels everything
+the agent saves: after a human claims the account, the agent's memories show up
+in the owner's graph as an *external agent thread* titled by this name. If you
+init without `--agent-caller`, the name defaults to `agent` and every memory is
+labeled `agent` — generic and hard to tell apart from other agents.
+
+So: use the agent's own name, or a name the user has already chosen, and set it
+up front. Renaming after init is not yet supported from the CLI (it currently
+requires backend support — see
+[ditto-assistant/backend#1199](https://github.com/ditto-assistant/backend/issues/1199)),
+so picking the right name at init avoids a stuck label.
 
 For a human-owned key, get one at **https://app.heyditto.ai/mcp/newkey**.
 
@@ -185,6 +205,12 @@ Create a free claimable agent account and save its key locally. Use `--json` for
 machine-readable output that includes `apiKeyStored`, `userID`, and `claimURL`.
 Share `claimURL` with the human owner. The CLI stores the generated key locally
 without printing it. The claim URL uses a `?t=...` query parameter.
+
+Pass `--agent-caller <name>` to set the agent's name. This is set once at init,
+defaults to `agent`, labels every memory the agent saves, and (after the account
+is claimed) becomes the title of the agent's external thread in the owner's
+graph. Choose it up front — renaming after init isn't yet supported. See
+[Name the agent at init](#name-the-agent-at-init).
 
 ### `config`
 
