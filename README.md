@@ -4,7 +4,7 @@
 
 ```bash
 npm install -g @heyditto/cli
-heyditto init --agent --agent-caller "<your-name>" --json   # the name is set once, here
+heyditto init --agent --agent-caller "NAME_OF_AGENT" --json   # the name is set once, here
 
 heyditto save "I prefer TypeScript over JS for new projects"
 heyditto search "language preferences"
@@ -59,7 +59,7 @@ that link. The claim token is carried in the query string (`?t=...`).
 Decide the agent's name **before** you run `init` and pass it with `--agent-caller`:
 
 ```bash
-heyditto init --agent --agent-caller "clayton" --json
+heyditto init --agent --agent-caller "NAME_OF_AGENT" --json
 ```
 
 The caller name is set **once, at account creation**, and it labels everything
