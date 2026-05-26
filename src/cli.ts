@@ -89,19 +89,19 @@ function usage(): string {
   return `${packageName} ${packageVersion}
 
 Usage:
-  ditto save <content> [--source <s>] [--source-context <c>]
-  ditto search <query>... [--include-public] [--filter-username <u>]
-  ditto fetch <id>... [--memory-format full|outline|blocks]
-  ditto list [--username <u>] [--limit <n>] [--offset <n>] [--source <s>]
-  ditto update <id> [--content <text>|--content-file <path>] [--title <t>]
+  heyditto save <content> [--source <s>] [--source-context <c>]
+  heyditto search <query>... [--include-public] [--filter-username <u>]
+  heyditto fetch <id>... [--memory-format full|outline|blocks]
+  heyditto list [--username <u>] [--limit <n>] [--offset <n>] [--source <s>]
+  heyditto update <id> [--content <text>|--content-file <path>] [--title <t>]
                [--source-context <c>] [--edits-json <json>|--edits-file <path>]
                [--base-revision <n>]
-  ditto publish <id> [--title <t>] [--privacy-mode scan_and_block|scan_and_warn|scan_and_redact]
-  ditto unpublish (--memory-id <id>|--share-id <id>|<id>)
-  ditto subjects <query> [--top-k <n>]
-  ditto memories <subject-id>... [--query <q>]
-  ditto network <pair-id> [--limit <n>]
-  ditto init --agent [--agent-caller <name>] [--json]
+  heyditto publish <id> [--title <t>] [--privacy-mode scan_and_block|scan_and_warn|scan_and_redact]
+  heyditto unpublish (--memory-id <id>|--share-id <id>|<id>)
+  heyditto subjects <query> [--top-k <n>]
+  heyditto memories <subject-id>... [--query <q>]
+  heyditto network <pair-id> [--limit <n>]
+  heyditto init --agent [--agent-caller <name>] [--json]
 
 All data commands (and 'status') accept --output <format>, where <format>
 is one of: json, text, markdown, raw. Default is 'text' (passthrough of
@@ -109,14 +109,14 @@ the server's text block, which is JSON for data commands). Use --output json
 to guarantee structured JSON output suitable for piping into 'jq'.
 
 Auth:
-  ditto init --agent [--json]                 Create a free, claimable agent account
-  ditto login [<key>] [--paste] [--stdin]   Save an API key to ${authFilePath()}
-  ditto logout                              Delete the saved key
-  ditto status [--output <format>]          Show endpoint, key source, live tools
-  ditto config                              Print MCP client config snippet
+  heyditto init --agent [--json]                 Create a free, claimable agent account
+  heyditto login [<key>] [--paste] [--stdin]   Save an API key to ${authFilePath()}
+  heyditto logout                              Delete the saved key
+  heyditto status [--output <format>]          Show endpoint, key source, live tools
+  heyditto config                              Print MCP client config snippet
 
 Other:
-  ditto help                                Show this message
+  heyditto help                                Show this message
 
 Note: on macOS, Apple ships /usr/bin/ditto (a file-copy utility). If 'ditto'
 runs the wrong tool, install with 'npm i -g @heyditto/cli' and invoke as
@@ -124,7 +124,7 @@ runs the wrong tool, install with 'npm i -g @heyditto/cli' and invoke as
 
 Environment:
   DITTO_API_KEY    Optional override (takes precedence over the saved key).
-                   Run 'ditto init --agent --json' for no-human setup, or get
+                   Run 'heyditto init --agent --json' for no-human setup, or get
                    a human-owned key at ${newKeyURL()}.
   DITTO_API_BASE   Optional. Defaults to https://api.heyditto.ai.
   DITTO_CONFIG_DIR Optional. Defaults to $XDG_CONFIG_HOME/heyditto/cli or
@@ -137,8 +137,8 @@ async function getClient(): Promise<Client> {
   if (!key) {
     process.stderr.write(
       `error: no Ditto API key configured.\n\n` +
-        `  Run: ditto init --agent --json\n` +
-        `  Or save an existing key with: ditto login <key>\n` +
+        `  Run: heyditto init --agent --json\n` +
+        `  Or save an existing key with: heyditto login <key>\n` +
         `  Human-owned keys are available at ${newKeyURL()}.\n`,
     );
     process.exit(1);
@@ -252,7 +252,7 @@ async function cmdLogin(rest: string[]): Promise<void> {
       `note: DITTO_API_KEY is set in your environment and will override the saved key for this session.\n`,
     );
   }
-  process.stdout.write(`Run 'ditto status' to verify.\n`);
+  process.stdout.write(`Run 'heyditto status' to verify.\n`);
 }
 
 interface AgentSignupResponse {
@@ -307,7 +307,7 @@ async function cmdInit(rest: string[]): Promise<void> {
     return;
   }
   if (stored?.apiKey) {
-    throw new Error(`a Ditto API key is already saved at ${authFilePath()}; run 'ditto logout' before creating an agent account`);
+    throw new Error(`a Ditto API key is already saved at ${authFilePath()}; run 'heyditto logout' before creating an agent account`);
   }
 
   const agentCaller = values["agent-caller"]?.trim() || defaultAgentCaller();
@@ -331,7 +331,19 @@ async function cmdInit(rest: string[]): Promise<void> {
     const body = await response.text().catch(() => "");
     throw new Error(`agent signup failed: HTTP ${response.status}${body ? ` - ${body}` : ""}`);
   }
-  const signup = (await response.json()) as AgentSignupResponse;
+  const signupRaw = (await response.json()) as Partial<AgentSignupResponse>;
+  if (
+    typeof signupRaw.accountID !== "string" ||
+    typeof signupRaw.userID !== "string" ||
+    typeof signupRaw.apiKeyID !== "number" ||
+    typeof signupRaw.apiKey !== "string" ||
+    typeof signupRaw.claimURL !== "string" ||
+    signupRaw.status !== "unclaimed" ||
+    typeof signupRaw.createdAt !== "string"
+  ) {
+    throw new Error("agent signup failed: invalid response payload");
+  }
+  const signup: AgentSignupResponse = signupRaw as AgentSignupResponse;
   await writeStoredAuth({
     apiKey: signup.apiKey,
     agentMode: true,
@@ -660,7 +672,7 @@ async function cmdStatus(rest: string[]): Promise<void> {
     `api key:   ${report.apiKey.present ? "set" : "MISSING"}  (source: ${report.apiKey.source})`,
   ];
   if (!report.apiKey.present) {
-    lines.push(``, `Run 'ditto init --agent --json' for no-human setup, or get a key at ${newKeyURL()} and run 'ditto login <key>'.`);
+    lines.push(``, `Run 'heyditto init --agent --json' for no-human setup, or get a key at ${newKeyURL()} and run 'heyditto login <key>'.`);
   } else if (report.tools) {
     lines.push(`tools:     ${report.tools.join(", ")}`);
   } else if (report.connect && !report.connect.ok) {
