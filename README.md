@@ -50,10 +50,9 @@ heyditto init --agent --json
 
 The command creates a free claimable agent account, stores the key in
 your CLI config directory (defaults to `~/.config/heyditto/cli/config.json`;
-override with `DITTO_CONFIG_DIR`), and prints the agent key plus a claim URL.
-Humans claim the account later from `claimURL`; agents should share that link,
-not the `ditto_mcp_...` API key. The claim token is carried in the query string
-(`?t=...`).
+override with `DITTO_CONFIG_DIR`), and prints a claim URL without printing the
+agent key. Humans claim the account later from `claimURL`; agents should share
+that link. The claim token is carried in the query string (`?t=...`).
 
 For a human-owned key, get one at **https://app.heyditto.ai/mcp/newkey**.
 
@@ -183,9 +182,9 @@ Print whether `DITTO_API_KEY` is set and the configured MCP endpoint resolves.
 ### `init --agent`
 
 Create a free claimable agent account and save its key locally. Use `--json` for
-machine-readable output that includes `apiKey`, `userID`, and `claimURL`.
-Share `claimURL` with the human owner; keep `apiKey` local to the agent. The
-claim URL uses a `?t=...` query parameter.
+machine-readable output that includes `apiKeyStored`, `userID`, and `claimURL`.
+Share `claimURL` with the human owner. The CLI stores the generated key locally
+without printing it. The claim URL uses a `?t=...` query parameter.
 
 ### `config`
 
