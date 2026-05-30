@@ -10,6 +10,8 @@ export interface StoredAuth {
   agentCaller?: string;
   claimURL?: string;
   createdAt?: string;
+  readonly?: boolean;
+  readScope?: string;
 }
 
 export async function readStoredAuth(): Promise<StoredAuth | undefined> {

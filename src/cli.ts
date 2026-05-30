@@ -101,7 +101,8 @@ Usage:
   heyditto subjects <query> [--top-k <n>]
   heyditto memories <subject-id>... [--query <q>]
   heyditto network <pair-id> [--limit <n>]
-  heyditto init --agent [--agent-caller <name>] [--json]
+  heyditto init --agent [--agent-caller <name>] [--readonly]
+               [--read-scope all|restricted] [--json]
 
 All data commands (and 'status') accept --output <format>, where <format>
 is one of: json, text, markdown, raw. Default is 'text' (passthrough of
@@ -109,7 +110,9 @@ the server's text block, which is JSON for data commands). Use --output json
 to guarantee structured JSON output suitable for piping into 'jq'.
 
 Auth:
-  heyditto init --agent [--json]                 Create a free, claimable agent account
+  heyditto init --agent [--readonly] [--json]    Create a free, claimable agent account
+                                               (--readonly mints a read-only agent;
+                                                --read-scope all|restricted limits reads)
   heyditto login [<key>] [--paste] [--stdin]   Save an API key to ${authFilePath()}
   heyditto logout                              Delete the saved key
   heyditto status [--output <format>]          Show endpoint, key source, live tools
@@ -264,6 +267,17 @@ interface AgentSignupResponse {
   claimURL: string;
   status: "unclaimed";
   createdAt: string;
+  readonly?: boolean;
+  readScope?: string;
+}
+
+type ReadScope = "all" | "restricted";
+const READ_SCOPES: readonly ReadScope[] = ["all", "restricted"];
+
+function parseReadScope(value: string | undefined): ReadScope | undefined {
+  if (!value) return undefined;
+  if ((READ_SCOPES as readonly string[]).includes(value)) return value as ReadScope;
+  throw new Error(`--read-scope must be one of: ${READ_SCOPES.join(", ")}`);
 }
 
 function defaultAgentCaller(): string {
@@ -276,6 +290,8 @@ async function cmdInit(rest: string[]): Promise<void> {
     options: {
       agent: { type: "boolean", default: false },
       "agent-caller": { type: "string" },
+      readonly: { type: "boolean", default: false },
+      "read-scope": { type: "string" },
       json: { type: "boolean", default: false },
       output: outputOption,
     },
@@ -285,6 +301,7 @@ async function cmdInit(rest: string[]): Promise<void> {
   if (!values.agent) {
     throw new Error("init currently supports only --agent");
   }
+  const readScope = parseReadScope(values["read-scope"]);
 
   const stored = await readStoredAuth();
   if (stored?.apiKey && stored.agentMode) {
@@ -296,6 +313,8 @@ async function cmdInit(rest: string[]): Promise<void> {
       agentCaller: stored.agentCaller,
       claimURL: stored.claimURL,
       status: "configured",
+      readonly: stored.readonly,
+      readScope: stored.readScope,
       configPath: authFilePath(),
     };
     if (output === "json" || output === "raw") {
@@ -311,21 +330,24 @@ async function cmdInit(rest: string[]): Promise<void> {
   }
 
   const agentCaller = values["agent-caller"]?.trim() || defaultAgentCaller();
+  const signupBody: Record<string, unknown> = {
+    agentCaller,
+    metadata: {
+      package: packageName,
+      version: packageVersion,
+      platform: process.platform,
+      arch: process.arch,
+    },
+  };
+  if (values.readonly) signupBody.readonly = true;
+  if (readScope) signupBody.readScope = readScope;
   const response = await fetch(agentSignupURL(), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "User-Agent": `${packageName}/${packageVersion}`,
     },
-    body: JSON.stringify({
-      agentCaller,
-      metadata: {
-        package: packageName,
-        version: packageVersion,
-        platform: process.platform,
-        arch: process.arch,
-      },
-    }),
+    body: JSON.stringify(signupBody),
   });
   if (!response.ok) {
     const body = await response.text().catch(() => "");
@@ -344,6 +366,8 @@ async function cmdInit(rest: string[]): Promise<void> {
     throw new Error("agent signup failed: invalid response payload");
   }
   const signup: AgentSignupResponse = signupRaw as AgentSignupResponse;
+  const effectiveReadonly = typeof signup.readonly === "boolean" ? signup.readonly : values.readonly;
+  const effectiveReadScope = signup.readScope ?? readScope;
   await writeStoredAuth({
     apiKey: signup.apiKey,
     agentMode: true,
@@ -352,6 +376,8 @@ async function cmdInit(rest: string[]): Promise<void> {
     agentCaller: signup.agentCaller || agentCaller,
     claimURL: signup.claimURL,
     createdAt: signup.createdAt,
+    readonly: effectiveReadonly,
+    readScope: effectiveReadScope,
   });
 
   const result = {
@@ -363,6 +389,8 @@ async function cmdInit(rest: string[]): Promise<void> {
     agentCaller: signup.agentCaller || agentCaller,
     claimURL: signup.claimURL,
     status: signup.status,
+    readonly: effectiveReadonly,
+    readScope: effectiveReadScope,
     configPath: authFilePath(),
   };
   if (output === "json" || output === "raw") {
@@ -370,6 +398,8 @@ async function cmdInit(rest: string[]): Promise<void> {
     return;
   }
   process.stdout.write(`Created agent account ${signup.userID}\n`);
+  if (effectiveReadonly) process.stdout.write(`Mode: read-only\n`);
+  if (effectiveReadScope) process.stdout.write(`Read scope: ${effectiveReadScope}\n`);
   process.stdout.write(`Saved key to ${authFilePath()}\n`);
   process.stdout.write(`Claim later: ${signup.claimURL}\n`);
 }
@@ -613,6 +643,8 @@ interface StatusReport {
     userID?: string;
     caller?: string;
     claimURL?: string;
+    readonly?: boolean;
+    readScope?: string;
   };
   tools?: string[];
   connect?: { ok: boolean; error?: string };
@@ -640,6 +672,8 @@ async function cmdStatus(rest: string[]): Promise<void> {
       userID: stored.agentUserID,
       caller: stored.agentCaller,
       claimURL: stored.claimURL,
+      readonly: stored.readonly,
+      readScope: stored.readScope,
     };
   }
 
@@ -677,6 +711,12 @@ async function cmdStatus(rest: string[]): Promise<void> {
     lines.push(`tools:     ${report.tools.join(", ")}`);
   } else if (report.connect && !report.connect.ok) {
     lines.push(`connect:   FAILED — ${report.connect.error}`);
+  }
+  if (report.agent?.readonly) {
+    lines.push(`mode:      read-only`);
+  }
+  if (report.agent?.readScope) {
+    lines.push(`readScope: ${report.agent.readScope}`);
   }
   if (report.agent?.claimURL) {
     lines.push(`agent:     unclaimed (${report.agent.caller || "agent"})`, `claim:     ${report.agent.claimURL}`);
