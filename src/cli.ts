@@ -615,6 +615,7 @@ interface StatusReport {
     claimURL?: string;
   };
   tools?: string[];
+  toolsError?: string;
   connect?: { ok: boolean; error?: string };
 }
 
@@ -647,9 +648,16 @@ async function cmdStatus(rest: string[]): Promise<void> {
     try {
       const client = await getClient();
       try {
-        const tools = await client.listTools();
-        report.tools = tools.tools.map((t) => t.name);
+        // The initialize handshake inside getClient() succeeded, so the
+        // connection is healthy. tools/list is a separate probe that may fail
+        // (e.g. the server returns an empty body) without the account being unusable.
         report.connect = { ok: true };
+        try {
+          const tools = await client.listTools();
+          report.tools = tools.tools.map((t) => t.name);
+        } catch (err) {
+          report.toolsError = err instanceof Error ? err.message : String(err);
+        }
       } finally {
         await client.close();
       }
@@ -675,6 +683,8 @@ async function cmdStatus(rest: string[]): Promise<void> {
     lines.push(``, `Run 'heyditto init --agent --json' for no-human setup, or get a key at ${newKeyURL()} and run 'heyditto login <key>'.`);
   } else if (report.tools) {
     lines.push(`tools:     ${report.tools.join(", ")}`);
+  } else if (report.toolsError) {
+    lines.push(`connect:   ok`, `tools:     unavailable (tools/list failed: ${report.toolsError})`);
   } else if (report.connect && !report.connect.ok) {
     lines.push(`connect:   FAILED — ${report.connect.error}`);
   }
