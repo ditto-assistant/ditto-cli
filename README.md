@@ -204,7 +204,7 @@ cover **other** users' public graphs by `@username` — this command can't touch
 your own graph or an app's graph, since those aren't subscriptions.
 
 ```bash
-heyditto graphs create feedback-triager  # NEW dedicated graph + a key scoped to it
+heyditto graphs create feedback-triager  # create a NEW dedicated graph you own (mint its CI key in the Ditto UI)
 heyditto graphs list              # graphs you're subscribed to
 heyditto graphs add @minos        # subscribe to @minos's public graph
 heyditto graphs remove @minos     # unsubscribe

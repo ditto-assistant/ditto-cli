@@ -101,7 +101,7 @@ Usage:
   heyditto subjects <query> [--top-k <n>]
   heyditto memories <subject-id>... [--query <q>]
   heyditto network <pair-id> [--limit <n>]
-  heyditto graphs create <name>                Create a dedicated graph + scoped key
+  heyditto graphs create <name>                Create a dedicated graph you own
   heyditto graphs list                         Public graphs you're subscribed to
   heyditto graphs add <@username>              Subscribe to a public graph
   heyditto graphs remove <@username>           Unsubscribe from a public graph
