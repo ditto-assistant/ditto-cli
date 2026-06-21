@@ -96,7 +96,7 @@ heyditto unpublish (--memory-id <id>|--share-id <id>|<id>)
 heyditto subjects <query> [--top-k <n>]
 heyditto memories <subject-id>... [--query <q>]
 heyditto network <pair-id> [--limit <n>]
-heyditto graphs list | add <@username> | remove <@username> | subscribers
+heyditto graphs create <name> | list | add <@username> | remove <@username> | subscribers
 heyditto init --agent [--agent-caller <name>] [--json]
 heyditto status
 heyditto config
@@ -204,6 +204,7 @@ cover **other** users' public graphs by `@username` — this command can't touch
 your own graph or an app's graph, since those aren't subscriptions.
 
 ```bash
+heyditto graphs create feedback-triager  # NEW dedicated graph + a key scoped to it
 heyditto graphs list              # graphs you're subscribed to
 heyditto graphs add @minos        # subscribe to @minos's public graph
 heyditto graphs remove @minos     # unsubscribe

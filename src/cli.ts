@@ -101,6 +101,7 @@ Usage:
   heyditto subjects <query> [--top-k <n>]
   heyditto memories <subject-id>... [--query <q>]
   heyditto network <pair-id> [--limit <n>]
+  heyditto graphs create <name>                Create a dedicated graph + scoped key
   heyditto graphs list                         Public graphs you're subscribed to
   heyditto graphs add <@username>              Subscribe to a public graph
   heyditto graphs remove <@username>           Unsubscribe from a public graph
@@ -725,6 +726,21 @@ async function cmdGraphs(rest: string[]): Promise<void> {
   const sub = rest[0];
   const subRest = rest.slice(1);
   switch (sub) {
+    case "create": {
+      // Provision a NEW dedicated graph you own + get a key scoped to only it.
+      const { values, positionals } = parseArgs({
+        args: subRest,
+        options: { output: outputOption },
+        allowPositionals: true,
+      });
+      requirePositionals(positionals, 1, "graphs create");
+      await callAndPrint(
+        "create_dedicated_graph",
+        { name: positionals.join(" ") },
+        parseOutputFormat(values.output),
+      );
+      return;
+    }
     case undefined:
     case "list": {
       const { values } = parseArgs({
@@ -782,7 +798,7 @@ async function cmdGraphs(rest: string[]): Promise<void> {
     }
     default:
       throw new Error(
-        `graphs: unknown subcommand "${sub}" (expected: list, add <@user>, remove <@user>, subscribers)`,
+        `graphs: unknown subcommand "${sub}" (expected: create <name>, list, add <@user>, remove <@user>, subscribers)`,
       );
   }
 }
