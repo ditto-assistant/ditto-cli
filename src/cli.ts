@@ -775,6 +775,11 @@ async function cmdGraphs(rest: string[]): Promise<void> {
         allowPositionals: true,
       });
       requirePositionals(positionals, 1, "graphs add");
+      if (positionals.length > 1) {
+        throw new Error(
+          `graphs add: expected exactly 1 username, got ${positionals.length}`,
+        );
+      }
       await callAndPrint(
         "subscribe_knowledge_graph",
         { username: positionals[0] },
@@ -789,6 +794,11 @@ async function cmdGraphs(rest: string[]): Promise<void> {
         allowPositionals: true,
       });
       requirePositionals(positionals, 1, "graphs remove");
+      if (positionals.length > 1) {
+        throw new Error(
+          `graphs remove: expected exactly 1 username, got ${positionals.length}`,
+        );
+      }
       await callAndPrint(
         "unsubscribe_knowledge_graph",
         { username: positionals[0] },
