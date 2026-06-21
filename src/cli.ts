@@ -101,6 +101,10 @@ Usage:
   heyditto subjects <query> [--top-k <n>]
   heyditto memories <subject-id>... [--query <q>]
   heyditto network <pair-id> [--limit <n>]
+  heyditto graphs list                         Public graphs you're subscribed to
+  heyditto graphs add <@username>              Subscribe to a public graph
+  heyditto graphs remove <@username>           Unsubscribe from a public graph
+  heyditto graphs subscribers                  Who is subscribed to your graph
   heyditto init --agent [--agent-caller <name>] [--json]
 
 All data commands (and 'status') accept --output <format>, where <format>
@@ -713,6 +717,76 @@ function cmdConfig(rest: string[]): void {
   process.stdout.write(`${JSON.stringify(config, null, 2)}\n`);
 }
 
+// cmdGraphs manages the public knowledge graphs this account is subscribed to,
+// mirroring the MCP subscription tools. Subscriptions only ever cover OTHER
+// users' public graphs (by @username); this command cannot touch the account's
+// own KG or its app KG, since those are not subscriptions.
+async function cmdGraphs(rest: string[]): Promise<void> {
+  const sub = rest[0];
+  const subRest = rest.slice(1);
+  switch (sub) {
+    case undefined:
+    case "list": {
+      const { values } = parseArgs({
+        args: subRest,
+        options: { output: outputOption },
+        allowPositionals: true,
+      });
+      await callAndPrint(
+        "list_knowledge_graph_subscriptions",
+        {},
+        parseOutputFormat(values.output),
+      );
+      return;
+    }
+    case "subscribers": {
+      const { values } = parseArgs({
+        args: subRest,
+        options: { output: outputOption },
+        allowPositionals: true,
+      });
+      await callAndPrint(
+        "list_knowledge_graph_subscribers",
+        {},
+        parseOutputFormat(values.output),
+      );
+      return;
+    }
+    case "add": {
+      const { values, positionals } = parseArgs({
+        args: subRest,
+        options: { output: outputOption },
+        allowPositionals: true,
+      });
+      requirePositionals(positionals, 1, "graphs add");
+      await callAndPrint(
+        "subscribe_knowledge_graph",
+        { username: positionals[0] },
+        parseOutputFormat(values.output),
+      );
+      return;
+    }
+    case "remove": {
+      const { values, positionals } = parseArgs({
+        args: subRest,
+        options: { output: outputOption },
+        allowPositionals: true,
+      });
+      requirePositionals(positionals, 1, "graphs remove");
+      await callAndPrint(
+        "unsubscribe_knowledge_graph",
+        { username: positionals[0] },
+        parseOutputFormat(values.output),
+      );
+      return;
+    }
+    default:
+      throw new Error(
+        `graphs: unknown subcommand "${sub}" (expected: list, add <@user>, remove <@user>, subscribers)`,
+      );
+  }
+}
+
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   const command = argv[0];
@@ -751,6 +825,9 @@ async function main(): Promise<void> {
       return;
     case "network":
       await cmdNetwork(rest);
+      return;
+    case "graphs":
+      await cmdGraphs(rest);
       return;
     case "login":
       await cmdLogin(rest);

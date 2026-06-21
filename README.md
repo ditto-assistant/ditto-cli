@@ -96,6 +96,7 @@ heyditto unpublish (--memory-id <id>|--share-id <id>|<id>)
 heyditto subjects <query> [--top-k <n>]
 heyditto memories <subject-id>... [--query <q>]
 heyditto network <pair-id> [--limit <n>]
+heyditto graphs list | add <@username> | remove <@username> | subscribers
 heyditto init --agent [--agent-caller <name>] [--json]
 heyditto status
 heyditto config
@@ -193,6 +194,20 @@ Traverse a memory's network (related memories via shared subjects).
 
 ```bash
 heyditto network <pair-id> --limit 30
+```
+
+### `graphs`
+
+Manage the public knowledge graphs you're subscribed to. Subscribed graphs are
+folded into your `search`/`fetch` read paths (read-only). Subscriptions only ever
+cover **other** users' public graphs by `@username` — this command can't touch
+your own graph or an app's graph, since those aren't subscriptions.
+
+```bash
+heyditto graphs list              # graphs you're subscribed to
+heyditto graphs add @minos        # subscribe to @minos's public graph
+heyditto graphs remove @minos     # unsubscribe
+heyditto graphs subscribers       # who's subscribed to your graph
 ```
 
 ### `status`
