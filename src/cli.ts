@@ -1063,7 +1063,7 @@ your own graph or an app graph.`,
     .argument("[graph...]", "public graphs to subscribe to")
     .addOption(new Option("--agent", "create a free, claimable agent account").hideHelp())
     .option("--name <name>", "agent name")
-    .option("--agent-caller <name>", "agent name")
+    .addOption(new Option("--agent-caller <name>", "agent name").hideHelp())
     .addOption(
       new Option("--subscribe <graph>", "public graphs to subscribe to")
         .argParser((value, previous: string[] | undefined) => [...(previous ?? []), value]),
