@@ -81,6 +81,30 @@ interface NetworkOptions extends CommonOptions {
   limit?: string;
 }
 
+interface MyMemoriesOptions extends CommonOptions {
+  limit?: string;
+  offset?: string;
+  source?: string;
+}
+
+interface SubjectEdgesOptions extends CommonOptions {
+  kg?: string;
+  limit?: string;
+  minWeight?: string;
+}
+
+interface GraphSharingOptions extends CommonOptions {
+  enable?: boolean;
+  disable?: boolean;
+  title?: string;
+  description?: string;
+}
+
+interface DeleteOptions extends CommonOptions {
+  confirm?: boolean;
+  kg?: string;
+}
+
 interface InitOptions extends CommonOptions {
   agent?: boolean;
   agentCaller?: string;
@@ -125,6 +149,13 @@ function parseIntegerOption(value: string | undefined, name: string): number | u
   if (!value) return undefined;
   const n = Number.parseInt(value, 10);
   if (!Number.isFinite(n)) throw new Error(`${name} must be an integer`);
+  return n;
+}
+
+function parseNumberOption(value: string | undefined, name: string): number | undefined {
+  if (!value) return undefined;
+  const n = Number.parseFloat(value);
+  if (!Number.isFinite(n)) throw new Error(`${name} must be a number`);
   return n;
 }
 
@@ -557,6 +588,55 @@ async function cmdNetwork(pairId: string, options: NetworkOptions): Promise<void
   await callAndPrint("get_memory_network", args, format);
 }
 
+async function cmdFriends(options: CommonOptions): Promise<void> {
+  await callAndPrint("list_friends", {}, parseOutputFormat(options.output));
+}
+
+async function cmdKnowledgeGraphs(options: CommonOptions): Promise<void> {
+  await callAndPrint("list_knowledge_graphs", {}, parseOutputFormat(options.output));
+}
+
+async function cmdMyMemories(options: MyMemoriesOptions): Promise<void> {
+  const args: Record<string, unknown> = {};
+  const limit = parseIntegerOption(options.limit, "--limit");
+  if (limit !== undefined) args.limit = limit;
+  const offset = parseIntegerOption(options.offset, "--offset");
+  if (offset !== undefined) args.offset = offset;
+  if (options.source) args.source = options.source;
+  await callAndPrint("list_my_memories", args, parseOutputFormat(options.output));
+}
+
+async function cmdSubjectEdges(subjectId: string, options: SubjectEdgesOptions): Promise<void> {
+  const args: Record<string, unknown> = { subjectId };
+  if (options.kg) args.kg = options.kg;
+  const limit = parseIntegerOption(options.limit, "--limit");
+  if (limit !== undefined) args.limit = limit;
+  const minWeight = parseNumberOption(options.minWeight, "--min-weight");
+  if (minWeight !== undefined) args.minWeight = minWeight;
+  await callAndPrint("get_subject_edges", args, parseOutputFormat(options.output));
+}
+
+async function cmdGraphSharing(options: GraphSharingOptions): Promise<void> {
+  if (!!options.enable === !!options.disable) {
+    throw new Error("sharing: provide exactly one of --enable or --disable");
+  }
+  const args: Record<string, unknown> = {
+    publicSubscriptionsEnabled: !!options.enable,
+  };
+  if (options.title !== undefined) args.title = options.title;
+  if (options.description !== undefined) args.description = options.description;
+  await callAndPrint("set_knowledge_graph_sharing", args, parseOutputFormat(options.output));
+}
+
+async function cmdDelete(memoryId: string, options: DeleteOptions): Promise<void> {
+  if (!options.confirm) {
+    throw new Error("delete: pass --confirm to permanently delete this memory");
+  }
+  const args: Record<string, unknown> = { memoryId, confirm: true };
+  if (options.kg) args.kg = options.kg;
+  await callAndPrint("delete_memory", args, parseOutputFormat(options.output));
+}
+
 interface StatusReport {
   package: string;
   version: string;
@@ -779,6 +859,17 @@ Environment:
     .action(cmdList);
 
   program
+    .command("my-memories")
+    .alias("list_my_memories")
+    .description("list only your saved memories")
+    .summary("list only your saved memories")
+    .option("--limit <number>", "maximum number of results")
+    .option("--offset <number>", "result offset")
+    .option("--source <source>", "filter by memory source")
+    .addOption(outputOption())
+    .action(cmdMyMemories);
+
+  program
     .command("update")
     .description("update a saved memory")
     .summary("update a saved memory")
@@ -824,6 +915,17 @@ Examples:
     .action(cmdUnpublish);
 
   program
+    .command("delete")
+    .alias("delete_memory")
+    .description("permanently delete a saved memory")
+    .summary("permanently delete a saved memory")
+    .argument("<memory-id>", "memory id")
+    .requiredOption("--confirm", "confirm permanent deletion")
+    .option("--kg <alias>", "knowledge graph alias")
+    .addOption(outputOption())
+    .action(cmdDelete);
+
+  program
     .command("subjects")
     .description("search the subject graph")
     .summary("search the subject graph")
@@ -831,6 +933,18 @@ Examples:
     .option("--top-k <number>", "maximum number of subjects")
     .addOption(outputOption())
     .action(cmdSubjects);
+
+  program
+    .command("subject-edges")
+    .alias("get_subject_edges")
+    .description("list related subjects for a subject")
+    .summary("list related subjects for a subject")
+    .argument("<subject-id>", "subject id")
+    .option("--kg <alias>", "knowledge graph alias")
+    .option("--limit <number>", "maximum number of related subjects")
+    .option("--min-weight <number>", "minimum edge weight from 0 to 1")
+    .addOption(outputOption())
+    .action(cmdSubjectEdges);
 
   program
     .command("memories")
@@ -849,6 +963,34 @@ Examples:
     .option("--limit <number>", "maximum number of related memories")
     .addOption(outputOption())
     .action(cmdNetwork);
+
+  program
+    .command("friends")
+    .alias("list_friends")
+    .description("list Ditto friends")
+    .summary("list Ditto friends")
+    .addOption(outputOption())
+    .action(cmdFriends);
+
+  program
+    .command("knowledge-graphs")
+    .alias("list_knowledge_graphs")
+    .description("list readable knowledge graphs")
+    .summary("list readable knowledge graphs")
+    .addOption(outputOption())
+    .action(cmdKnowledgeGraphs);
+
+  program
+    .command("graph-sharing")
+    .alias("set_knowledge_graph_sharing")
+    .description("configure whether others can subscribe to your graph")
+    .summary("configure graph sharing")
+    .option("--enable", "allow public subscriptions to your graph")
+    .option("--disable", "disable public subscriptions to your graph")
+    .option("--title <title>", "subscribable graph title")
+    .option("--description <description>", "subscribable graph description")
+    .addOption(outputOption())
+    .action(cmdGraphSharing);
 
   const graphs = program
     .command("graphs")
@@ -876,6 +1018,13 @@ your own graph or an app graph.`,
     .action(cmdGraphsList);
 
   graphs
+    .command("available")
+    .alias("list_knowledge_graphs")
+    .description("list readable knowledge graphs")
+    .addOption(outputOption())
+    .action(cmdKnowledgeGraphs);
+
+  graphs
     .command("add")
     .description("subscribe to a public graph")
     .argument("<username>", "public graph username, with or without @")
@@ -894,6 +1043,17 @@ your own graph or an app graph.`,
     .description("list who is subscribed to your graph")
     .addOption(outputOption())
     .action(cmdGraphsSubscribers);
+
+  graphs
+    .command("sharing")
+    .alias("set_knowledge_graph_sharing")
+    .description("configure whether others can subscribe to your graph")
+    .option("--enable", "allow public subscriptions to your graph")
+    .option("--disable", "disable public subscriptions to your graph")
+    .option("--title <title>", "subscribable graph title")
+    .option("--description <description>", "subscribable graph description")
+    .addOption(outputOption())
+    .action(cmdGraphSharing);
 
   program
     .command("init")

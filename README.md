@@ -88,19 +88,27 @@ heyditto save <content> [--source <s>] [--source-context <c>]
 heyditto search <query>... [--include-public] [--filter-username <u>]
 heyditto fetch <id>... [--memory-format full|outline|blocks]
 heyditto list [--username <u>] [--limit <n>] [--offset <n>] [--source <s>]
+heyditto my-memories [--limit <n>] [--offset <n>] [--source <s>]
 heyditto update <id> [--content <text>|--content-file <path>] [--title <t>]
              [--source-context <c>] [--edits-json <json>|--edits-file <path>]
              [--base-revision <n>]
 heyditto publish <id> [--title <t>] [--privacy-mode <mode>]
 heyditto unpublish (--memory-id <id>|--share-id <id>|<id>)
+heyditto delete <memory-id> --confirm
 heyditto subjects <query> [--top-k <n>]
+heyditto subject-edges <subject-id> [--limit <n>] [--min-weight <n>] [--kg <alias>]
 heyditto memories <subject-id>... [--query <q>]
 heyditto network <pair-id> [--limit <n>]
+heyditto friends
+heyditto knowledge-graphs
+heyditto graph-sharing (--enable|--disable) [--title <t>] [--description <d>]
 heyditto graphs create <name>
 heyditto graphs list
+heyditto graphs available
 heyditto graphs add <@username>
 heyditto graphs remove <@username>
 heyditto graphs subscribers
+heyditto graphs sharing (--enable|--disable) [--title <t>] [--description <d>]
 heyditto init --agent [--agent-caller <name>] [--subscribe <@graph>] [<@graph>...] [--json]
 heyditto login [<key>] [--paste] [--stdin]
 heyditto logout
@@ -158,7 +166,12 @@ List saved memories, or public DittoHub publishes for a username.
 ```bash
 heyditto list --limit 10
 heyditto list --username peyton --limit 10 --output json
+heyditto my-memories --source cli --limit 10 --output json
 ```
+
+`my-memories` is the CLI wrapper for `list_my_memories`. It only lists your
+saved memories, while `list --username <u>` can switch to public DittoHub
+publishes for another user.
 
 ### `update`
 
@@ -183,6 +196,15 @@ heyditto publish <memory-id> --title "Launch notes" --privacy-mode scan_and_bloc
 heyditto unpublish --share-id abc123def4 --output json
 ```
 
+### `delete`
+
+Permanently delete a saved memory. This is destructive, so the CLI requires
+`--confirm`.
+
+```bash
+heyditto delete <memory-id> --confirm --output json
+```
+
 ### `subjects`
 
 Search the subject (topic) graph. Returns subject ids you can pass to `memories` or `network`.
@@ -190,7 +212,10 @@ Search the subject (topic) graph. Returns subject ids you can pass to `memories`
 ```bash
 heyditto subjects "memory architecture"
 heyditto subjects "performance" --top-k 5
+heyditto subject-edges <subject-id> --limit 10 --min-weight 0.5 --output json
 ```
+
+`subject-edges` is the CLI wrapper for `get_subject_edges`.
 
 ### `memories`
 
@@ -209,6 +234,14 @@ Traverse a memory's network (related memories via shared subjects).
 heyditto network <pair-id> --limit 30
 ```
 
+### `friends`
+
+List Ditto friends for commands that need usernames.
+
+```bash
+heyditto friends --output json
+```
+
 ### `graphs`
 
 Manage the public knowledge graphs you're subscribed to. Subscribed graphs are
@@ -219,9 +252,18 @@ your own graph or an app's graph, since those aren't subscriptions.
 ```bash
 heyditto graphs create feedback-triager  # create a NEW dedicated graph you own (mint its CI key in the Ditto UI)
 heyditto graphs list              # graphs you're subscribed to
+heyditto graphs available         # readable knowledge graphs, including main/app graphs
 heyditto graphs add @minos        # subscribe to @minos's public graph
 heyditto graphs remove @minos     # unsubscribe
 heyditto graphs subscribers       # who's subscribed to your graph
+heyditto graphs sharing --disable # disable public subscriptions to your graph
+```
+
+Top-level aliases are also available:
+
+```bash
+heyditto knowledge-graphs --output json
+heyditto graph-sharing --enable --title "Support Graph" --description "Public support notes"
 ```
 
 ### `status`

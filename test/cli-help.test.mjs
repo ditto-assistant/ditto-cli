@@ -80,6 +80,36 @@ test("graphs add --help prints subcommand help", () => {
   assert.match(result.stdout, /Usage: heyditto graphs add/);
 });
 
+test("new MCP-backed command help is exposed", () => {
+  const result = run(["--help"]);
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /friends\|list_friends/);
+  assert.match(result.stdout, /knowledge-graphs\|list_knowledge_graphs/);
+  assert.match(result.stdout, /my-memories\|list_my_memories/);
+  assert.match(result.stdout, /subject-edges\|get_subject_edges/);
+  assert.match(result.stdout, /graph-sharing\|set_knowledge_graph_sharing/);
+  assert.match(result.stdout, /delete\|delete_memory/);
+});
+
+test("graph sharing help exposes enable and disable", () => {
+  const result = run(["graph-sharing", "--help"]);
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /--enable/);
+  assert.match(result.stdout, /--disable/);
+});
+
+test("delete requires explicit confirmation before auth", () => {
+  const result = run(["delete", "memory-id"]);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /required option '--confirm'/);
+});
+
+test("graphs available help exposes readable graph listing", () => {
+  const result = run(["graphs", "available", "--help"]);
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /list readable knowledge graphs/);
+});
+
 test("--version prints package version", () => {
   const result = run(["--version"]);
   assert.equal(result.status, 0);
