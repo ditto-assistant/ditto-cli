@@ -106,7 +106,7 @@ Usage:
   heyditto graphs add <@username>              Subscribe to a public graph
   heyditto graphs remove <@username>           Unsubscribe from a public graph
   heyditto graphs subscribers                  Who is subscribed to your graph
-  heyditto init --agent [--agent-caller <name>] [--subscribe <@graph>] [--json]
+  heyditto init --agent [--agent-caller <name>] [--subscribe <@graph>] [<@graph>...] [--json]
 
 All data commands (and 'status') accept --output <format>, where <format>
 is one of: json, text, markdown, raw. Default is 'text' (passthrough of
@@ -116,7 +116,8 @@ to guarantee structured JSON output suitable for piping into 'jq'.
 Auth:
   heyditto init --agent [--json]                 Create a free, claimable agent account
   heyditto init --agent --subscribe @minos     ...pre-subscribed to public graph(s)
-                                               (repeatable / comma-separated)
+  heyditto init --agent @minos @a,@b           (positional form; repeatable /
+                                               comma-separated; '@' optional)
   heyditto login [<key>] [--paste] [--stdin]   Save an API key to ${authFilePath()}
   heyditto logout                              Delete the saved key
   heyditto status [--output <format>]          Show endpoint, key source, live tools
@@ -280,7 +281,7 @@ function defaultAgentCaller(): string {
 }
 
 async function cmdInit(rest: string[]): Promise<void> {
-  const { values } = parseArgs({
+  const { values, positionals } = parseArgs({
     args: rest,
     options: {
       agent: { type: "boolean", default: false },
@@ -297,10 +298,11 @@ async function cmdInit(rest: string[]): Promise<void> {
   }
   // --subscribe pre-subscribes the new agent to public foundation knowledge
   // graphs (e.g. the @minos mentor KG). Accepts repeats and comma-separated
-  // lists: --subscribe @minos --subscribe @a,@b. De-duped; '@' optional.
+  // lists, plus bare positional graph names: --subscribe @minos @a,@b.
+  // De-duped; '@' optional.
   const subscribeGraphs = Array.from(
     new Set(
-      (values.subscribe ?? [])
+      [...(values.subscribe ?? []), ...positionals]
         .flatMap((v) => v.split(","))
         .map((g) => g.trim().replace(/^@/, ""))
         .filter((g) => g.length > 0)
