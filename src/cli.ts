@@ -106,7 +106,7 @@ Usage:
   heyditto graphs add <@username>              Subscribe to a public graph
   heyditto graphs remove <@username>           Unsubscribe from a public graph
   heyditto graphs subscribers                  Who is subscribed to your graph
-  heyditto init --agent [--agent-caller <name>] [--json]
+  heyditto init --agent [--agent-caller <name>] [--subscribe <@graph>] [<@graph>...] [--json]
 
 All data commands (and 'status') accept --output <format>, where <format>
 is one of: json, text, markdown, raw. Default is 'text' (passthrough of
@@ -115,6 +115,9 @@ to guarantee structured JSON output suitable for piping into 'jq'.
 
 Auth:
   heyditto init --agent [--json]                 Create a free, claimable agent account
+  heyditto init --agent --subscribe @minos     ...pre-subscribed to public graph(s)
+  heyditto init --agent @minos @a,@b           (positional form; repeatable /
+                                               comma-separated; '@' optional)
   heyditto login [<key>] [--paste] [--stdin]   Save an API key to ${authFilePath()}
   heyditto logout                              Delete the saved key
   heyditto status [--output <format>]          Show endpoint, key source, live tools
@@ -269,6 +272,8 @@ interface AgentSignupResponse {
   claimURL: string;
   status: "unclaimed";
   createdAt: string;
+  subscribedGraphs?: string[];
+  failedGraphs?: string[];
 }
 
 function defaultAgentCaller(): string {
@@ -276,11 +281,12 @@ function defaultAgentCaller(): string {
 }
 
 async function cmdInit(rest: string[]): Promise<void> {
-  const { values } = parseArgs({
+  const { values, positionals } = parseArgs({
     args: rest,
     options: {
       agent: { type: "boolean", default: false },
       "agent-caller": { type: "string" },
+      subscribe: { type: "string", multiple: true },
       json: { type: "boolean", default: false },
       output: outputOption,
     },
@@ -290,6 +296,18 @@ async function cmdInit(rest: string[]): Promise<void> {
   if (!values.agent) {
     throw new Error("init currently supports only --agent");
   }
+  // --subscribe pre-subscribes the new agent to public foundation knowledge
+  // graphs (e.g. the @minos mentor KG). Accepts repeats and comma-separated
+  // lists, plus bare positional graph names: --subscribe @minos @a,@b.
+  // De-duped; '@' optional.
+  const subscribeGraphs = Array.from(
+    new Set(
+      [...(values.subscribe ?? []), ...positionals]
+        .flatMap((v) => v.split(","))
+        .map((g) => g.trim().replace(/^@/, ""))
+        .filter((g) => g.length > 0)
+    )
+  );
 
   const stored = await readStoredAuth();
   if (stored?.apiKey && stored.agentMode) {
@@ -324,6 +342,7 @@ async function cmdInit(rest: string[]): Promise<void> {
     },
     body: JSON.stringify({
       agentCaller,
+      ...(subscribeGraphs.length > 0 ? { subscribeGraphs } : {}),
       metadata: {
         package: packageName,
         version: packageVersion,
@@ -369,6 +388,12 @@ async function cmdInit(rest: string[]): Promise<void> {
     claimURL: signup.claimURL,
     status: signup.status,
     configPath: authFilePath(),
+    ...(subscribeGraphs.length > 0
+      ? {
+          subscribedGraphs: signup.subscribedGraphs ?? [],
+          failedGraphs: signup.failedGraphs ?? [],
+        }
+      : {}),
   };
   if (output === "json" || output === "raw") {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
@@ -376,6 +401,22 @@ async function cmdInit(rest: string[]): Promise<void> {
   }
   process.stdout.write(`Created agent account ${signup.userID}\n`);
   process.stdout.write(`Saved key to ${authFilePath()}\n`);
+  if (subscribeGraphs.length > 0) {
+    const subscribed = signup.subscribedGraphs ?? [];
+    const failed = signup.failedGraphs ?? [];
+    if (subscribed.length > 0) {
+      process.stdout.write(
+        `Subscribed to ${subscribed.map((g) => `@${g}`).join(", ")}\n`
+      );
+    }
+    if (failed.length > 0) {
+      process.stdout.write(
+        `Could not subscribe (not found or not public): ${failed
+          .map((g) => `@${g}`)
+          .join(", ")}\n`
+      );
+    }
+  }
   process.stdout.write(`Claim later: ${signup.claimURL}\n`);
 }
 
