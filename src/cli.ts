@@ -2,9 +2,9 @@
 import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
-import { parseArgs } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { Command, Option } from "commander";
 import {
   type ApiKeySource,
   agentSignupURL,
@@ -20,10 +20,118 @@ import { clearStoredKey, readStoredAuth, writeStoredAuth, writeStoredKey } from 
 
 type OutputFormat = "json" | "text" | "markdown" | "raw";
 const OUTPUT_FORMATS: readonly OutputFormat[] = ["json", "text", "markdown", "raw"];
-const outputOption = { type: "string" } as const;
 
 type MemoryFormat = "full" | "outline" | "blocks";
 const MEMORY_FORMATS: readonly MemoryFormat[] = ["full", "outline", "blocks"];
+
+interface CommonOptions {
+  output?: string;
+}
+
+interface SaveOptions extends CommonOptions {
+  source?: string;
+  sourceContext?: string;
+}
+
+interface SearchOptions extends CommonOptions {
+  includePublic?: boolean;
+  filterUsername?: string;
+}
+
+interface FetchOptions extends CommonOptions {
+  memoryFormat?: string;
+}
+
+interface ListOptions extends CommonOptions {
+  username?: string;
+  limit?: string;
+  offset?: string;
+  source?: string;
+}
+
+interface UpdateOptions extends CommonOptions {
+  content?: string;
+  contentFile?: string;
+  title?: string;
+  sourceContext?: string;
+  editsJson?: string;
+  editsFile?: string;
+  baseRevision?: string;
+}
+
+interface PublishOptions extends CommonOptions {
+  title?: string;
+  privacyMode?: string;
+}
+
+interface UnpublishOptions extends CommonOptions {
+  memoryId?: string;
+  shareId?: string;
+}
+
+interface SubjectsOptions extends CommonOptions {
+  topK?: string;
+}
+
+interface MemoriesOptions extends CommonOptions {
+  query?: string;
+}
+
+interface NetworkOptions extends CommonOptions {
+  limit?: string;
+}
+
+interface MyMemoriesOptions extends CommonOptions {
+  limit?: string;
+  offset?: string;
+  source?: string;
+}
+
+interface SubjectEdgesOptions extends CommonOptions {
+  kg?: string;
+  limit?: string;
+  minWeight?: string;
+}
+
+interface GraphSharingOptions extends CommonOptions {
+  enable?: boolean;
+  disable?: boolean;
+  title?: string;
+  description?: string;
+}
+
+interface DeleteOptions extends CommonOptions {
+  confirm?: boolean;
+  kg?: string;
+}
+
+interface InitOptions extends CommonOptions {
+  agent?: boolean;
+  agentCaller?: string;
+  subscribe?: string[];
+  json?: boolean;
+}
+
+interface LoginOptions extends CommonOptions {
+  paste?: boolean;
+  stdin?: boolean;
+}
+
+function outputOption(): Option {
+  return new Option("--output <format>", "output format")
+    .choices([...OUTPUT_FORMATS])
+    .default("text");
+}
+
+function hiddenOutputOption(): Option {
+  return outputOption().hideHelp();
+}
+
+function memoryFormatOption(): Option {
+  return new Option("--memory-format <format>", "memory body format")
+    .choices([...MEMORY_FORMATS])
+    .default("full");
+}
 
 function parseOutputFormat(value: string | undefined): OutputFormat {
   if (!value) return "text";
@@ -41,6 +149,13 @@ function parseIntegerOption(value: string | undefined, name: string): number | u
   if (!value) return undefined;
   const n = Number.parseInt(value, 10);
   if (!Number.isFinite(n)) throw new Error(`${name} must be an integer`);
+  return n;
+}
+
+function parseNumberOption(value: string | undefined, name: string): number | undefined {
+  if (!value) return undefined;
+  const n = Number.parseFloat(value);
+  if (!Number.isFinite(n)) throw new Error(`${name} must be a number`);
   return n;
 }
 
@@ -81,63 +196,8 @@ function formatToolResult(result: unknown, format: OutputFormat): string {
       return JSON.stringify({ text }, null, 2);
     }
   }
-  // text / markdown — pass the text block through; fall back to raw envelope.
+  // text / markdown: pass the text block through; fall back to raw envelope.
   return text ?? JSON.stringify(result, null, 2);
-}
-
-function usage(): string {
-  return `${packageName} ${packageVersion}
-
-Usage:
-  heyditto save <content> [--source <s>] [--source-context <c>]
-  heyditto search <query>... [--include-public] [--filter-username <u>]
-  heyditto fetch <id>... [--memory-format full|outline|blocks]
-  heyditto list [--username <u>] [--limit <n>] [--offset <n>] [--source <s>]
-  heyditto update <id> [--content <text>|--content-file <path>] [--title <t>]
-               [--source-context <c>] [--edits-json <json>|--edits-file <path>]
-               [--base-revision <n>]
-  heyditto publish <id> [--title <t>] [--privacy-mode scan_and_block|scan_and_warn|scan_and_redact]
-  heyditto unpublish (--memory-id <id>|--share-id <id>|<id>)
-  heyditto subjects <query> [--top-k <n>]
-  heyditto memories <subject-id>... [--query <q>]
-  heyditto network <pair-id> [--limit <n>]
-  heyditto graphs create <name>                Create a dedicated graph you own
-  heyditto graphs list                         Public graphs you're subscribed to
-  heyditto graphs add <@username>              Subscribe to a public graph
-  heyditto graphs remove <@username>           Unsubscribe from a public graph
-  heyditto graphs subscribers                  Who is subscribed to your graph
-  heyditto init --agent [--agent-caller <name>] [--subscribe <@graph>] [<@graph>...] [--json]
-
-All data commands (and 'status') accept --output <format>, where <format>
-is one of: json, text, markdown, raw. Default is 'text' (passthrough of
-the server's text block, which is JSON for data commands). Use --output json
-to guarantee structured JSON output suitable for piping into 'jq'.
-
-Auth:
-  heyditto init --agent [--json]                 Create a free, claimable agent account
-  heyditto init --agent --subscribe @minos     ...pre-subscribed to public graph(s)
-  heyditto init --agent @minos @a,@b           (positional form; repeatable /
-                                               comma-separated; '@' optional)
-  heyditto login [<key>] [--paste] [--stdin]   Save an API key to ${authFilePath()}
-  heyditto logout                              Delete the saved key
-  heyditto status [--output <format>]          Show endpoint, key source, live tools
-  heyditto config                              Print MCP client config snippet
-
-Other:
-  heyditto help                                Show this message
-
-Note: on macOS, Apple ships /usr/bin/ditto (a file-copy utility). If 'ditto'
-runs the wrong tool, install with 'npm i -g @heyditto/cli' and invoke as
-'heyditto' (alias bin), or check 'type -a ditto' to disambiguate.
-
-Environment:
-  DITTO_API_KEY    Optional override (takes precedence over the saved key).
-                   Run 'heyditto init --agent --json' for no-human setup, or get
-                   a human-owned key at ${newKeyURL()}.
-  DITTO_API_BASE   Optional. Defaults to https://api.heyditto.ai.
-  DITTO_CONFIG_DIR Optional. Defaults to $XDG_CONFIG_HOME/heyditto/cli or
-                   ~/.config/heyditto/cli.
-`;
 }
 
 async function getClient(): Promise<Client> {
@@ -183,12 +243,6 @@ async function callAndPrint(
   }
 }
 
-function requirePositionals(positionals: string[], minimum: number, label: string): void {
-  if (positionals.length < minimum) {
-    throw new Error(`${label}: expected at least ${minimum} argument(s), got ${positionals.length}`);
-  }
-}
-
 async function readKeyFromStdin(): Promise<string> {
   return new Promise((resolve, reject) => {
     let buf = "";
@@ -214,30 +268,21 @@ function openInBrowser(url: string): void {
   const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
   const child = spawn(cmd, args, { stdio: "ignore", detached: true });
   child.on("error", () => {
-    /* swallow — best-effort */
+    /* swallow: best-effort */
   });
   child.unref();
 }
 
-async function cmdLogin(rest: string[]): Promise<void> {
-  const { values, positionals } = parseArgs({
-    args: rest,
-    options: {
-      paste: { type: "boolean", default: false },
-      stdin: { type: "boolean", default: false },
-      output: outputOption,
-    },
-    allowPositionals: true,
-  });
-  parseOutputFormat(values.output); // validate but ignored — login is interactive
+async function cmdLogin(keyArg: string | undefined, options: LoginOptions): Promise<void> {
+  parseOutputFormat(options.output); // validate but ignored: login is interactive
 
-  let key = positionals[0]?.trim();
+  let key = keyArg?.trim();
 
-  if (!key && values.stdin) {
+  if (!key && options.stdin) {
     key = (await readKeyFromStdin()).trim();
   } else if (!key) {
-    if (values.paste) {
-      process.stderr.write(`Opening ${newKeyURL()} in your browser…\n`);
+    if (options.paste) {
+      process.stderr.write(`Opening ${newKeyURL()} in your browser...\n`);
       openInBrowser(newKeyURL());
     }
     if (!process.stdin.isTTY) {
@@ -250,7 +295,7 @@ async function cmdLogin(rest: string[]): Promise<void> {
 
   if (!key) throw new Error("no key provided");
   if (!key.startsWith("ditto_mcp_")) {
-    process.stderr.write(`warning: key does not start with "ditto_mcp_" — proceeding anyway\n`);
+    process.stderr.write(`warning: key does not start with "ditto_mcp_" - proceeding anyway\n`);
   }
 
   await writeStoredKey(key);
@@ -280,20 +325,9 @@ function defaultAgentCaller(): string {
   return process.env.DITTO_AGENT_CALLER?.trim() || process.env.CURSOR_AGENT?.trim() || "agent";
 }
 
-async function cmdInit(rest: string[]): Promise<void> {
-  const { values, positionals } = parseArgs({
-    args: rest,
-    options: {
-      agent: { type: "boolean", default: false },
-      "agent-caller": { type: "string" },
-      subscribe: { type: "string", multiple: true },
-      json: { type: "boolean", default: false },
-      output: outputOption,
-    },
-    allowPositionals: true,
-  });
-  const output = values.json ? "json" : parseOutputFormat(values.output);
-  if (!values.agent) {
+async function cmdInit(graphs: string[], options: InitOptions): Promise<void> {
+  const output = options.json ? "json" : parseOutputFormat(options.output);
+  if (!options.agent) {
     throw new Error("init currently supports only --agent");
   }
   // --subscribe pre-subscribes the new agent to public foundation knowledge
@@ -302,11 +336,11 @@ async function cmdInit(rest: string[]): Promise<void> {
   // De-duped; '@' optional.
   const subscribeGraphs = Array.from(
     new Set(
-      [...(values.subscribe ?? []), ...positionals]
+      [...(options.subscribe ?? []), ...graphs]
         .flatMap((v) => v.split(","))
         .map((g) => g.trim().replace(/^@/, ""))
-        .filter((g) => g.length > 0)
-    )
+        .filter((g) => g.length > 0),
+    ),
   );
 
   const stored = await readStoredAuth();
@@ -333,7 +367,7 @@ async function cmdInit(rest: string[]): Promise<void> {
     throw new Error(`a Ditto API key is already saved at ${authFilePath()}; run 'heyditto logout' before creating an agent account`);
   }
 
-  const agentCaller = values["agent-caller"]?.trim() || defaultAgentCaller();
+  const agentCaller = options.agentCaller?.trim() || defaultAgentCaller();
   const response = await fetch(agentSignupURL(), {
     method: "POST",
     headers: {
@@ -406,27 +440,22 @@ async function cmdInit(rest: string[]): Promise<void> {
     const failed = signup.failedGraphs ?? [];
     if (subscribed.length > 0) {
       process.stdout.write(
-        `Subscribed to ${subscribed.map((g) => `@${g}`).join(", ")}\n`
+        `Subscribed to ${subscribed.map((g) => `@${g}`).join(", ")}\n`,
       );
     }
     if (failed.length > 0) {
       process.stdout.write(
         `Could not subscribe (not found or not public): ${failed
           .map((g) => `@${g}`)
-          .join(", ")}\n`
+          .join(", ")}\n`,
       );
     }
   }
   process.stdout.write(`Claim later: ${signup.claimURL}\n`);
 }
 
-async function cmdLogout(rest: string[]): Promise<void> {
-  const { values } = parseArgs({
-    args: rest,
-    options: { output: outputOption },
-    allowPositionals: true,
-  });
-  parseOutputFormat(values.output);
+async function cmdLogout(options: CommonOptions): Promise<void> {
+  parseOutputFormat(options.output);
   const removed = await clearStoredKey();
   if (removed) {
     process.stdout.write(`Removed ${authFilePath()}\n`);
@@ -438,214 +467,174 @@ async function cmdLogout(rest: string[]): Promise<void> {
   }
 }
 
-async function cmdSave(rest: string[]): Promise<void> {
-  const { values, positionals } = parseArgs({
-    args: rest,
-    options: {
-      source: { type: "string", default: "cli" },
-      "source-context": { type: "string" },
-      output: outputOption,
-    },
-    allowPositionals: true,
-  });
-  const format = parseOutputFormat(values.output);
-  requirePositionals(positionals, 1, "save");
+async function cmdSave(content: string[], options: SaveOptions): Promise<void> {
+  const format = parseOutputFormat(options.output);
   await callAndPrint(
     "save_memory",
     {
-      content: positionals.join(" "),
-      source: values.source,
-      sourceContext: values["source-context"],
+      content: content.join(" "),
+      source: options.source ?? "cli",
+      sourceContext: options.sourceContext,
     },
     format,
   );
 }
 
-async function cmdSearch(rest: string[]): Promise<void> {
-  const { values, positionals } = parseArgs({
-    args: rest,
-    options: {
-      "include-public": { type: "boolean", default: false },
-      "filter-username": { type: "string" },
-      output: outputOption,
-    },
-    allowPositionals: true,
-  });
-  const format = parseOutputFormat(values.output);
-  requirePositionals(positionals, 1, "search");
-  const args: Record<string, unknown> = { queries: positionals };
-  if (values["include-public"]) args.includePublic = true;
-  if (values["filter-username"]) args.filterUsername = values["filter-username"];
+async function cmdSearch(queries: string[], options: SearchOptions): Promise<void> {
+  const format = parseOutputFormat(options.output);
+  const args: Record<string, unknown> = { queries };
+  if (options.includePublic) args.includePublic = true;
+  if (options.filterUsername) args.filterUsername = options.filterUsername;
   await callAndPrint("search_memories", args, format);
 }
 
-async function cmdFetch(rest: string[]): Promise<void> {
-  const { values, positionals } = parseArgs({
-    args: rest,
-    options: { "memory-format": { type: "string" }, output: outputOption },
-    allowPositionals: true,
-  });
-  const format = parseOutputFormat(values.output);
-  const memoryFormat = parseMemoryFormat(values["memory-format"]);
-  requirePositionals(positionals, 1, "fetch");
-  await callAndPrint("fetch_memories", { ids: positionals, format: memoryFormat }, format);
+async function cmdFetch(ids: string[], options: FetchOptions): Promise<void> {
+  const format = parseOutputFormat(options.output);
+  const memoryFormat = parseMemoryFormat(options.memoryFormat);
+  await callAndPrint("fetch_memories", { ids, format: memoryFormat }, format);
 }
 
-async function cmdList(rest: string[]): Promise<void> {
-  const { values } = parseArgs({
-    args: rest,
-    options: {
-      username: { type: "string" },
-      limit: { type: "string" },
-      offset: { type: "string" },
-      source: { type: "string" },
-      output: outputOption,
-    },
-    allowPositionals: true,
-  });
-  const format = parseOutputFormat(values.output);
+async function cmdList(options: ListOptions): Promise<void> {
+  const format = parseOutputFormat(options.output);
   const args: Record<string, unknown> = {};
-  if (values.username) args.username = values.username;
-  const limit = parseIntegerOption(values.limit, "--limit");
+  if (options.username) args.username = options.username;
+  const limit = parseIntegerOption(options.limit, "--limit");
   if (limit !== undefined) args.limit = limit;
-  const offset = parseIntegerOption(values.offset, "--offset");
+  const offset = parseIntegerOption(options.offset, "--offset");
   if (offset !== undefined) args.offset = offset;
-  if (values.source) args.source = values.source;
+  if (options.source) args.source = options.source;
   await callAndPrint("list_memories", args, format);
 }
 
-async function cmdUpdate(rest: string[]): Promise<void> {
-  const { values, positionals } = parseArgs({
-    args: rest,
-    options: {
-      content: { type: "string" },
-      "content-file": { type: "string" },
-      title: { type: "string" },
-      "source-context": { type: "string" },
-      "edits-json": { type: "string" },
-      "edits-file": { type: "string" },
-      "base-revision": { type: "string" },
-      output: outputOption,
-    },
-    allowPositionals: true,
-  });
-  const format = parseOutputFormat(values.output);
-  requirePositionals(positionals, 1, "update");
-  if (values.content && values["content-file"]) {
+async function cmdUpdate(id: string, options: UpdateOptions): Promise<void> {
+  const format = parseOutputFormat(options.output);
+  if (options.content && options.contentFile) {
     throw new Error("update: use either --content or --content-file, not both");
   }
-  if (values["edits-json"] && values["edits-file"]) {
+  if (options.editsJson && options.editsFile) {
     throw new Error("update: use either --edits-json or --edits-file, not both");
   }
-  if ((values.content || values["content-file"]) && (values["edits-json"] || values["edits-file"])) {
+  if ((options.content || options.contentFile) && (options.editsJson || options.editsFile)) {
     throw new Error("update: content replacement and block edits are mutually exclusive");
   }
 
-  const args: Record<string, unknown> = { memoryId: positionals[0] };
-  if (values.content) args.content = values.content;
-  if (values["content-file"]) args.content = await readTextFile(values["content-file"], "--content-file");
-  if (values.title !== undefined) args.title = values.title;
-  if (values["source-context"] !== undefined) args.sourceContext = values["source-context"];
+  const args: Record<string, unknown> = { memoryId: id };
+  if (options.content) args.content = options.content;
+  if (options.contentFile) args.content = await readTextFile(options.contentFile, "--content-file");
+  if (options.title !== undefined) args.title = options.title;
+  if (options.sourceContext !== undefined) args.sourceContext = options.sourceContext;
 
-  if (values["edits-json"] || values["edits-file"]) {
-    const raw = values["edits-json"] ?? (await readTextFile(values["edits-file"]!, "--edits-file"));
-    args.edits = parseJSONOption(raw, values["edits-json"] ? "--edits-json" : "--edits-file");
-    const baseRevision = parseIntegerOption(values["base-revision"], "--base-revision");
+  if (options.editsJson || options.editsFile) {
+    const raw = options.editsJson ?? (await readTextFile(options.editsFile!, "--edits-file"));
+    args.edits = parseJSONOption(raw, options.editsJson ? "--edits-json" : "--edits-file");
+    const baseRevision = parseIntegerOption(options.baseRevision, "--base-revision");
     if (baseRevision === undefined) {
       throw new Error("update: --base-revision is required with block edits");
     }
     args.baseRevision = baseRevision;
   } else {
-    const baseRevision = parseIntegerOption(values["base-revision"], "--base-revision");
+    const baseRevision = parseIntegerOption(options.baseRevision, "--base-revision");
     if (baseRevision !== undefined) args.baseRevision = baseRevision;
   }
 
   await callAndPrint("update_memory", args, format);
 }
 
-async function cmdPublish(rest: string[]): Promise<void> {
-  const { values, positionals } = parseArgs({
-    args: rest,
-    options: {
-      title: { type: "string" },
-      "privacy-mode": { type: "string" },
-      output: outputOption,
-    },
-    allowPositionals: true,
-  });
-  const format = parseOutputFormat(values.output);
-  requirePositionals(positionals, 1, "publish");
-  const args: Record<string, unknown> = { memoryId: positionals[0] };
-  if (values.title !== undefined) args.title = values.title;
-  if (values["privacy-mode"] !== undefined) args.privacyMode = values["privacy-mode"];
+async function cmdPublish(id: string, options: PublishOptions): Promise<void> {
+  const format = parseOutputFormat(options.output);
+  const args: Record<string, unknown> = { memoryId: id };
+  if (options.title !== undefined) args.title = options.title;
+  if (options.privacyMode !== undefined) args.privacyMode = options.privacyMode;
   await callAndPrint("publish_memory", args, format);
 }
 
-async function cmdUnpublish(rest: string[]): Promise<void> {
-  const { values, positionals } = parseArgs({
-    args: rest,
-    options: {
-      "memory-id": { type: "string" },
-      "share-id": { type: "string" },
-      output: outputOption,
-    },
-    allowPositionals: true,
-  });
-  const format = parseOutputFormat(values.output);
-  const provided = [values["memory-id"], values["share-id"], positionals[0]].filter(Boolean);
+async function cmdUnpublish(id: string | undefined, options: UnpublishOptions): Promise<void> {
+  const format = parseOutputFormat(options.output);
+  const provided = [options.memoryId, options.shareId, id].filter(Boolean);
   if (provided.length !== 1) {
     throw new Error("unpublish: provide exactly one of --memory-id, --share-id, or positional id");
   }
   const args: Record<string, unknown> = {};
-  if (values["memory-id"]) {
-    args.memoryId = values["memory-id"];
-  } else if (values["share-id"]) {
-    args.shareId = values["share-id"];
+  if (options.memoryId) {
+    args.memoryId = options.memoryId;
+  } else if (options.shareId) {
+    args.shareId = options.shareId;
   } else {
-    args.memoryId = positionals[0];
+    args.memoryId = id;
   }
   await callAndPrint("unpublish_memory", args, format);
 }
 
-async function cmdSubjects(rest: string[]): Promise<void> {
-  const { values, positionals } = parseArgs({
-    args: rest,
-    options: { "top-k": { type: "string" }, output: outputOption },
-    allowPositionals: true,
-  });
-  const format = parseOutputFormat(values.output);
-  requirePositionals(positionals, 1, "subjects");
-  const args: Record<string, unknown> = { query: positionals.join(" ") };
-  const topK = parseIntegerOption(values["top-k"], "--top-k");
+async function cmdSubjects(query: string[], options: SubjectsOptions): Promise<void> {
+  const format = parseOutputFormat(options.output);
+  const args: Record<string, unknown> = { query: query.join(" ") };
+  const topK = parseIntegerOption(options.topK, "--top-k");
   if (topK !== undefined) args.topK = topK;
   await callAndPrint("search_subjects", args, format);
 }
 
-async function cmdMemories(rest: string[]): Promise<void> {
-  const { values, positionals } = parseArgs({
-    args: rest,
-    options: { query: { type: "string" }, output: outputOption },
-    allowPositionals: true,
-  });
-  const format = parseOutputFormat(values.output);
-  requirePositionals(positionals, 1, "memories");
-  const args: Record<string, unknown> = { subjectIds: positionals };
-  if (values.query) args.query = values.query;
+async function cmdMemories(subjectIds: string[], options: MemoriesOptions): Promise<void> {
+  const format = parseOutputFormat(options.output);
+  const args: Record<string, unknown> = { subjectIds };
+  if (options.query) args.query = options.query;
   await callAndPrint("search_memories_in_subjects", args, format);
 }
 
-async function cmdNetwork(rest: string[]): Promise<void> {
-  const { values, positionals } = parseArgs({
-    args: rest,
-    options: { limit: { type: "string" }, output: outputOption },
-    allowPositionals: true,
-  });
-  const format = parseOutputFormat(values.output);
-  requirePositionals(positionals, 1, "network");
-  const args: Record<string, unknown> = { pairId: positionals[0] };
-  const limit = parseIntegerOption(values.limit, "--limit");
+async function cmdNetwork(pairId: string, options: NetworkOptions): Promise<void> {
+  const format = parseOutputFormat(options.output);
+  const args: Record<string, unknown> = { pairId };
+  const limit = parseIntegerOption(options.limit, "--limit");
   if (limit !== undefined) args.limit = limit;
   await callAndPrint("get_memory_network", args, format);
+}
+
+async function cmdFriends(options: CommonOptions): Promise<void> {
+  await callAndPrint("list_friends", {}, parseOutputFormat(options.output));
+}
+
+async function cmdKnowledgeGraphs(options: CommonOptions): Promise<void> {
+  await callAndPrint("list_knowledge_graphs", {}, parseOutputFormat(options.output));
+}
+
+async function cmdMyMemories(options: MyMemoriesOptions): Promise<void> {
+  const args: Record<string, unknown> = {};
+  const limit = parseIntegerOption(options.limit, "--limit");
+  if (limit !== undefined) args.limit = limit;
+  const offset = parseIntegerOption(options.offset, "--offset");
+  if (offset !== undefined) args.offset = offset;
+  if (options.source) args.source = options.source;
+  await callAndPrint("list_my_memories", args, parseOutputFormat(options.output));
+}
+
+async function cmdSubjectEdges(subjectId: string, options: SubjectEdgesOptions): Promise<void> {
+  const args: Record<string, unknown> = { subjectId };
+  if (options.kg) args.kg = options.kg;
+  const limit = parseIntegerOption(options.limit, "--limit");
+  if (limit !== undefined) args.limit = limit;
+  const minWeight = parseNumberOption(options.minWeight, "--min-weight");
+  if (minWeight !== undefined) args.minWeight = minWeight;
+  await callAndPrint("get_subject_edges", args, parseOutputFormat(options.output));
+}
+
+async function cmdGraphSharing(options: GraphSharingOptions): Promise<void> {
+  if (!!options.enable === !!options.disable) {
+    throw new Error("sharing: provide exactly one of --enable or --disable");
+  }
+  const args: Record<string, unknown> = {
+    publicSubscriptionsEnabled: !!options.enable,
+  };
+  if (options.title !== undefined) args.title = options.title;
+  if (options.description !== undefined) args.description = options.description;
+  await callAndPrint("set_knowledge_graph_sharing", args, parseOutputFormat(options.output));
+}
+
+async function cmdDelete(memoryId: string, options: DeleteOptions): Promise<void> {
+  if (!options.confirm) {
+    throw new Error("delete: pass --confirm to permanently delete this memory");
+  }
+  const args: Record<string, unknown> = { memoryId, confirm: true };
+  if (options.kg) args.kg = options.kg;
+  await callAndPrint("delete_memory", args, parseOutputFormat(options.output));
 }
 
 interface StatusReport {
@@ -665,13 +654,8 @@ interface StatusReport {
   connect?: { ok: boolean; error?: string };
 }
 
-async function cmdStatus(rest: string[]): Promise<void> {
-  const { values } = parseArgs({
-    args: rest,
-    options: { output: outputOption },
-    allowPositionals: true,
-  });
-  const format = parseOutputFormat(values.output);
+async function cmdStatus(options: CommonOptions): Promise<void> {
+  const format = parseOutputFormat(options.output);
 
   const [{ key, source }, stored] = await Promise.all([resolveApiKey(), readStoredAuth()]);
   const report: StatusReport = {
@@ -732,7 +716,7 @@ async function cmdStatus(rest: string[]): Promise<void> {
   } else if (report.toolsError) {
     lines.push(`connect:   ok`, `tools:     unavailable (tools/list failed: ${report.toolsError})`);
   } else if (report.connect && !report.connect.ok) {
-    lines.push(`connect:   FAILED — ${report.connect.error}`);
+    lines.push(`connect:   FAILED - ${report.connect.error}`);
   }
   if (report.agent?.claimURL) {
     lines.push(`agent:     unclaimed (${report.agent.caller || "agent"})`, `claim:     ${report.agent.claimURL}`);
@@ -740,13 +724,8 @@ async function cmdStatus(rest: string[]): Promise<void> {
   process.stdout.write(`${lines.join("\n")}\n`);
 }
 
-function cmdConfig(rest: string[]): void {
-  const { values } = parseArgs({
-    args: rest,
-    options: { output: outputOption },
-    allowPositionals: true,
-  });
-  parseOutputFormat(values.output); // accepted; output is always JSON
+function cmdConfig(options: CommonOptions): void {
+  parseOutputFormat(options.output); // accepted; output is always JSON
   const config = {
     mcpServers: {
       ditto: {
@@ -759,169 +738,374 @@ function cmdConfig(rest: string[]): void {
   process.stdout.write(`${JSON.stringify(config, null, 2)}\n`);
 }
 
-// cmdGraphs manages the public knowledge graphs this account is subscribed to,
-// mirroring the MCP subscription tools. Subscriptions only ever cover OTHER
-// users' public graphs (by @username); this command cannot touch the account's
-// own KG or its app KG, since those are not subscriptions.
-async function cmdGraphs(rest: string[]): Promise<void> {
-  const sub = rest[0];
-  const subRest = rest.slice(1);
-  switch (sub) {
-    case "create": {
-      // Provision a NEW dedicated graph you own + get a key scoped to only it.
-      const { values, positionals } = parseArgs({
-        args: subRest,
-        options: { output: outputOption },
-        allowPositionals: true,
-      });
-      requirePositionals(positionals, 1, "graphs create");
-      await callAndPrint(
-        "create_dedicated_graph",
-        { name: positionals.join(" ") },
-        parseOutputFormat(values.output),
-      );
-      return;
-    }
-    case undefined:
-    case "list": {
-      const { values } = parseArgs({
-        args: subRest,
-        options: { output: outputOption },
-        allowPositionals: true,
-      });
-      await callAndPrint(
-        "list_knowledge_graph_subscriptions",
-        {},
-        parseOutputFormat(values.output),
-      );
-      return;
-    }
-    case "subscribers": {
-      const { values } = parseArgs({
-        args: subRest,
-        options: { output: outputOption },
-        allowPositionals: true,
-      });
-      await callAndPrint(
-        "list_knowledge_graph_subscribers",
-        {},
-        parseOutputFormat(values.output),
-      );
-      return;
-    }
-    case "add": {
-      const { values, positionals } = parseArgs({
-        args: subRest,
-        options: { output: outputOption },
-        allowPositionals: true,
-      });
-      requirePositionals(positionals, 1, "graphs add");
-      if (positionals.length > 1) {
-        throw new Error(
-          `graphs add: expected exactly 1 username, got ${positionals.length}`,
-        );
-      }
-      await callAndPrint(
-        "subscribe_knowledge_graph",
-        { username: positionals[0] },
-        parseOutputFormat(values.output),
-      );
-      return;
-    }
-    case "remove": {
-      const { values, positionals } = parseArgs({
-        args: subRest,
-        options: { output: outputOption },
-        allowPositionals: true,
-      });
-      requirePositionals(positionals, 1, "graphs remove");
-      if (positionals.length > 1) {
-        throw new Error(
-          `graphs remove: expected exactly 1 username, got ${positionals.length}`,
-        );
-      }
-      await callAndPrint(
-        "unsubscribe_knowledge_graph",
-        { username: positionals[0] },
-        parseOutputFormat(values.output),
-      );
-      return;
-    }
-    default:
-      throw new Error(
-        `graphs: unknown subcommand "${sub}" (expected: create <name>, list, add <@user>, remove <@user>, subscribers)`,
-      );
-  }
+// These commands mirror the MCP subscription tools. Subscriptions only ever
+// cover other users' public graphs by @username; this cannot touch the account's
+// own graph or app graph, since those are not subscriptions.
+async function cmdGraphsCreate(nameParts: string[], options: CommonOptions): Promise<void> {
+  await callAndPrint(
+    "create_dedicated_graph",
+    { name: nameParts.join(" ") },
+    parseOutputFormat(options.output),
+  );
+}
+
+async function cmdGraphsList(options: CommonOptions): Promise<void> {
+  await callAndPrint(
+    "list_knowledge_graph_subscriptions",
+    {},
+    parseOutputFormat(options.output),
+  );
+}
+
+async function cmdGraphsSubscribers(options: CommonOptions): Promise<void> {
+  await callAndPrint(
+    "list_knowledge_graph_subscribers",
+    {},
+    parseOutputFormat(options.output),
+  );
+}
+
+async function cmdGraphsAdd(username: string, options: CommonOptions): Promise<void> {
+  await callAndPrint(
+    "subscribe_knowledge_graph",
+    { username },
+    parseOutputFormat(options.output),
+  );
+}
+
+async function cmdGraphsRemove(username: string, options: CommonOptions): Promise<void> {
+  await callAndPrint(
+    "unsubscribe_knowledge_graph",
+    { username },
+    parseOutputFormat(options.output),
+  );
+}
+
+function addExamples(command: Command, examples: string): Command {
+  return command.addHelpText("after", `\nExamples:\n${examples}`);
+}
+
+function buildProgram(): Command {
+  const program = new Command();
+
+  program
+    .name("heyditto")
+    .description("Save, search, fetch, and traverse Ditto memories from the shell.")
+    .version(packageVersion, "-v, --version", "print the CLI version")
+    .helpCommand("help [command]", "show help for a command")
+    .showHelpAfterError()
+    .addHelpText(
+      "after",
+      `
+Notes:
+  On macOS, Apple ships /usr/bin/ditto (a file-copy utility). If 'ditto'
+  runs the wrong tool, install with 'npm i -g @heyditto/cli' and invoke as
+  'heyditto' (alias bin), or check 'type -a ditto' to disambiguate.
+
+Environment:
+  DITTO_API_KEY     Optional override, taking precedence over the saved key.
+  DITTO_API_BASE    Optional API base URL. Defaults to https://api.heyditto.ai.
+  DITTO_CONFIG_DIR  Optional config directory. Defaults to $XDG_CONFIG_HOME/heyditto/cli
+                    or ~/.config/heyditto/cli.
+`,
+    );
+
+  addExamples(
+    program
+      .command("save")
+      .description("save a memory")
+      .summary("save a memory")
+      .argument("<content...>", "memory content")
+      .option("--source <source>", "memory source", "cli")
+      .option("--source-context <context>", "source context, such as a filename")
+      .addOption(outputOption())
+      .action(cmdSave),
+    `  heyditto save "Project X uses Bun + SolidJS"
+  heyditto save "$(cat note.md)" --source document --source-context note.md`,
+  );
+
+  addExamples(
+    program
+      .command("search")
+      .description("search private memories, optionally public graphs")
+      .summary("search private memories, optionally public graphs")
+      .argument("<query...>", "one or more search queries")
+      .option("--include-public", "include public DittoHub memories")
+      .option("--filter-username <username>", "scope public results to a username")
+      .addOption(outputOption())
+      .action(cmdSearch),
+    `  heyditto search "typescript preferences"
+  heyditto search "launch notes" --include-public --filter-username peyton`,
+  );
+
+  program
+    .command("fetch")
+    .description("fetch memories by id")
+    .summary("fetch memories by id")
+    .argument("<id...>", "memory ids or public share ids")
+    .addOption(memoryFormatOption())
+    .addOption(outputOption())
+    .action(cmdFetch);
+
+  program
+    .command("list")
+    .description("list memories or public publishes")
+    .summary("list memories or public publishes")
+    .option("--username <username>", "list public DittoHub publishes for a username")
+    .option("--limit <number>", "maximum number of results")
+    .option("--offset <number>", "result offset")
+    .option("--source <source>", "filter by memory source")
+    .addOption(outputOption())
+    .action(cmdList);
+
+  program
+    .command("my-memories")
+    .alias("list_my_memories")
+    .description("list only your saved memories")
+    .summary("list only your saved memories")
+    .option("--limit <number>", "maximum number of results")
+    .option("--offset <number>", "result offset")
+    .option("--source <source>", "filter by memory source")
+    .addOption(outputOption())
+    .action(cmdMyMemories);
+
+  program
+    .command("update")
+    .description("update a saved memory")
+    .summary("update a saved memory")
+    .argument("<id>", "memory id")
+    .option("--content <text>", "replacement memory content")
+    .option("--content-file <path>", "path to replacement memory content")
+    .option("--title <title>", "memory title")
+    .option("--source-context <context>", "source context")
+    .option("--edits-json <json>", "structured block edits as JSON")
+    .option("--edits-file <path>", "path to structured block edits JSON")
+    .option("--base-revision <number>", "base memory revision")
+    .addOption(outputOption())
+    .addHelpText(
+      "after",
+      `
+Examples:
+  heyditto update <memory-id> --content-file revised.md --output json
+  heyditto update <memory-id> --edits-file edits.json --base-revision 3 --output json`,
+    )
+    .action(cmdUpdate);
+
+  program
+    .command("publish")
+    .description("publish a memory to DittoHub")
+    .summary("publish a memory to DittoHub")
+    .argument("<id>", "memory id")
+    .option("--title <title>", "public title")
+    .option(
+      "--privacy-mode <mode>",
+      "privacy mode: scan_and_block, scan_and_warn, or scan_and_redact",
+    )
+    .addOption(outputOption())
+    .action(cmdPublish);
+
+  program
+    .command("unpublish")
+    .description("remove an existing public share")
+    .summary("remove an existing public share")
+    .argument("[id]", "memory id")
+    .option("--memory-id <id>", "memory id")
+    .option("--share-id <id>", "share id")
+    .addOption(outputOption())
+    .action(cmdUnpublish);
+
+  program
+    .command("delete")
+    .alias("delete_memory")
+    .description("permanently delete a saved memory")
+    .summary("permanently delete a saved memory")
+    .argument("<memory-id>", "memory id")
+    .requiredOption("--confirm", "confirm permanent deletion")
+    .option("--kg <alias>", "knowledge graph alias")
+    .addOption(outputOption())
+    .action(cmdDelete);
+
+  program
+    .command("subjects")
+    .description("search the subject graph")
+    .summary("search the subject graph")
+    .argument("<query...>", "subject search query")
+    .option("--top-k <number>", "maximum number of subjects")
+    .addOption(outputOption())
+    .action(cmdSubjects);
+
+  program
+    .command("subject-edges")
+    .alias("get_subject_edges")
+    .description("list related subjects for a subject")
+    .summary("list related subjects for a subject")
+    .argument("<subject-id>", "subject id")
+    .option("--kg <alias>", "knowledge graph alias")
+    .option("--limit <number>", "maximum number of related subjects")
+    .option("--min-weight <number>", "minimum edge weight from 0 to 1")
+    .addOption(outputOption())
+    .action(cmdSubjectEdges);
+
+  program
+    .command("memories")
+    .description("fetch memory previews for subjects")
+    .summary("fetch memory previews for subjects")
+    .argument("<subject-id...>", "subject ids")
+    .option("--query <query>", "optional search query")
+    .addOption(outputOption())
+    .action(cmdMemories);
+
+  program
+    .command("network")
+    .description("traverse related memories")
+    .summary("traverse related memories")
+    .argument("<pair-id>", "memory pair id")
+    .option("--limit <number>", "maximum number of related memories")
+    .addOption(outputOption())
+    .action(cmdNetwork);
+
+  program
+    .command("friends")
+    .alias("list_friends")
+    .description("list Ditto friends")
+    .summary("list Ditto friends")
+    .addOption(outputOption())
+    .action(cmdFriends);
+
+  program
+    .command("knowledge-graphs")
+    .alias("list_knowledge_graphs")
+    .description("list readable knowledge graphs")
+    .summary("list readable knowledge graphs")
+    .addOption(outputOption())
+    .action(cmdKnowledgeGraphs);
+
+  program
+    .command("graph-sharing")
+    .alias("set_knowledge_graph_sharing")
+    .description("configure whether others can subscribe to your graph")
+    .summary("configure graph sharing")
+    .option("--enable", "allow public subscriptions to your graph")
+    .option("--disable", "disable public subscriptions to your graph")
+    .option("--title <title>", "subscribable graph title")
+    .option("--description <description>", "subscribable graph description")
+    .addOption(outputOption())
+    .action(cmdGraphSharing);
+
+  const graphs = program
+    .command("graphs")
+    .description("manage knowledge graph subscriptions")
+    .summary("manage knowledge graph subscriptions")
+    .showHelpAfterError()
+    .addHelpText(
+      "after",
+      `
+Subscriptions cover other users' public graphs by @username. They do not modify
+your own graph or an app graph.`,
+    );
+
+  graphs
+    .command("create")
+    .description("create a dedicated graph you own")
+    .argument("<name...>", "graph name")
+    .addOption(outputOption())
+    .action(cmdGraphsCreate);
+
+  graphs
+    .command("list")
+    .description("list public graphs you're subscribed to")
+    .addOption(outputOption())
+    .action(cmdGraphsList);
+
+  graphs
+    .command("available")
+    .alias("list_knowledge_graphs")
+    .description("list readable knowledge graphs")
+    .addOption(outputOption())
+    .action(cmdKnowledgeGraphs);
+
+  graphs
+    .command("add")
+    .description("subscribe to a public graph")
+    .argument("<username>", "public graph username, with or without @")
+    .addOption(outputOption())
+    .action(cmdGraphsAdd);
+
+  graphs
+    .command("remove")
+    .description("unsubscribe from a public graph")
+    .argument("<username>", "public graph username, with or without @")
+    .addOption(outputOption())
+    .action(cmdGraphsRemove);
+
+  graphs
+    .command("subscribers")
+    .description("list who is subscribed to your graph")
+    .addOption(outputOption())
+    .action(cmdGraphsSubscribers);
+
+  graphs
+    .command("sharing")
+    .alias("set_knowledge_graph_sharing")
+    .description("configure whether others can subscribe to your graph")
+    .option("--enable", "allow public subscriptions to your graph")
+    .option("--disable", "disable public subscriptions to your graph")
+    .option("--title <title>", "subscribable graph title")
+    .option("--description <description>", "subscribable graph description")
+    .addOption(outputOption())
+    .action(cmdGraphSharing);
+
+  program
+    .command("init")
+    .description("initialize a claimable agent account")
+    .argument("[graph...]", "public graphs to subscribe to")
+    .option("--agent", "create a free, claimable agent account")
+    .option("--agent-caller <name>", "agent name")
+    .option("--subscribe <graph>", "public graph to subscribe to", (value, previous: string[]) => [...previous, value], [])
+    .option("--json", "print machine-readable output")
+    .addOption(hiddenOutputOption())
+    .action(cmdInit);
+
+  program
+    .command("login")
+    .description("save an API key")
+    .argument("[key]", "Ditto API key")
+    .option("--paste", "open the key creation page before prompting")
+    .option("--stdin", "read the API key from stdin")
+    .addOption(hiddenOutputOption())
+    .action(cmdLogin);
+
+  program
+    .command("logout")
+    .description("delete the saved API key")
+    .addOption(hiddenOutputOption())
+    .action(cmdLogout);
+
+  program
+    .command("status")
+    .description("show CLI auth and endpoint status")
+    .addOption(outputOption())
+    .action(cmdStatus);
+
+  program
+    .command("config")
+    .description("print MCP client configuration")
+    .addOption(hiddenOutputOption())
+    .action(cmdConfig);
+
+  return program;
 }
 
 async function main(): Promise<void> {
-  const argv = process.argv.slice(2);
-  const command = argv[0];
-  const rest = argv.slice(1);
-
-  switch (command) {
-    case "init":
-      await cmdInit(rest);
-      return;
-    case "save":
-      await cmdSave(rest);
-      return;
-    case "search":
-      await cmdSearch(rest);
-      return;
-    case "fetch":
-      await cmdFetch(rest);
-      return;
-    case "list":
-      await cmdList(rest);
-      return;
-    case "update":
-      await cmdUpdate(rest);
-      return;
-    case "publish":
-      await cmdPublish(rest);
-      return;
-    case "unpublish":
-      await cmdUnpublish(rest);
-      return;
-    case "subjects":
-      await cmdSubjects(rest);
-      return;
-    case "memories":
-      await cmdMemories(rest);
-      return;
-    case "network":
-      await cmdNetwork(rest);
-      return;
-    case "graphs":
-      await cmdGraphs(rest);
-      return;
-    case "login":
-      await cmdLogin(rest);
-      return;
-    case "logout":
-      await cmdLogout(rest);
-      return;
-    case "status":
-      await cmdStatus(rest);
-      return;
-    case "config":
-      cmdConfig(rest);
-      return;
-    case undefined:
-    case "help":
-    case "--help":
-    case "-h":
-      process.stdout.write(usage());
-      return;
-    case "--version":
-    case "-v":
-      process.stdout.write(`${packageVersion}\n`);
-      return;
-    default:
-      process.stderr.write(`Unknown command: ${command}\n\n${usage()}`);
-      process.exitCode = 2;
+  const argv = [...process.argv];
+  const args = argv.slice(2);
+  if (
+    args[0] === "graphs" &&
+    (args.length === 1 || (args[1].startsWith("-") && args[1] !== "-h" && args[1] !== "--help"))
+  ) {
+    argv.splice(3, 0, "list");
   }
+  await buildProgram().parseAsync(argv);
 }
 
 main().catch((error) => {
