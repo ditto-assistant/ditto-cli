@@ -15,6 +15,9 @@ check:
 build:
   npm run build
 
+test:
+  npm test
+
 pack: build
   NPM_CONFIG_CACHE="{{npm_cache}}" npm pack --dry-run
 
@@ -39,4 +42,4 @@ local-status:
 local-search +query:
   just search http://localhost:3400 {{query}}
 
-verify: check build pack
+verify: check build test pack

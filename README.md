@@ -96,11 +96,27 @@ heyditto unpublish (--memory-id <id>|--share-id <id>|<id>)
 heyditto subjects <query> [--top-k <n>]
 heyditto memories <subject-id>... [--query <q>]
 heyditto network <pair-id> [--limit <n>]
-heyditto graphs create <name> | list | add <@username> | remove <@username> | subscribers
-heyditto init --agent [--agent-caller <name>] [--json]
-heyditto status
+heyditto graphs create <name>
+heyditto graphs list
+heyditto graphs add <@username>
+heyditto graphs remove <@username>
+heyditto graphs subscribers
+heyditto init --agent [--agent-caller <name>] [--subscribe <@graph>] [<@graph>...] [--json]
+heyditto login [<key>] [--paste] [--stdin]
+heyditto logout
+heyditto status [--output <format>]
 heyditto config
-heyditto help
+heyditto help [command]
+```
+
+### Help
+
+Use `-h` or `--help` globally or after any command:
+
+```bash
+heyditto --help
+heyditto search --help
+heyditto graphs add --help
 ```
 
 ### `save`
@@ -154,10 +170,7 @@ Block edits require the current revision returned by `save` or a previous
 ```bash
 heyditto update <memory-id> --content-file revised.md --output json
 heyditto fetch <memory-id> --memory-format outline --output json
-heyditto update <memory-id> \
-  --edits-json '[{"op":"replace_text","blockId":"2","find":"old","replace":"new","expectedCount":1}]' \
-  --base-revision 3 \
-  --output json
+heyditto update <memory-id> --edits-file edits.json --base-revision 3 --output json
 ```
 
 ### `publish` / `unpublish`
