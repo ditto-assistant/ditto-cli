@@ -4,7 +4,7 @@
 
 ```bash
 npm install -g @heyditto/cli
-heyditto init --agent --agent-caller "NAME_OF_AGENT" --json   # the name is set once, here
+heyditto init --name "NAME_OF_AGENT" --json   # the name is set once, here
 
 heyditto save "I prefer TypeScript over JS for new projects"
 heyditto search "language preferences"
@@ -45,7 +45,7 @@ You can also reorder your `PATH` so the npm global bin comes before `/usr/bin`, 
 Agents can self-provision without a browser, email, or OTP:
 
 ```bash
-heyditto init --agent --json
+heyditto init --json
 ```
 
 The command creates a free claimable agent account, stores the key in
@@ -56,16 +56,16 @@ that link. The claim token is carried in the query string (`?t=...`).
 
 ### Name the agent at init
 
-Decide the agent's name **before** you run `init` and pass it with `--agent-caller`:
+Decide the agent's name **before** you run `init` and pass it with `--name`:
 
 ```bash
-heyditto init --agent --agent-caller "NAME_OF_AGENT" --json
+heyditto init --name "NAME_OF_AGENT" --json
 ```
 
 The caller name is set **once, at account creation**, and it labels everything
 the agent saves: after a human claims the account, the agent's memories show up
 in the owner's graph as an *external agent thread* titled by this name. If you
-init without `--agent-caller`, the name defaults to `agent` and every memory is
+init without `--name`, the name defaults to `agent` and every memory is
 labeled `agent` — generic and hard to tell apart from other agents.
 
 So: use the agent's own name, or a name the user has already chosen, and set it
@@ -109,7 +109,7 @@ heyditto graphs add <@username>
 heyditto graphs remove <@username>
 heyditto graphs subscribers
 heyditto graphs sharing (--enable|--disable) [--title <t>] [--description <d>]
-heyditto init --agent [--agent-caller <name>] [--subscribe <@graph>] [<@graph>...] [--json]
+heyditto init [--name <name>] [--subscribe <@graph>]... [<@graph>...] [--json]
 heyditto login [<key>] [--paste] [--stdin]
 heyditto logout
 heyditto status [--output <format>]
@@ -270,18 +270,20 @@ heyditto graph-sharing --enable --title "Support Graph" --description "Public su
 
 Print whether `DITTO_API_KEY` is set and the configured MCP endpoint resolves.
 
-### `init --agent`
+### `init`
 
 Create a free claimable agent account and save its key locally. Use `--json` for
 machine-readable output that includes `apiKeyStored`, `userID`, and `claimURL`.
 Share `claimURL` with the human owner. The CLI stores the generated key locally
 without printing it. The claim URL uses a `?t=...` query parameter.
 
-Pass `--agent-caller <name>` to set the agent's name. This is set once at init,
+Pass `--name <name>` to set the agent's name. This is set once at init,
 defaults to `agent`, labels every memory the agent saves, and (after the account
 is claimed) becomes the title of the agent's external thread in the owner's
 graph. Choose it up front — renaming after init isn't yet supported. See
 [Name the agent at init](#name-the-agent-at-init).
+
+`--agent-caller <name>` is still accepted as a backward-compatible alias.
 
 ### `config`
 
@@ -289,7 +291,7 @@ Print a Claude Desktop / Cursor / generic-MCP-client config snippet for the Ditt
 
 ## Environment
 
-- `DITTO_API_KEY` (optional) — MCP API key override. Agents can instead run `heyditto init --agent --json` for no-human setup.
+- `DITTO_API_KEY` (optional) — MCP API key override. Agents can instead run `heyditto init --json` for no-human setup.
 - `DITTO_API_BASE` (optional) — API base URL. Defaults to `https://api.heyditto.ai`. Useful for local dev (`http://localhost:3400`).
 
 ## Output

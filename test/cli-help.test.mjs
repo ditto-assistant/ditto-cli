@@ -110,6 +110,27 @@ test("graphs available help exposes readable graph listing", () => {
   assert.match(result.stdout, /list readable knowledge graphs/);
 });
 
+test("init help defaults to agent setup without showing legacy flag", () => {
+  const result = run(["init", "--help"]);
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /Usage: heyditto init/);
+  assert.match(result.stdout, /--name/);
+  assert.match(result.stdout, /--agent-caller/);
+  assert.doesNotMatch(result.stdout, /--agent(\s|,|$)/);
+});
+
+test("legacy init --agent flag remains accepted", () => {
+  const result = run(["init", "--agent", "--help"]);
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /Usage: heyditto init/);
+});
+
+test("init rejects conflicting name aliases before auth", () => {
+  const result = run(["init", "--name", "one", "--agent-caller", "two", "--json"]);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /use either --name or --agent-caller/);
+});
+
 test("--version prints package version", () => {
   const result = run(["--version"]);
   assert.equal(result.status, 0);
