@@ -108,6 +108,7 @@ interface DeleteOptions extends CommonOptions {
 interface InitOptions extends CommonOptions {
   agent?: boolean;
   agentCaller?: string;
+  name?: string;
   subscribe?: string[];
   json?: boolean;
 }
@@ -205,7 +206,7 @@ async function getClient(): Promise<Client> {
   if (!key) {
     process.stderr.write(
       `error: no Ditto API key configured.\n\n` +
-        `  Run: heyditto init --agent --json\n` +
+        `  Run: heyditto init --json\n` +
         `  Or save an existing key with: heyditto login <key>\n` +
         `  Human-owned keys are available at ${newKeyURL()}.\n`,
     );
@@ -327,8 +328,9 @@ function defaultAgentCaller(): string {
 
 async function cmdInit(graphs: string[], options: InitOptions): Promise<void> {
   const output = options.json ? "json" : parseOutputFormat(options.output);
-  if (!options.agent) {
-    throw new Error("init currently supports only --agent");
+  // --agent is accepted for backward compatibility. Agent init is the default.
+  if (options.agentCaller && options.name && options.agentCaller !== options.name) {
+    throw new Error("init: use either --name or --agent-caller, not both");
   }
   // --subscribe pre-subscribes the new agent to public foundation knowledge
   // graphs (e.g. the @minos mentor KG). Accepts repeats and comma-separated
@@ -367,7 +369,7 @@ async function cmdInit(graphs: string[], options: InitOptions): Promise<void> {
     throw new Error(`a Ditto API key is already saved at ${authFilePath()}; run 'heyditto logout' before creating an agent account`);
   }
 
-  const agentCaller = options.agentCaller?.trim() || defaultAgentCaller();
+  const agentCaller = options.name?.trim() || options.agentCaller?.trim() || defaultAgentCaller();
   const response = await fetch(agentSignupURL(), {
     method: "POST",
     headers: {
@@ -710,7 +712,7 @@ async function cmdStatus(options: CommonOptions): Promise<void> {
     `api key:   ${report.apiKey.present ? "set" : "MISSING"}  (source: ${report.apiKey.source})`,
   ];
   if (!report.apiKey.present) {
-    lines.push(``, `Run 'heyditto init --agent --json' for no-human setup, or get a key at ${newKeyURL()} and run 'heyditto login <key>'.`);
+    lines.push(``, `Run 'heyditto init --json' for no-human setup, or get a key at ${newKeyURL()} and run 'heyditto login <key>'.`);
   } else if (report.tools) {
     lines.push(`tools:     ${report.tools.join(", ")}`);
   } else if (report.toolsError) {
@@ -1059,9 +1061,13 @@ your own graph or an app graph.`,
     .command("init")
     .description("initialize a claimable agent account")
     .argument("[graph...]", "public graphs to subscribe to")
-    .option("--agent", "create a free, claimable agent account")
+    .addOption(new Option("--agent", "create a free, claimable agent account").hideHelp())
+    .option("--name <name>", "agent name")
     .option("--agent-caller <name>", "agent name")
-    .option("--subscribe <graph>", "public graph to subscribe to", (value, previous: string[]) => [...previous, value], [])
+    .addOption(
+      new Option("--subscribe <graph>", "public graphs to subscribe to")
+        .argParser((value, previous: string[] | undefined) => [...(previous ?? []), value]),
+    )
     .option("--json", "print machine-readable output")
     .addOption(hiddenOutputOption())
     .action(cmdInit);
