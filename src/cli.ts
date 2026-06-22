@@ -743,10 +743,16 @@ function cmdConfig(options: CommonOptions): void {
 // These commands mirror the MCP subscription tools. Subscriptions only ever
 // cover other users' public graphs by @username; this cannot touch the account's
 // own graph or app graph, since those are not subscriptions.
-async function cmdGraphsCreate(nameParts: string[], options: CommonOptions): Promise<void> {
+async function cmdGraphsCreate(
+  nameParts: string[],
+  options: CommonOptions & { app?: string },
+): Promise<void> {
+  const args: Record<string, unknown> = { name: nameParts.join(" ") };
+  const app = options.app?.trim();
+  if (app) args.app = app;
   await callAndPrint(
     "create_dedicated_graph",
-    { name: nameParts.join(" ") },
+    args,
     parseOutputFormat(options.output),
   );
 }
@@ -1008,8 +1014,12 @@ your own graph or an app graph.`,
 
   graphs
     .command("create")
-    .description("create a dedicated graph you own")
+    .description("create a dedicated graph you own (optionally owned by an app)")
     .argument("<name...>", "graph name")
+    .option(
+      "--app <appId>",
+      "create the graph OWNED BY one of your apps (an app can own many graphs)",
+    )
     .addOption(outputOption())
     .action(cmdGraphsCreate);
 
