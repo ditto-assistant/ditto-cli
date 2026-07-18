@@ -107,7 +107,7 @@ test("delete requires explicit confirmation before auth", () => {
 test("graphs available help exposes readable graph listing", () => {
   const result = run(["graphs", "available", "--help"]);
   assert.equal(result.status, 0);
-  assert.match(result.stdout, /list readable knowledge graphs/);
+  assert.match(result.stdout, /list readable workspaces/);
 });
 
 test("init help defaults to agent setup without showing legacy flag", () => {

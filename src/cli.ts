@@ -741,8 +741,8 @@ function cmdConfig(options: CommonOptions): void {
 }
 
 // These commands mirror the MCP subscription tools. Subscriptions only ever
-// cover other users' public graphs by @username; this cannot touch the account's
-// own graph or app graph, since those are not subscriptions.
+// cover other users' public workspaces by @username; this cannot touch the account's
+// own workspace or app workspace, since those are not subscriptions.
 async function cmdGraphsCreate(
   nameParts: string[],
   options: CommonOptions & { app?: string },
@@ -835,8 +835,8 @@ Environment:
   addExamples(
     program
       .command("search")
-      .description("search private memories, optionally public graphs")
-      .summary("search private memories, optionally public graphs")
+      .description("search private memories, optionally public workspaces")
+      .summary("search private memories, optionally public workspaces")
       .argument("<query...>", "one or more search queries")
       .option("--include-public", "include public DittoHub memories")
       .option("--filter-username <username>", "scope public results to a username")
@@ -929,7 +929,7 @@ Examples:
     .summary("permanently delete a saved memory")
     .argument("<memory-id>", "memory id")
     .requiredOption("--confirm", "confirm permanent deletion")
-    .option("--kg <alias>", "knowledge graph alias")
+    .option("--kg <alias>", "workspace alias")
     .addOption(outputOption())
     .action(cmdDelete);
 
@@ -948,7 +948,7 @@ Examples:
     .description("list related subjects for a subject")
     .summary("list related subjects for a subject")
     .argument("<subject-id>", "subject id")
-    .option("--kg <alias>", "knowledge graph alias")
+    .option("--kg <alias>", "workspace alias")
     .option("--limit <number>", "maximum number of related subjects")
     .option("--min-weight <number>", "minimum edge weight from 0 to 1")
     .addOption(outputOption())
@@ -983,99 +983,99 @@ Examples:
   program
     .command("knowledge-graphs")
     .alias("list_knowledge_graphs")
-    .description("list readable knowledge graphs")
-    .summary("list readable knowledge graphs")
+    .description("list readable workspaces")
+    .summary("list readable workspaces")
     .addOption(outputOption())
     .action(cmdKnowledgeGraphs);
 
   program
     .command("graph-sharing")
     .alias("set_knowledge_graph_sharing")
-    .description("configure whether others can subscribe to your graph")
-    .summary("configure graph sharing")
-    .option("--enable", "allow public subscriptions to your graph")
-    .option("--disable", "disable public subscriptions to your graph")
-    .option("--title <title>", "subscribable graph title")
-    .option("--description <description>", "subscribable graph description")
+    .description("configure whether others can subscribe to your workspace")
+    .summary("configure workspace sharing")
+    .option("--enable", "allow public subscriptions to your workspace")
+    .option("--disable", "disable public subscriptions to your workspace")
+    .option("--title <title>", "subscribable workspace title")
+    .option("--description <description>", "subscribable workspace description")
     .addOption(outputOption())
     .action(cmdGraphSharing);
 
   const graphs = program
     .command("graphs")
-    .description("manage knowledge graph subscriptions")
-    .summary("manage knowledge graph subscriptions")
+    .description("manage workspace subscriptions")
+    .summary("manage workspace subscriptions")
     .showHelpAfterError()
     .addHelpText(
       "after",
       `
-Subscriptions cover other users' public graphs by @username. They do not modify
-your own graph or an app graph.`,
+Subscriptions cover other users' public workspaces by @username. They do not modify
+your own workspace or an app workspace.`,
     );
 
   graphs
     .command("create")
-    .description("create a dedicated graph you own (optionally owned by an app)")
-    .argument("<name...>", "graph name")
+    .description("create a dedicated workspace you own (optionally owned by an app)")
+    .argument("<name...>", "workspace name")
     .option(
       "--app <appId>",
-      "create the graph OWNED BY one of your apps (an app can own many graphs)",
+      "create the workspace OWNED BY one of your apps (an app can own many workspaces)",
     )
     .addOption(outputOption())
     .action(cmdGraphsCreate);
 
   graphs
     .command("list")
-    .description("list public graphs you're subscribed to")
+    .description("list public workspaces you're subscribed to")
     .addOption(outputOption())
     .action(cmdGraphsList);
 
   graphs
     .command("available")
     .alias("list_knowledge_graphs")
-    .description("list readable knowledge graphs")
+    .description("list readable workspaces")
     .addOption(outputOption())
     .action(cmdKnowledgeGraphs);
 
   graphs
     .command("add")
-    .description("subscribe to a public graph")
-    .argument("<username>", "public graph username, with or without @")
+    .description("subscribe to a public workspace")
+    .argument("<username>", "public workspace username, with or without @")
     .addOption(outputOption())
     .action(cmdGraphsAdd);
 
   graphs
     .command("remove")
-    .description("unsubscribe from a public graph")
-    .argument("<username>", "public graph username, with or without @")
+    .description("unsubscribe from a public workspace")
+    .argument("<username>", "public workspace username, with or without @")
     .addOption(outputOption())
     .action(cmdGraphsRemove);
 
   graphs
     .command("subscribers")
-    .description("list who is subscribed to your graph")
+    .description("list who is subscribed to your workspace")
     .addOption(outputOption())
     .action(cmdGraphsSubscribers);
 
   graphs
     .command("sharing")
     .alias("set_knowledge_graph_sharing")
-    .description("configure whether others can subscribe to your graph")
-    .option("--enable", "allow public subscriptions to your graph")
-    .option("--disable", "disable public subscriptions to your graph")
-    .option("--title <title>", "subscribable graph title")
-    .option("--description <description>", "subscribable graph description")
+    .description("configure whether others can subscribe to your workspace")
+    .option("--enable", "allow public subscriptions to your workspace")
+    .option("--disable", "disable public subscriptions to your workspace")
+    .option("--title <title>", "subscribable workspace title")
+    .option("--description <description>", "subscribable workspace description")
     .addOption(outputOption())
     .action(cmdGraphSharing);
 
   program
     .command("init")
     .description("initialize a claimable agent account")
-    .argument("[graph...]", "public graphs to subscribe to")
+    .argument("[workspace...]", "public workspaces to subscribe to")
     .addOption(new Option("--agent", "create a free, claimable agent account").hideHelp())
     .option("--name <name>", "agent name")
     .addOption(new Option("--agent-caller <name>", "agent name").hideHelp())
     .addOption(
-      new Option("--subscribe <graph>", "public graphs to subscribe to")
+      new Option("--subscribe <workspace>", "public workspaces to subscribe to")
         .argParser((value, previous: string[] | undefined) => [...(previous ?? []), value]),
     )
     .option("--json", "print machine-readable output")
