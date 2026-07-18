@@ -244,26 +244,26 @@ heyditto friends --output json
 
 ### `graphs`
 
-Manage the public knowledge graphs you're subscribed to. Subscribed graphs are
+Manage the public workspaces you're subscribed to. Subscribed workspaces are
 folded into your `search`/`fetch` read paths (read-only). Subscriptions only ever
-cover **other** users' public graphs by `@username` — this command can't touch
-your own graph or an app's graph, since those aren't subscriptions.
+cover **other** users' public workspaces by `@username` — this command can't touch
+your own workspace or an app's workspace, since those aren't subscriptions.
 
 ```bash
-heyditto graphs create feedback-triager  # create a NEW dedicated graph you own (mint its CI key in the Ditto UI)
-heyditto graphs list              # graphs you're subscribed to
-heyditto graphs available         # readable knowledge graphs, including main/app graphs
-heyditto graphs add @minos        # subscribe to @minos's public graph
+heyditto graphs create feedback-triager  # create a NEW dedicated workspace you own (mint its CI key in the Ditto UI)
+heyditto graphs list              # workspaces you're subscribed to
+heyditto graphs available         # readable workspaces, including main/app workspaces
+heyditto graphs add @minos        # subscribe to @minos's public workspace
 heyditto graphs remove @minos     # unsubscribe
-heyditto graphs subscribers       # who's subscribed to your graph
-heyditto graphs sharing --disable # disable public subscriptions to your graph
+heyditto graphs subscribers       # who's subscribed to your workspace
+heyditto graphs sharing --disable # disable public subscriptions to your workspace
 ```
 
 Top-level aliases are also available:
 
 ```bash
 heyditto knowledge-graphs --output json
-heyditto graph-sharing --enable --title "Support Graph" --description "Public support notes"
+heyditto graph-sharing --enable --title "Support Workspace" --description "Public support notes"
 ```
 
 ### `status`
