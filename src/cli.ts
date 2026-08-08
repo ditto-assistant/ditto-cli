@@ -31,11 +31,28 @@ interface CommonOptions {
 interface SaveOptions extends CommonOptions {
   source?: string;
   sourceContext?: string;
+  response?: string;
+  vendorId?: string;
 }
 
 interface SearchOptions extends CommonOptions {
   includePublic?: boolean;
   filterUsername?: string;
+  limit?: string;
+  since?: string;
+  until?: string;
+  timezone?: string;
+  filter?: string;
+}
+
+interface AggregateOptions extends CommonOptions {
+  metrics?: string[];
+  limit?: string;
+  since?: string;
+  until?: string;
+  timezone?: string;
+  filter?: string;
+  kg?: string;
 }
 
 interface FetchOptions extends CommonOptions {
@@ -471,15 +488,14 @@ async function cmdLogout(options: CommonOptions): Promise<void> {
 
 async function cmdSave(content: string[], options: SaveOptions): Promise<void> {
   const format = parseOutputFormat(options.output);
-  await callAndPrint(
-    "save_memory",
-    {
-      content: content.join(" "),
-      source: options.source ?? "cli",
-      sourceContext: options.sourceContext,
-    },
-    format,
-  );
+  const args: Record<string, unknown> = {
+    content: content.join(" "),
+    source: options.source ?? "cli",
+    sourceContext: options.sourceContext,
+  };
+  if (options.response) args.response = options.response;
+  if (options.vendorId) args.vendorId = options.vendorId;
+  await callAndPrint("save_memory", args, format);
 }
 
 async function cmdSearch(queries: string[], options: SearchOptions): Promise<void> {
@@ -487,7 +503,27 @@ async function cmdSearch(queries: string[], options: SearchOptions): Promise<voi
   const args: Record<string, unknown> = { queries };
   if (options.includePublic) args.includePublic = true;
   if (options.filterUsername) args.filterUsername = options.filterUsername;
+  const limit = parseIntegerOption(options.limit, "--limit");
+  if (limit !== undefined) args.limit = limit;
+  if (options.since) args.since = options.since;
+  if (options.until) args.until = options.until;
+  if (options.timezone) args.timezone = options.timezone;
+  if (options.filter) args.filter = parseJSONOption(options.filter, "--filter");
   await callAndPrint("search_memories", args, format);
+}
+
+async function cmdAggregate(groupBy: string, options: AggregateOptions): Promise<void> {
+  const format = parseOutputFormat(options.output);
+  const args: Record<string, unknown> = { groupBy };
+  if (options.metrics && options.metrics.length > 0) args.metrics = options.metrics;
+  const limit = parseIntegerOption(options.limit, "--limit");
+  if (limit !== undefined) args.limit = limit;
+  if (options.since) args.since = options.since;
+  if (options.until) args.until = options.until;
+  if (options.timezone) args.timezone = options.timezone;
+  if (options.filter) args.filter = parseJSONOption(options.filter, "--filter");
+  if (options.kg) args.kg = options.kg;
+  await callAndPrint("aggregate_memories", args, format);
 }
 
 async function cmdFetch(ids: string[], options: FetchOptions): Promise<void> {
@@ -826,6 +862,14 @@ Environment:
       .argument("<content...>", "memory content")
       .option("--source <source>", "memory source", "cli")
       .option("--source-context <context>", "source context, such as a filename")
+      .option(
+        "--response <text>",
+        "optional assistant side of the exchange; enables memory-network growth",
+      )
+      .option(
+        "--vendor-id <id>",
+        "caller-stable id for deduplication (e.g. session::turn-id)",
+      )
       .addOption(outputOption())
       .action(cmdSave),
     `  heyditto save "Project X uses Bun + SolidJS"
@@ -840,10 +884,38 @@ Environment:
       .argument("<query...>", "one or more search queries")
       .option("--include-public", "include public DittoHub memories")
       .option("--filter-username <username>", "scope public results to a username")
+      .option("--limit <number>", "maximum memories to return per query (default 5, max 50)")
+      .option("--since <expression>", 'time lower bound, e.g. "last week", "30d", "2026-03"')
+      .option("--until <expression>", 'time upper bound, e.g. "2026-04"')
+      .option("--timezone <iana>", 'IANA timezone, e.g. "America/New_York"')
+      .option("--filter <json>", "structured filter object as JSON")
       .addOption(outputOption())
       .action(cmdSearch),
     `  heyditto search "typescript preferences"
   heyditto search "launch notes" --include-public --filter-username peyton`,
+  );
+
+  addExamples(
+    program
+      .command("aggregate")
+      .alias("aggregate_memories")
+      .description("count and group memories by source, time, subject or theme")
+      .summary("count and group memories")
+      .argument("<group-by>", 'dimension to group by: "source", "cluster", "subject", "week", "month", "year"')
+      .option(
+        "--metrics <metric>",
+        "metric to compute (repeatable); e.g. count, sum",
+      )
+      .option("--limit <number>", "maximum groups to return (default 50, max 500)")
+      .option("--since <expression>", 'time lower bound, e.g. "last week", "30d"')
+      .option("--until <expression>", 'time upper bound')
+      .option("--timezone <iana>", 'IANA timezone')
+      .option("--filter <json>", "structured filter object as JSON")
+      .option("--kg <alias>", "knowledge graph alias")
+      .addOption(outputOption())
+      .action(cmdAggregate),
+    `  heyditto aggregate source --limit 20 --output json
+  heyditto aggregate week --since "last month" --timezone America/New_York`,
   );
 
   program

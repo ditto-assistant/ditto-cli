@@ -46,6 +46,22 @@ test("search --help prints command help without auth", () => {
   assert.match(result.stdout, /Usage: heyditto search/);
   assert.match(result.stdout, /--include-public/);
   assert.match(result.stdout, /--filter-username/);
+  assert.match(result.stdout, /--limit/);
+  assert.match(result.stdout, /--since/);
+  assert.match(result.stdout, /--until/);
+  assert.match(result.stdout, /--timezone/);
+  assert.match(result.stdout, /--filter/);
+  assert.equal(result.stderr, "");
+});
+
+test("aggregate --help prints command help without auth", () => {
+  const result = run(["aggregate", "--help"]);
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /Usage: heyditto aggregate/);
+  assert.match(result.stdout, /--metrics/);
+  assert.match(result.stdout, /--limit/);
+  assert.match(result.stdout, /--since/);
+  assert.match(result.stdout, /--filter/);
   assert.equal(result.stderr, "");
 });
 
@@ -54,6 +70,8 @@ test("save -h prints source options", () => {
   assert.equal(result.status, 0);
   assert.match(result.stdout, /--source/);
   assert.match(result.stdout, /--source-context/);
+  assert.match(result.stdout, /--response/);
+  assert.match(result.stdout, /--vendor-id/);
 });
 
 test("update --help prints file and revision options", () => {
@@ -89,6 +107,7 @@ test("new MCP-backed command help is exposed", () => {
   assert.match(result.stdout, /subject-edges\|get_subject_edges/);
   assert.match(result.stdout, /graph-sharing\|set_knowledge_graph_sharing/);
   assert.match(result.stdout, /delete\|delete_memory/);
+  assert.match(result.stdout, /aggregate\|aggregate_memories/);
 });
 
 test("graph sharing help exposes enable and disable", () => {
