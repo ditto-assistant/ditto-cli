@@ -129,7 +129,7 @@ heyditto graphs add --help
 
 ### `save`
 
-Persist a memory pair from an external source.
+Save a document or note to the user's memory base.
 
 ```bash
 heyditto save "Project X uses Bun + SolidJS, deployed to Cloud Run"
