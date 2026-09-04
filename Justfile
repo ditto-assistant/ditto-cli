@@ -35,6 +35,16 @@ search api=api +query: build
 subjects api=api +query: build
   DITTO_API_BASE="{{api}}" node dist/cli.js subjects {{query}}
 
+endpoints api=api: build
+  DITTO_API_BASE="{{api}}" node dist/cli.js endpoints
+
+# Dry-run the coding-agent launchers (no key is minted).
+claude-plan api=api *args: build
+  DITTO_API_BASE="{{api}}" node dist/cli.js claude --dry-run {{args}}
+
+codex-plan api=api *args: build
+  DITTO_API_BASE="{{api}}" node dist/cli.js codex --dry-run {{args}}
+
 # Local-API shortcuts.
 local-status:
   just status http://localhost:3400

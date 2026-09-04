@@ -17,6 +17,8 @@ import {
   resolveApiKey,
 } from "./config.js";
 import { clearStoredKey, readStoredAuth, writeStoredAuth, writeStoredKey } from "./store.js";
+import { cmdEndpoints, cmdSessions, cmdSessionsRm, registerHarnessCommands } from "./commands.js";
+import { deviceLogin } from "./device-login.js";
 
 type OutputFormat = "json" | "text" | "markdown" | "raw";
 const OUTPUT_FORMATS: readonly OutputFormat[] = ["json", "text", "markdown", "raw"];
@@ -278,9 +280,20 @@ async function cmdLogin(keyArg: string | undefined, options: LoginOptions): Prom
   parseOutputFormat(options.output); // validate but ignored: login is interactive
 
   let key = keyArg?.trim();
+  let viaDevice = false;
 
   if (!key && options.stdin) {
     key = (await readKeyFromStdin()).trim();
+  } else if (!key && !options.paste && process.stdin.isTTY) {
+    // Browser device flow: no key to copy around.
+    key = await deviceLogin({
+      onCode: (userCode, url) => {
+        process.stderr.write(`\nOpen ${url}\nand confirm the code: ${userCode}\n\n`);
+        openInBrowser(url);
+        process.stderr.write("Waiting for approval in the browser (Ctrl+C to cancel)…\n");
+      },
+    });
+    viaDevice = true;
   } else if (!key) {
     if (options.paste) {
       process.stderr.write(`Opening ${newKeyURL()} in your browser...\n`);
@@ -300,7 +313,7 @@ async function cmdLogin(keyArg: string | undefined, options: LoginOptions): Prom
   }
 
   await writeStoredKey(key);
-  process.stdout.write(`Saved key to ${authFilePath()}\n`);
+  process.stdout.write(`${viaDevice ? "Logged in. " : ""}Saved key to ${authFilePath()}\n`);
   if (process.env.DITTO_API_KEY) {
     process.stderr.write(
       `note: DITTO_API_KEY is set in your environment and will override the saved key for this session.\n`,
@@ -801,6 +814,7 @@ function buildProgram(): Command {
     .description("Save, search, fetch, and traverse Ditto memories from the shell.")
     .version(packageVersion, "-v, --version", "print the CLI version")
     .helpCommand("help [command]", "show help for a command")
+    .enablePositionalOptions()
     .showHelpAfterError()
     .addHelpText(
       "after",
@@ -815,6 +829,11 @@ Environment:
   DITTO_API_BASE    Optional API base URL. Defaults to https://api.heyditto.ai.
   DITTO_CONFIG_DIR  Optional config directory. Defaults to $XDG_CONFIG_HOME/heyditto/cli
                     or ~/.config/heyditto/cli.
+
+Coding agents:
+  heyditto claude / heyditto codex launch the agent through one of your Ditto
+  inference endpoints with a temporary key that is revoked when it exits, so
+  every session becomes its own thread with full traces in the Ditto app.
 `,
     );
 
@@ -1084,12 +1103,41 @@ your own graph or an app graph.`,
 
   program
     .command("login")
-    .description("save an API key")
-    .argument("[key]", "Ditto API key")
-    .option("--paste", "open the key creation page before prompting")
+    .description("sign in (browser device flow) or save an API key")
+    .argument("[key]", "Ditto API key (omit to sign in through the browser)")
+    .option("--paste", "open the key creation page and paste a key instead of the device flow")
     .option("--stdin", "read the API key from stdin")
     .addOption(hiddenOutputOption())
     .action(cmdLogin);
+
+  addExamples(
+    program
+      .command("endpoints")
+      .description("list your inference endpoints (used by heyditto claude / codex)")
+      .summary("list inference endpoints")
+      .option("--set-default <slug>", "endpoint to use when --endpoint is omitted")
+      .option("--clear-default", "forget the default endpoint")
+      .addOption(outputOption())
+      .action(cmdEndpoints),
+    `  heyditto endpoints
+  heyditto endpoints --set-default my-endpoint
+  heyditto endpoints --output json`,
+  );
+
+  registerHarnessCommands(program, addExamples);
+
+  const sessions = program
+    .command("sessions")
+    .description("list coding-agent sessions launched by this CLI")
+    .summary("list coding-agent sessions")
+    .option("--json", "print machine-readable output")
+    .option("--all", "show every record, not just the latest 20")
+    .action(cmdSessions);
+  sessions
+    .command("rm")
+    .description("forget a local session record (threads and traces are kept)")
+    .argument("<id>", "Ditto session id")
+    .action(cmdSessionsRm);
 
   program
     .command("logout")

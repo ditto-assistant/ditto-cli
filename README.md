@@ -42,6 +42,17 @@ You can also reorder your `PATH` so the npm global bin comes before `/usr/bin`, 
 
 ## Auth
 
+Humans sign in through the browser:
+
+```bash
+heyditto login
+```
+
+This prints a short code, opens `https://heyditto.ai/device` (pre-filled with the
+code), and saves the resulting key to your CLI config directory once you approve
+it. Pass a key as an argument (`heyditto login ditto_mcp_…`), pipe it with
+`--stdin`, or use `--paste` for the older copy-a-key page.
+
 Agents can self-provision without a browser, email, or OTP:
 
 ```bash
@@ -111,6 +122,11 @@ heyditto graphs subscribers
 heyditto graphs sharing (--enable|--disable) [--title <t>] [--description <d>]
 heyditto init [--name <name>] [--subscribe <@graph>]... [<@graph>...] [--json]
 heyditto login [<key>] [--paste] [--stdin]
+heyditto endpoints [--set-default <slug>] [--clear-default]
+heyditto claude [options] [-- <claude args>]
+heyditto codex  [options] [-- <codex args>]
+heyditto sessions [--json] [--all]
+heyditto sessions rm <id>
 heyditto logout
 heyditto status [--output <format>]
 heyditto config
@@ -289,10 +305,80 @@ graph. Choose it up front — renaming after init isn't yet supported. See
 
 Print a Claude Desktop / Cursor / generic-MCP-client config snippet for the Ditto memory server.
 
+## Coding agents
+
+`heyditto claude` and `heyditto codex` launch Claude Code or Codex through one of
+your Ditto **inference endpoints** (Settings → Developer → Inference endpoints
+in the Ditto app). Each launch:
+
+1. lists your endpoints and lets you pick one (or uses `--endpoint` / the saved default),
+2. mints a temporary endpoint key (optionally capped with `--budget <tokens>`),
+3. starts the agent with that key and a fresh `X-Ditto-Session-Id`, so the
+   session becomes its own thread with full traces under the endpoint,
+4. **revokes the key when the agent exits** (Ctrl+C included). The thread and
+   traces are kept; `--keep-key` opts out, `--expires` sets a server-side
+   safety expiry (default `1d`).
+
+```bash
+npx -y @heyditto/cli login
+npx -y @heyditto/cli claude --endpoint my-endpoint
+
+heyditto endpoints --set-default my-endpoint   # skip the picker next time
+heyditto claude                                # interactive Claude Code
+heyditto codex --yellow                        # Codex, auto-accept edits
+heyditto claude --yolo --worktree fix-login    # bypass prompts in <repo>/.worktrees/fix-login
+heyditto codex -p "summarize this repo" --json # headless (codex exec)
+heyditto claude -p "list TODOs" --output-format json --max-turns 3
+heyditto claude --resume                       # reopen the last session in the same thread
+heyditto claude -- --verbose                   # anything after -- goes to the agent
+```
+
+Options shared by both commands:
+
+| Flag | Meaning |
+| --- | --- |
+| `-e, --endpoint <slug>` | endpoint to route through (default: saved default, else a picker) |
+| `--budget <tokens>` | spend cap for this session's key, in Ditto tokens |
+| `--expires <1h…never>` | server-side key expiry; the key is still revoked on exit unless `--keep-key` |
+| `--session <id>` | reuse a Ditto session id so traces land in an existing thread |
+| `--resume [id]` / `-c, --continue` | resume a local session (`heyditto sessions`) / the agent's most recent conversation |
+| `--yolo` / `--yellow` / `--plan` | bypass permissions / auto-accept edits / plan mode (Claude only) |
+| `-p, --prompt <text>` | headless run: `claude -p` or `codex exec` |
+| `-m, --model <id>` | model to request (Codex defaults to the endpoint slug; Claude's ids follow the endpoint's routes) |
+| `-w, --worktree [name]` | run inside `<repo>/.worktrees/<name>` on a branch of that name; `.worktrees/` is added to `.gitignore` |
+| `--name <label>` | key name shown in the app (default `cli:<agent>:<hostname>`) |
+| `--dry-run` | print the command, args and env with the key masked; mints nothing |
+
+Unknown flags and everything after `--` are forwarded to the agent, so Claude's
+and Codex's own options keep working.
+
+How the wiring works:
+
+- **Claude Code** gets `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` (a bearer
+  token, which skips Claude's "use this API key?" prompt) and
+  `ANTHROPIC_CUSTOM_HEADERS` with the session id. Any inherited
+  `ANTHROPIC_API_KEY` is removed from the child environment.
+- **Codex** speaks the Responses API only, so the endpoint is injected as a
+  `ditto` model provider via `-c` overrides (nothing is written to
+  `~/.codex/config.toml`) with the key in `DITTO_INFERENCE_API_KEY`.
+
+### `endpoints`
+
+List your inference endpoints with model and spend. `--set-default <slug>` picks
+the one used when `--endpoint` is omitted; `--output json` includes the gateway
+base URL.
+
+### `sessions`
+
+List the coding-agent sessions launched from this machine (stored under
+`~/.config/heyditto/cli/sessions/`). `heyditto sessions rm <id>` forgets a local
+record; the Ditto thread and traces are unaffected.
+
 ## Environment
 
 - `DITTO_API_KEY` (optional) — MCP API key override. Agents can instead run `heyditto init --json` for no-human setup.
 - `DITTO_API_BASE` (optional) — API base URL. Defaults to `https://api.heyditto.ai`. Useful for local dev (`http://localhost:3400`).
+- `DITTO_CONFIG_DIR` (optional) — config directory for the saved key, default endpoint and session records. Defaults to `$XDG_CONFIG_HOME/heyditto/cli` or `~/.config/heyditto/cli`.
 
 ## Output
 
