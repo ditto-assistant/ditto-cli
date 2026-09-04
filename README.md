@@ -127,6 +127,12 @@ heyditto claude [options] [-- <claude args>]
 heyditto codex  [options] [-- <codex args>]
 heyditto sessions [--json] [--all]
 heyditto sessions rm <id>
+heyditto session new [<name>...] [--id <id>]
+heyditto session list [--all]
+heyditto session use <id>
+heyditto session current
+heyditto session end
+heyditto agents [--output <format>]
 heyditto logout
 heyditto status [--output <format>]
 heyditto config
@@ -374,10 +380,39 @@ List the coding-agent sessions launched from this machine (stored under
 `~/.config/heyditto/cli/sessions/`). `heyditto sessions rm <id>` forgets a local
 record; the Ditto thread and traces are unaffected.
 
+### `session`
+
+Explicit MCP sessions. Without one, the server groups your saves and searches
+into a time-based *implicit* session (activity within a cooldown, auto-named
+when it goes quiet). `heyditto session new [name]` pins an explicit session:
+every MCP request from then on carries `X-Ditto-Session-Id`, and the name goes
+out once as `X-Ditto-Session-Name` so the thread gets that title. Saves and
+searches land in one thread inside the agent your key is attached to.
+
+```bash
+heyditto session new "refactor auth module"   # prints the id and makes it active
+heyditto save "Decided to keep JWT refresh in the gateway"
+heyditto session current                      # the active id (exit 1 when none)
+heyditto session list                         # local history, * marks the active one
+heyditto session end                          # back to implicit sessions
+heyditto session use 9e9a93c3                 # reactivate by id or unique prefix
+```
+
+`DITTO_SESSION_ID=<id>` pins a session for one shell or script (it overrides the
+saved one and never sends a name). Sessions are tracked locally in
+`~/.config/heyditto/cli/mcp-sessions.json`; the server keeps the threads.
+
+### `agents`
+
+List your Ditto agents (`GET /api/v5/chat-agents`): id, kind (`main`, `chat`,
+`inference_endpoint`, `mcp`, `connector`), name, thread count, last activity and
+the live connections (API keys, OAuth grants, endpoints) writing into each.
+
 ## Environment
 
 - `DITTO_API_KEY` (optional) — MCP API key override. Agents can instead run `heyditto init --json` for no-human setup.
 - `DITTO_API_BASE` (optional) — API base URL. Defaults to `https://api.heyditto.ai`. Useful for local dev (`http://localhost:3400`).
+- `DITTO_SESSION_ID` (optional) — pin an explicit MCP session id for this shell (see `session`).
 - `DITTO_CONFIG_DIR` (optional) — config directory for the saved key, default endpoint and session records. Defaults to `$XDG_CONFIG_HOME/heyditto/cli` or `~/.config/heyditto/cli`.
 
 ## Output

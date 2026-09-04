@@ -17,7 +17,15 @@ import {
   resolveApiKey,
 } from "./config.js";
 import { clearStoredKey, readStoredAuth, writeStoredAuth, writeStoredKey } from "./store.js";
-import { cmdEndpoints, cmdSessions, cmdSessionsRm, registerHarnessCommands } from "./commands.js";
+import {
+  cmdAgents,
+  cmdEndpoints,
+  cmdSessions,
+  cmdSessionsRm,
+  registerHarnessCommands,
+  registerSessionCommands,
+} from "./commands.js";
+import { type ActiveSession, markSessionUsed, resolveActiveSession, sessionHeaders } from "./mcp-session.js";
 import { deviceLogin } from "./device-login.js";
 
 type OutputFormat = "json" | "text" | "markdown" | "raw";
@@ -214,14 +222,24 @@ async function getClient(): Promise<Client> {
     );
     process.exit(1);
   }
+  // An explicit session (heyditto session new / DITTO_SESSION_ID) tags every
+  // request so the server groups this run's saves and searches into one thread.
+  let session: ActiveSession | undefined;
+  try {
+    session = await resolveActiveSession();
+  } catch (err) {
+    process.stderr.write(`error: ${err instanceof Error ? err.message : String(err)}\n`);
+    process.exit(1);
+  }
   const client = new Client({ name: packageName, version: packageVersion });
   const transport = new StreamableHTTPClientTransport(new URL(mcpServerURL()), {
     requestInit: {
-      headers: { Authorization: `Bearer ${key}` },
+      headers: { Authorization: `Bearer ${key}`, ...sessionHeaders(session) },
     },
   });
   try {
     await client.connect(transport);
+    await markSessionUsed(session);
   } catch (err) {
     process.stderr.write(
       `error: failed to connect to ${mcpServerURL()} (key source: ${source}).\n` +
@@ -653,6 +671,7 @@ async function cmdDelete(memoryId: string, options: DeleteOptions): Promise<void
 }
 
 interface StatusReport {
+  session?: { id: string; name?: string; source: "env" | "config" };
   package: string;
   version: string;
   endpoint: string;
@@ -672,13 +691,18 @@ interface StatusReport {
 async function cmdStatus(options: CommonOptions): Promise<void> {
   const format = parseOutputFormat(options.output);
 
-  const [{ key, source }, stored] = await Promise.all([resolveApiKey(), readStoredAuth()]);
+  const [{ key, source }, stored, session] = await Promise.all([
+    resolveApiKey(),
+    readStoredAuth(),
+    resolveActiveSession(),
+  ]);
   const report: StatusReport = {
     package: packageName,
     version: packageVersion,
     endpoint: mcpServerURL(),
     apiKey: { present: !!key, source },
   };
+  if (session) report.session = { id: session.id, name: session.name, source: session.source };
   if (source === "config" && stored?.agentMode) {
     report.agent = {
       enabled: true,
@@ -735,6 +759,10 @@ async function cmdStatus(options: CommonOptions): Promise<void> {
   }
   if (report.agent?.claimURL) {
     lines.push(`agent:     unclaimed (${report.agent.caller || "agent"})`, `claim:     ${report.agent.claimURL}`);
+  }
+  if (report.session) {
+    const pinned = report.session.source === "env" ? "  [DITTO_SESSION_ID]" : "";
+    lines.push(`session:   ${report.session.id}${report.session.name ? ` (${report.session.name})` : ""}${pinned}`);
   }
   process.stdout.write(`${lines.join("\n")}\n`);
 }
@@ -827,6 +855,7 @@ Notes:
 Environment:
   DITTO_API_KEY     Optional override, taking precedence over the saved key.
   DITTO_API_BASE    Optional API base URL. Defaults to https://api.heyditto.ai.
+  DITTO_SESSION_ID  Optional explicit MCP session id sent as X-Ditto-Session-Id (see 'session').
   DITTO_CONFIG_DIR  Optional config directory. Defaults to $XDG_CONFIG_HOME/heyditto/cli
                     or ~/.config/heyditto/cli.
 
@@ -1125,6 +1154,18 @@ your own graph or an app graph.`,
   );
 
   registerHarnessCommands(program, addExamples);
+  registerSessionCommands(program, addExamples);
+
+  addExamples(
+    program
+      .command("agents")
+      .description("list your Ditto agents (threads, activity, connections)")
+      .summary("list Ditto agents")
+      .addOption(outputOption())
+      .action(cmdAgents),
+    `  heyditto agents
+  heyditto agents --output json`,
+  );
 
   const sessions = program
     .command("sessions")

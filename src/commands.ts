@@ -2,7 +2,16 @@ import { Command, Option } from "commander";
 import { launchHarness } from "./agents/launch.js";
 import { listSessions, removeSession } from "./agents/sessions.js";
 import { HARNESSES, type Harness, KEY_EXPIRIES } from "./agents/types.js";
-import { type InferenceEndpoint, listEndpoints } from "./api.js";
+import { type ChatAgent, type InferenceEndpoint, listChatAgents, listEndpoints } from "./api.js";
+import {
+  SESSION_ENV,
+  SESSION_ID_HEADER,
+  endSession,
+  readSessionHistory,
+  resolveActiveSession,
+  startSession,
+  useSession,
+} from "./mcp-session.js";
 import { readStoredAuth, updateStoredAuth } from "./store.js";
 
 interface EndpointsOptions {
@@ -142,4 +151,190 @@ export function registerHarnessCommands(program: Command, addExamples: (c: Comma
   (see also: heyditto ${other})`,
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// Explicit MCP sessions: `heyditto session …`
+// ---------------------------------------------------------------------------
+
+interface SessionOutputOptions {
+  output?: string;
+}
+
+function jsonOut(options: SessionOutputOptions): boolean {
+  return options.output === "json" || options.output === "raw";
+}
+
+function sessionOutputOption(): Option {
+  return new Option("--output <format>", "output format").choices(["text", "json"]).default("text");
+}
+
+function relativeAge(iso: string | undefined | null): string {
+  if (!iso) return "";
+  const ms = Date.now() - new Date(iso).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return "just now";
+  const m = Math.round(ms / 60000);
+  if (m < 1) return "just now";
+  if (m < 60) return `${m}m ago`;
+  const h = Math.round(m / 60);
+  if (h < 48) return `${h}h ago`;
+  return `${Math.round(h / 24)}d ago`;
+}
+
+export async function cmdSessionNew(nameParts: string[], options: SessionOutputOptions & { id?: string }): Promise<void> {
+  const name = nameParts.join(" ").trim() || undefined;
+  const record = await startSession(name, options.id);
+  if (jsonOut(options)) {
+    process.stdout.write(`${JSON.stringify({ active: true, ...record }, null, 2)}\n`);
+    return;
+  }
+  process.stderr.write(
+    `Started session ${record.id}${record.name ? ` (${record.name})` : ""}.\n` +
+      `Memory commands now send ${SESSION_ID_HEADER}; end it with \`heyditto session end\`.\n`,
+  );
+  process.stdout.write(`${record.id}\n`);
+}
+
+export async function cmdSessionList(options: SessionOutputOptions & { all?: boolean }): Promise<void> {
+  const [history, active] = await Promise.all([readSessionHistory(), resolveActiveSession()]);
+  const rows = options.all ? history : history.slice(0, 20);
+  if (jsonOut(options)) {
+    process.stdout.write(`${JSON.stringify({ active: active ?? null, sessions: rows }, null, 2)}\n`);
+    return;
+  }
+  if (rows.length === 0) {
+    process.stdout.write("No MCP sessions yet. Start one with `heyditto session new [name]`.\n");
+    return;
+  }
+  for (const r of rows) {
+    const mark = active?.id === r.id ? "*" : " ";
+    const state = r.endedAt ? "ended" : active?.id === r.id ? "active" : "idle";
+    process.stdout.write(
+      `${mark} ${r.id}  ${pad(state, 6)}  ${pad(relativeAge(r.lastUsedAt ?? r.createdAt), 9)}  ${r.name ?? ""}\n`,
+    );
+  }
+  if (active?.source === "env") process.stdout.write(`\n${SESSION_ENV} pins session ${active.id} for this shell.\n`);
+}
+
+export async function cmdSessionUse(id: string, options: SessionOutputOptions): Promise<void> {
+  const record = await useSession(id);
+  if (jsonOut(options)) {
+    process.stdout.write(`${JSON.stringify({ active: true, ...record }, null, 2)}\n`);
+    return;
+  }
+  process.stderr.write(`Using session ${record.id}${record.name ? ` (${record.name})` : ""}.\n`);
+  process.stdout.write(`${record.id}\n`);
+}
+
+export async function cmdSessionCurrent(options: SessionOutputOptions): Promise<void> {
+  const active = await resolveActiveSession();
+  if (jsonOut(options)) {
+    process.stdout.write(`${JSON.stringify(active ?? null, null, 2)}\n`);
+    if (!active) process.exitCode = 1;
+    return;
+  }
+  if (!active) {
+    process.stderr.write("No active session. Start one with `heyditto session new [name]`.\n");
+    process.exitCode = 1;
+    return;
+  }
+  process.stdout.write(`${active.id}\n`);
+  if (active.name) process.stderr.write(`name: ${active.name}\n`);
+  if (active.source === "env") process.stderr.write(`(pinned by ${SESSION_ENV})\n`);
+}
+
+export async function cmdSessionEnd(options: SessionOutputOptions): Promise<void> {
+  const ended = await endSession();
+  if (jsonOut(options)) {
+    process.stdout.write(`${JSON.stringify(ended ?? null, null, 2)}\n`);
+    return;
+  }
+  if (!ended) {
+    process.stderr.write("No active session.\n");
+    return;
+  }
+  process.stderr.write(`Ended session ${ended.id}. Memory commands go back to the implicit session.\n`);
+}
+
+export function registerSessionCommands(program: Command, addExamples: (c: Command, ex: string) => Command): void {
+  const session = program
+    .command("session")
+    .description("explicit MCP sessions: group saves and searches into one thread")
+    .summary("manage the explicit MCP session")
+    .showHelpAfterError()
+    .addHelpText(
+      "after",
+      `
+Without a session, MCP saves fall into a time-based implicit session on the
+server. 'session new' pins an explicit one: every request carries
+${SESSION_ID_HEADER} (and the name once, as X-Ditto-Session-Name). Set
+${SESSION_ENV} to pin a session for one shell or script.`,
+    );
+  addExamples(
+    session
+      .command("new")
+      .description("start a new session and make it active")
+      .argument("[name...]", "optional name; becomes the thread title")
+      .option("--id <id>", "use this session id instead of a random uuid")
+      .addOption(sessionOutputOption())
+      .action(cmdSessionNew),
+    `  heyditto session new "refactor auth module"
+  heyditto session new --output json | jq -r .id`,
+  );
+  session
+    .command("list")
+    .description("list local sessions (newest first; * = active)")
+    .option("--all", "show every record, not just the latest 20")
+    .addOption(sessionOutputOption())
+    .action(cmdSessionList);
+  session
+    .command("use")
+    .description("make an existing session active")
+    .argument("<id>", "session id (a unique prefix of at least 6 chars works)")
+    .addOption(sessionOutputOption())
+    .action(cmdSessionUse);
+  session
+    .command("current")
+    .description("print the active session id (exit 1 when none)")
+    .addOption(sessionOutputOption())
+    .action(cmdSessionCurrent);
+  session
+    .command("end")
+    .description("end the active session (history is kept)")
+    .addOption(sessionOutputOption())
+    .action(cmdSessionEnd);
+}
+
+// ---------------------------------------------------------------------------
+// Chat agents: `heyditto agents`
+// ---------------------------------------------------------------------------
+
+function connectionsColumn(a: ChatAgent): string {
+  const live = (a.connections ?? []).filter((c) => !c.revokedAt);
+  return live.map((c) => `${c.kind}${c.name ? `:${c.name}` : ""}`).join(", ");
+}
+
+export async function cmdAgents(options: SessionOutputOptions): Promise<void> {
+  const agents = await listChatAgents();
+  if (jsonOut(options)) {
+    process.stdout.write(`${JSON.stringify({ agents }, null, 2)}\n`);
+    return;
+  }
+  if (agents.length === 0) {
+    process.stdout.write("No agents yet.\n");
+    return;
+  }
+  const rows = agents.map((a) => [
+    a.id,
+    a.kind,
+    a.name,
+    String(a.threadCount ?? ""),
+    relativeAge(a.lastActivityAt ?? a.updatedAt),
+    connectionsColumn(a),
+  ]);
+  const header = ["ID", "KIND", "NAME", "THREADS", "LAST ACTIVITY", "CONNECTIONS"];
+  const widths = header.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i].length)));
+  const line = (r: string[]) => r.map((c, i) => (i === r.length - 1 ? c : pad(c, widths[i]))).join("  ");
+  process.stdout.write(`${line(header)}\n`);
+  for (const r of rows) process.stdout.write(`${line(r)}\n`);
 }

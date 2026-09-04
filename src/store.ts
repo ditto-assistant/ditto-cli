@@ -12,6 +12,8 @@ export interface StoredAuth {
   createdAt?: string;
   /** Endpoint slug or id used by `heyditto claude` / `heyditto codex` when --endpoint is omitted. */
   defaultEndpoint?: string;
+  /** Explicit MCP session (`heyditto session new`) sent as X-Ditto-Session-Id on every request. */
+  activeSession?: { id: string; name?: string; createdAt?: string };
 }
 
 export async function readStoredAuth(): Promise<StoredAuth | undefined> {
