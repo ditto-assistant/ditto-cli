@@ -38,6 +38,13 @@ subjects api=api +query: build
 endpoints api=api: build
   DITTO_API_BASE="{{api}}" node dist/cli.js endpoints
 
+agents api=api: build
+  DITTO_API_BASE="{{api}}" node dist/cli.js agents
+
+# Explicit MCP session bookkeeping (local; no network).
+session *args: build
+  node dist/cli.js session {{args}}
+
 # Dry-run the coding-agent launchers (no key is minted).
 claude-plan api=api *args: build
   DITTO_API_BASE="{{api}}" node dist/cli.js claude --dry-run {{args}}

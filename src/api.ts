@@ -209,3 +209,40 @@ export async function pollDeviceToken(deviceCode: string): Promise<DeviceTokenRe
       return { status: "expired" };
   }
 }
+
+// ---------------------------------------------------------------------------
+// Chat agents (/api/v5/chat-agents)
+// ---------------------------------------------------------------------------
+
+export interface AgentConnection {
+  id: string;
+  agentId: string;
+  kind: string;
+  refId: string;
+  name: string;
+  sessionCooldownSeconds?: number;
+  createdAt: string;
+  lastUsedAt?: string | null;
+  expiresAt?: string | null;
+  revokedAt?: string | null;
+}
+
+export interface ChatAgent {
+  id: string;
+  kind: string;
+  name: string;
+  mainThreadId: string;
+  kgId?: string;
+  status: string;
+  pinned?: boolean;
+  threadCount?: number;
+  lastActivityAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  connections?: AgentConnection[];
+}
+
+export async function listChatAgents(): Promise<ChatAgent[]> {
+  const out = await apiFetch<{ agents?: ChatAgent[] }>("/api/v5/chat-agents");
+  return out.agents ?? [];
+}
