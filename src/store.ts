@@ -10,6 +10,8 @@ export interface StoredAuth {
   agentCaller?: string;
   claimURL?: string;
   createdAt?: string;
+  /** Endpoint slug or id used by `heyditto claude` / `heyditto codex` when --endpoint is omitted. */
+  defaultEndpoint?: string;
 }
 
 export async function readStoredAuth(): Promise<StoredAuth | undefined> {
@@ -36,6 +38,20 @@ export async function writeStoredAuth(auth: StoredAuth): Promise<void> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   await writeFile(path, `${JSON.stringify({ ...auth, apiKey: cleaned }, null, 2)}\n`, { mode: 0o600 });
   await chmod(path, 0o600);
+}
+
+/** Merge fields into the stored auth file without dropping the saved key or agent fields. */
+export async function updateStoredAuth(partial: Partial<StoredAuth>): Promise<StoredAuth> {
+  const current = (await readStoredAuth()) ?? {};
+  const merged: StoredAuth = { ...current, ...partial };
+  for (const [k, v] of Object.entries(partial)) {
+    if (v === undefined) delete (merged as Record<string, unknown>)[k];
+  }
+  const path = authFilePath();
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  await writeFile(path, `${JSON.stringify(merged, null, 2)}\n`, { mode: 0o600 });
+  await chmod(path, 0o600);
+  return merged;
 }
 
 export async function writeStoredKey(key: string): Promise<void> {

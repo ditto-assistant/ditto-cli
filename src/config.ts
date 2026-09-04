@@ -27,6 +27,11 @@ export function authFilePath(): string {
   return path.join(configDir(), "config.json");
 }
 
+/** Directory holding one JSON record per coding-agent session launched by the CLI. */
+export function sessionsDir(): string {
+  return path.join(configDir(), "sessions");
+}
+
 export function newKeyURL(): string {
   return "https://app.heyditto.ai/mcp/newkey";
 }
