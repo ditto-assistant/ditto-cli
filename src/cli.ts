@@ -27,6 +27,7 @@ import {
 import { type ActiveSession, markSessionUsed, resolveActiveSession, sessionHeaders } from "./mcp-session.js";
 import { NO_KEY_MESSAGE } from "./api.js";
 import { openInBrowser } from "./browser.js";
+import { registerTeleportCommands } from "./teleport/commands.js";
 import { deviceLogin } from "./device-login.js";
 
 type OutputFormat = "json" | "text" | "markdown" | "raw";
@@ -1154,6 +1155,7 @@ your own graph or an app graph.`,
   registerEndpointCommands(program, addExamples, outputOption);
   registerHarnessCommands(program, addExamples);
   registerSessionCommands(program, addExamples);
+  registerTeleportCommands(program, addExamples);
 
   addExamples(
     program
