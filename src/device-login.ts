@@ -16,8 +16,13 @@ export interface DeviceLoginHooks {
  */
 export async function deviceLogin(hooks: DeviceLoginHooks): Promise<string> {
   const code = await requestDeviceCode();
-  const url = `${code.verification_url}${code.verification_url.includes("?") ? "&" : "?"}code=${encodeURIComponent(code.user_code)}`;
-  hooks.onCode(code.user_code, url);
+  const url = new URL(code.verification_url);
+  // Older API responses point at the marketing site instead of the app.
+  if (url.origin === "https://heyditto.ai") {
+    url.hostname = "app.heyditto.ai";
+  }
+  url.searchParams.set("code", code.user_code);
+  hooks.onCode(code.user_code, url.toString());
   const deadline = Date.now() + Math.max(30, code.expires_in || 600) * 1000;
   let interval = Math.max(2, code.interval || 5) * 1000;
   while (Date.now() < deadline) {
