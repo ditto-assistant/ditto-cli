@@ -85,7 +85,25 @@ requires backend support — see
 [ditto-assistant/backend#1199](https://github.com/ditto-assistant/backend/issues/1199)),
 so picking the right name at init avoids a stuck label.
 
-For a human-owned key, get one at **https://app.heyditto.ai/mcp/newkey**.
+### Humans: sign in through the browser
+
+```bash
+heyditto login
+```
+
+opens the Ditto web app with a one-time device code (sign in with Google, X, Apple
+or GitHub, or create an account), approves it, and hands the key back to the CLI —
+nothing to copy. `heyditto claude` / `heyditto codex` run the same flow
+automatically on first use, and the web page lets you pick or create the
+inference endpoint to launch through, so a fresh machine needs exactly one
+command:
+
+```bash
+npx @heyditto/cli@latest claude --yolo --worktree
+```
+
+You can still paste a key from **https://app.heyditto.ai/mcp/newkey**
+(`heyditto login <key>`, `--paste`, or `--stdin`), or set it in the environment:
 
 ```bash
 export DITTO_API_KEY=ditto_mcp_…
@@ -314,10 +332,11 @@ Print a Claude Desktop / Cursor / generic-MCP-client config snippet for the Ditt
 ## Coding agents
 
 `heyditto claude` and `heyditto codex` launch Claude Code or Codex through one of
-your Ditto **inference endpoints** (Settings → Developer → Inference endpoints
-in the Ditto app). Each launch:
+your Ditto **inference endpoints** (managed at https://developer.heyditto.ai/endpoints;
+the Ditto app's Settings → Developer page still works too). Each launch:
 
-1. lists your endpoints and lets you pick one (or uses `--endpoint` / the saved default),
+1. signs you in through the browser if this machine has no key yet, then uses
+   the endpoint you picked there, `--endpoint`, the saved default, or a picker,
 2. mints a temporary endpoint key (optionally capped with `--budget <tokens>`),
 3. starts the agent with that key and a fresh `X-Ditto-Session-Id`, so the
    session becomes its own thread with full traces under the endpoint,
@@ -370,9 +389,35 @@ How the wiring works:
 
 ### `endpoints`
 
-List your inference endpoints with model and spend. `--set-default <slug>` picks
-the one used when `--endpoint` is omitted; `--output json` includes the gateway
-base URL.
+Manage the inference endpoints the launchers route through — a CLI mirror of
+the developer console at https://developer.heyditto.ai/endpoints (`open` takes
+you to an endpoint's page there; set `DITTO_DEVELOPER_BASE` to point elsewhere):
+
+```
+heyditto endpoints [--set-default <slug>] [--clear-default]   list (* = default)
+heyditto endpoints create [--name <n>] [--slug <s>] [--model <id>] [--default]
+heyditto endpoints show <endpoint>
+heyditto endpoints use <endpoint>          make it the default
+heyditto endpoints pick                    choose the default interactively
+heyditto endpoints open [endpoint]         open the editor in the Ditto app
+heyditto endpoints set <endpoint> --model … --system-prompt … --spend-limit <tokens|none>
+                                   --spend-period … --record-trace on|off --recall on|off
+                                   --record on|off --memory-depth <n>
+heyditto endpoints delete <endpoint> [--yes]
+heyditto endpoints keys <endpoint>         list keys
+heyditto endpoints keys revoke <endpoint> <keyId> [--yes]
+```
+
+Endpoints spend your Ditto credits, so deleting one, revoking a key or raising a
+spend limit asks you to type the slug back; pass `--yes` in scripts. `--output
+json` is available everywhere and includes the gateway base URL.
+
+**Agent accounts.** An agent set up with `heyditto init` can create and manage
+endpoints too, but an endpoint created by an unclaimed agent starts **inactive**:
+it serves requests once the person the agent works for claims the agent and
+subscribes to Ditto Hero. The CLI prints the server's explanation together with
+an activation link (the agent's claim link plus the endpoint) — hand that link
+to the user.
 
 ### `sessions`
 

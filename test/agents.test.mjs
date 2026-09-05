@@ -61,8 +61,11 @@ function startStub() {
 }
 
 function childEnvFor(env) {
+  // The launchers merge inherited harness env (e.g. ANTHROPIC_CUSTOM_HEADERS
+  // when this test itself runs under a Ditto-launched Claude Code), so drop it.
+  const { ANTHROPIC_CUSTOM_HEADERS: _headers, ANTHROPIC_API_KEY: _key, ...parent } = process.env;
   return {
-    ...process.env,
+    ...parent,
     DITTO_API_KEY: "",
     DITTO_CONFIG_DIR: mkdtempSync(path.join(os.tmpdir(), "heyditto-agents-")),
     ...env,

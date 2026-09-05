@@ -62,6 +62,50 @@ export async function writeStoredKey(key: string): Promise<void> {
   await writeStoredAuth({ apiKey: cleaned });
 }
 
+/**
+ * Saves a human login. Merges into the existing file so the default endpoint
+ * and the explicit MCP session survive a re-login, while any agent-account
+ * fields from a previous `heyditto init` are cleared (the key now belongs to a
+ * person, not a claimable agent).
+ */
+export async function saveLogin(key: string, extra: { defaultEndpoint?: string } = {}): Promise<StoredAuth> {
+  const cleaned = key.trim();
+  if (!cleaned) throw new Error("refusing to store empty api key");
+  const partial: Partial<StoredAuth> = {
+    apiKey: cleaned,
+    agentMode: undefined,
+    agentAccountID: undefined,
+    agentUserID: undefined,
+    agentCaller: undefined,
+    claimURL: undefined,
+    createdAt: new Date().toISOString(),
+  };
+  if (extra.defaultEndpoint) partial.defaultEndpoint = extra.defaultEndpoint;
+  return updateStoredAuth(partial);
+}
+
+/**
+ * The backend only stores a hash of an agent's claim token, so activation links
+ * it returns for agent-created endpoints carry no `t=`. The CLI holds the
+ * plaintext claim URL from `heyditto init`; copy its token onto the backend URL
+ * so the agent hands its user one working link.
+ */
+export function mergeActivationURL(activationURL: string, storedClaimURL: string | undefined): string {
+  if (!storedClaimURL) return activationURL;
+  let target: URL;
+  let claim: URL;
+  try {
+    target = new URL(activationURL);
+    claim = new URL(storedClaimURL);
+  } catch {
+    return activationURL;
+  }
+  const token = claim.searchParams.get("t");
+  if (!token || target.searchParams.has("t")) return activationURL;
+  target.searchParams.set("t", token);
+  return target.toString();
+}
+
 export async function clearStoredKey(): Promise<boolean> {
   try {
     await rm(authFilePath());
