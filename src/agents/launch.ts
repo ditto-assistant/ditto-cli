@@ -5,11 +5,19 @@ import { createInterface } from "node:readline/promises";
 import {
   type InferenceEndpoint,
   type InferenceKey,
+  type SelectedEndpoint,
+  createEndpoint,
   createKey,
+  findEndpoint,
+  isEndpointPending,
   listEndpoints,
   revokeKey,
 } from "../api.js";
-import { readStoredAuth } from "../store.js";
+import { openInBrowser } from "../browser.js";
+import { resolveApiKey } from "../config.js";
+import { deviceLogin } from "../device-login.js";
+import { formatActivation } from "../endpoint-format.js";
+import { readStoredAuth, saveLogin, updateStoredAuth } from "../store.js";
 import { planClaude } from "./claude.js";
 import { planCodex } from "./codex.js";
 import { type SessionRecord, latestSession, readSession, writeSession } from "./sessions.js";
@@ -77,54 +85,136 @@ function formatSpend(e: InferenceEndpoint): string {
   return `${used.toLocaleString()} / ${e.spendLimitTokens.toLocaleString()} tokens${e.spendPeriod && e.spendPeriod !== "never" ? ` per ${e.spendPeriod.replace(/ly$/, "")}` : ""}`;
 }
 
-async function pickEndpoint(endpoints: InferenceEndpoint[]): Promise<InferenceEndpoint> {
-  if (!process.stdin.isTTY || !process.stderr.isTTY) {
+function interactive(): boolean {
+  return Boolean(process.stdin.isTTY && process.stderr.isTTY);
+}
+
+async function ask(question: string): Promise<string> {
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  try {
+    return (await rl.question(question)).trim();
+  } finally {
+    rl.close();
+  }
+}
+
+/** Yes/no prompt with Enter defaulting to yes. */
+async function confirmYes(question: string): Promise<boolean> {
+  const answer = (await ask(`${question} [Y/n] `)).toLowerCase();
+  return answer === "" || answer === "y" || answer === "yes";
+}
+
+/** Interactive numbered picker; also accepts a slug or id. Exported for `heyditto endpoints pick`. */
+export async function pickEndpoint(endpoints: InferenceEndpoint[], defaultSlug?: string): Promise<InferenceEndpoint> {
+  if (!interactive()) {
     throw new Error(
-      "no endpoint selected. Pass --endpoint <slug>, or set a default with `heyditto endpoints --set-default <slug>`.",
+      "no endpoint selected. Pass --endpoint <slug>, or set a default with `heyditto endpoints use <slug>`.",
     );
   }
   process.stderr.write("Ditto inference endpoints:\n\n");
   endpoints.forEach((e, i) => {
-    process.stderr.write(`  ${i + 1}) ${e.slug}  ${e.name !== e.slug ? `(${e.name})  ` : ""}model=${e.model}\n`);
+    const marks = [
+      e.slug === defaultSlug ? "default" : "",
+      isEndpointPending(e) ? "inactive" : "",
+    ].filter(Boolean);
+    process.stderr.write(
+      `  ${i + 1}) ${e.slug}  ${e.name !== e.slug ? `(${e.name})  ` : ""}model=${e.model}${marks.length ? `  [${marks.join(", ")}]` : ""}\n`,
+    );
     process.stderr.write(`     ${formatSpend(e)}${e.recordTrace ? "  · traces on" : "  · traces off"}\n`);
   });
   process.stderr.write("\n");
   const rl = createInterface({ input: process.stdin, output: process.stderr });
   try {
     for (;;) {
-      const answer = (await rl.question(`Connect to which endpoint? [1-${endpoints.length}] `)).trim();
+      const answer = (await rl.question(`Connect to which endpoint? [1-${endpoints.length}, or a slug] `)).trim();
       const idx = Number(answer);
       if (Number.isInteger(idx) && idx >= 1 && idx <= endpoints.length) return endpoints[idx - 1];
-      const bySlug = endpoints.find((e) => e.slug === answer || e.id === answer);
+      const bySlug = findEndpoint(endpoints, answer);
       if (bySlug) return bySlug;
-      process.stderr.write("Pick a number from the list.\n");
+      process.stderr.write(`Pick a number from 1 to ${endpoints.length}, or type an endpoint slug.\n`);
     }
   } finally {
     rl.close();
   }
 }
 
+/** Refuses to launch against an endpoint the backend marked inactive (e.g. awaiting the user's plan). */
+export async function assertEndpointActive(endpoint: InferenceEndpoint): Promise<void> {
+  if (!isEndpointPending(endpoint)) return;
+  const stored = await readStoredAuth();
+  const details = formatActivation(endpoint, stored?.claimURL);
+  throw new Error(
+    `endpoint "${endpoint.slug}" is not active yet (${endpoint.status}).\n\n${details}`,
+  );
+}
+
 async function resolveEndpoint(
   wanted: string | undefined,
   endpoints: InferenceEndpoint[],
+  selected: SelectedEndpoint | undefined,
 ): Promise<InferenceEndpoint> {
   if (endpoints.length === 0) {
+    if (interactive() && (await confirmYes("You have no inference endpoints yet. Create your first one now?"))) {
+      const created = await createEndpoint({});
+      log(`created endpoint ${created.slug} (model ${created.model})`);
+      await updateStoredAuth({ defaultEndpoint: created.slug });
+      return created;
+    }
     throw new Error(
-      "you have no inference endpoints yet. Create one in the Ditto app: Settings → Developer → Inference endpoints.",
+      "you have no inference endpoints yet. Create one with `heyditto endpoints create`, or in the Ditto app: Settings → Developer → Inference endpoints.",
     );
   }
   const stored = (await readStoredAuth())?.defaultEndpoint;
-  const target = wanted?.trim() || stored?.trim();
-  if (target) {
-    const match = endpoints.find((e) => e.slug === target || e.id === target);
+  if (wanted?.trim()) {
+    const match = findEndpoint(endpoints, wanted);
     if (match) return match;
-    if (wanted) {
-      throw new Error(`no endpoint named "${target}". Available: ${endpoints.map((e) => e.slug).join(", ")}`);
-    }
-    log(`default endpoint "${target}" no longer exists; pick another`);
+    throw new Error(`no endpoint named "${wanted.trim()}". Available: ${endpoints.map((e) => e.slug).join(", ")}`);
+  }
+  if (selected) {
+    // Chosen in the browser moments ago during the device login.
+    const match = findEndpoint(endpoints, selected.id) ?? findEndpoint(endpoints, selected.slug);
+    if (match) return match;
+    log(`endpoint "${selected.slug}" picked in the browser is not in your list; pick another`);
+  }
+  if (stored?.trim()) {
+    const match = findEndpoint(endpoints, stored);
+    if (match) return match;
+    log(`default endpoint "${stored.trim()}" no longer exists; pick another`);
   }
   if (endpoints.length === 1) return endpoints[0];
-  return pickEndpoint(endpoints);
+  const picked = await pickEndpoint(endpoints, stored);
+  if (await confirmYes(`Use ${picked.slug} by default next time?`)) {
+    await updateStoredAuth({ defaultEndpoint: picked.slug });
+    log(`default endpoint set to ${picked.slug} (change it with \`heyditto endpoints use <slug>\`)`);
+  }
+  return picked;
+}
+
+/**
+ * First run: no key saved anywhere. On a terminal, run the browser device
+ * flow with the harness as the intent so the web page can offer the endpoint
+ * picker; the browser hands back the key and (optionally) the chosen endpoint.
+ */
+async function ensureLoggedIn(harness: Harness): Promise<SelectedEndpoint | undefined> {
+  const { key } = await resolveApiKey();
+  if (key) return undefined;
+  if (!interactive()) {
+    // Non-interactive callers (CI, agents) must log in explicitly.
+    await listEndpoints(); // throws the shared "no Ditto API key configured" error
+    return undefined;
+  }
+  log(`no Ditto login yet — opening your browser to sign in and pick an endpoint for ${harness === "claude" ? "Claude Code" : "Codex"}.`);
+  const result = await deviceLogin({
+    intent: harness,
+    onCode: (userCode, url) => {
+      process.stderr.write(`\n  ${url}\n\n  Code: ${userCode}\n\n`);
+      openInBrowser(url);
+      process.stderr.write("Waiting for approval in the browser (Ctrl+C to cancel)…\n");
+    },
+  });
+  await saveLogin(result.apiKey, result.setDefault && result.endpoint ? { defaultEndpoint: result.endpoint.slug } : {});
+  log(`logged in${result.endpoint ? `; endpoint ${result.endpoint.slug}${result.setDefault ? " saved as default" : ""}` : ""}`);
+  return result.endpoint;
 }
 
 function forwardSignals(child: ChildProcess): () => void {
@@ -195,8 +285,10 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     if (!record.harnessSessionId) resumeLast = true;
   }
 
+  const selected = options.dryRun ? undefined : await ensureLoggedIn(harness);
   const catalog = await listEndpoints();
-  const endpoint = await resolveEndpoint(options.endpoint ?? record?.endpointSlug, catalog.endpoints);
+  const endpoint = await resolveEndpoint(options.endpoint ?? record?.endpointSlug, catalog.endpoints, selected);
+  await assertEndpointActive(endpoint);
 
   let cwd = record?.worktree ?? process.cwd();
   let worktreePath: string | undefined = record?.worktree;

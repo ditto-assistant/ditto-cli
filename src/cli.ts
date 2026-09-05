@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -16,16 +15,18 @@ import {
   packageVersion,
   resolveApiKey,
 } from "./config.js";
-import { clearStoredKey, readStoredAuth, writeStoredAuth, writeStoredKey } from "./store.js";
+import { clearStoredKey, readStoredAuth, saveLogin, writeStoredAuth } from "./store.js";
 import {
   cmdAgents,
-  cmdEndpoints,
   cmdSessions,
   cmdSessionsRm,
+  registerEndpointCommands,
   registerHarnessCommands,
   registerSessionCommands,
 } from "./commands.js";
 import { type ActiveSession, markSessionUsed, resolveActiveSession, sessionHeaders } from "./mcp-session.js";
+import { NO_KEY_MESSAGE } from "./api.js";
+import { openInBrowser } from "./browser.js";
 import { deviceLogin } from "./device-login.js";
 
 type OutputFormat = "json" | "text" | "markdown" | "raw";
@@ -214,12 +215,7 @@ function formatToolResult(result: unknown, format: OutputFormat): string {
 async function getClient(): Promise<Client> {
   const { key, source } = await resolveApiKey();
   if (!key) {
-    process.stderr.write(
-      `error: no Ditto API key configured.\n\n` +
-        `  Run: heyditto init --json\n` +
-        `  Or save an existing key with: heyditto login <key>\n` +
-        `  Human-owned keys are available at ${newKeyURL()}.\n`,
-    );
+    process.stderr.write(`error: ${NO_KEY_MESSAGE}  Human-owned keys are also available at ${newKeyURL()}.\n`);
     process.exit(1);
   }
   // An explicit session (heyditto session new / DITTO_SESSION_ID) tags every
@@ -283,35 +279,36 @@ async function promptForKey(message: string): Promise<string> {
   }
 }
 
-function openInBrowser(url: string): void {
-  const cmd =
-    process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
-  const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
-  const child = spawn(cmd, args, { stdio: "ignore", detached: true });
-  child.on("error", () => {
-    /* swallow: best-effort */
-  });
-  child.unref();
-}
-
 async function cmdLogin(keyArg: string | undefined, options: LoginOptions): Promise<void> {
   parseOutputFormat(options.output); // validate but ignored: login is interactive
 
   let key = keyArg?.trim();
   let viaDevice = false;
+  let defaultEndpoint: string | undefined;
+  let pickedEndpoint: string | undefined;
 
   if (!key && options.stdin) {
     key = (await readKeyFromStdin()).trim();
   } else if (!key && !options.paste && process.stdin.isTTY) {
-    // Browser device flow: no key to copy around.
-    key = await deviceLogin({
+    // Browser device flow: no key to copy around. The page signs the user in
+    // (or creates the account) and hands the key back to this process.
+    const result = await deviceLogin({
+      intent: "login",
       onCode: (userCode, url) => {
-        process.stderr.write(`\nOpen ${url}\nand confirm the code: ${userCode}\n\n`);
+        process.stderr.write(
+          `\nSign in to Ditto in your browser:\n\n` +
+            `  ${url}\n\n` +
+            `  Code: ${userCode}\n\n` +
+            `Opening your browser…\n`,
+        );
         openInBrowser(url);
         process.stderr.write("Waiting for approval in the browser (Ctrl+C to cancel)…\n");
       },
     });
+    key = result.apiKey;
     viaDevice = true;
+    pickedEndpoint = result.endpoint?.slug;
+    if (result.setDefault && result.endpoint) defaultEndpoint = result.endpoint.slug;
   } else if (!key) {
     if (options.paste) {
       process.stderr.write(`Opening ${newKeyURL()} in your browser...\n`);
@@ -330,14 +327,21 @@ async function cmdLogin(keyArg: string | undefined, options: LoginOptions): Prom
     process.stderr.write(`warning: key does not start with "ditto_mcp_" - proceeding anyway\n`);
   }
 
-  await writeStoredKey(key);
+  const stored = await saveLogin(key, defaultEndpoint ? { defaultEndpoint } : {});
   process.stdout.write(`${viaDevice ? "Logged in. " : ""}Saved key to ${authFilePath()}\n`);
+  if (defaultEndpoint) {
+    process.stdout.write(`Default endpoint: ${defaultEndpoint}\n`);
+  } else if (pickedEndpoint) {
+    process.stdout.write(`Endpoint picked in the browser: ${pickedEndpoint} (make it the default with 'heyditto endpoints use ${pickedEndpoint}')\n`);
+  } else if (stored.defaultEndpoint) {
+    process.stdout.write(`Default endpoint: ${stored.defaultEndpoint} (kept)\n`);
+  }
   if (process.env.DITTO_API_KEY) {
     process.stderr.write(
       `note: DITTO_API_KEY is set in your environment and will override the saved key for this session.\n`,
     );
   }
-  process.stdout.write(`Run 'heyditto status' to verify.\n`);
+  process.stdout.write(`Run 'heyditto status' to verify, or 'heyditto claude' to start coding.\n`);
 }
 
 interface AgentSignupResponse {
@@ -672,6 +676,7 @@ async function cmdDelete(memoryId: string, options: DeleteOptions): Promise<void
 
 interface StatusReport {
   session?: { id: string; name?: string; source: "env" | "config" };
+  defaultEndpoint?: string;
   package: string;
   version: string;
   endpoint: string;
@@ -703,6 +708,7 @@ async function cmdStatus(options: CommonOptions): Promise<void> {
     apiKey: { present: !!key, source },
   };
   if (session) report.session = { id: session.id, name: session.name, source: session.source };
+  if (stored?.defaultEndpoint) report.defaultEndpoint = stored.defaultEndpoint;
   if (source === "config" && stored?.agentMode) {
     report.agent = {
       enabled: true,
@@ -749,7 +755,7 @@ async function cmdStatus(options: CommonOptions): Promise<void> {
     `api key:   ${report.apiKey.present ? "set" : "MISSING"}  (source: ${report.apiKey.source})`,
   ];
   if (!report.apiKey.present) {
-    lines.push(``, `Run 'heyditto init --json' for no-human setup, or get a key at ${newKeyURL()} and run 'heyditto login <key>'.`);
+    lines.push(``, `Run 'heyditto login' to sign in through your browser, 'heyditto init --json' for no-human agent setup, or get a key at ${newKeyURL()} and run 'heyditto login <key>'.`);
   } else if (report.tools) {
     lines.push(`tools:     ${report.tools.join(", ")}`);
   } else if (report.toolsError) {
@@ -757,6 +763,7 @@ async function cmdStatus(options: CommonOptions): Promise<void> {
   } else if (report.connect && !report.connect.ok) {
     lines.push(`connect:   FAILED - ${report.connect.error}`);
   }
+  if (report.defaultEndpoint) lines.push(`endpoint:  ${report.defaultEndpoint}  (default for heyditto claude / codex)`);
   if (report.agent?.claimURL) {
     lines.push(`agent:     unclaimed (${report.agent.caller || "agent"})`, `claim:     ${report.agent.claimURL}`);
   }
@@ -855,6 +862,7 @@ Notes:
 Environment:
   DITTO_API_KEY     Optional override, taking precedence over the saved key.
   DITTO_API_BASE    Optional API base URL. Defaults to https://api.heyditto.ai.
+  DITTO_APP_BASE    Optional web app URL for browser pages. Defaults to https://app.heyditto.ai.
   DITTO_SESSION_ID  Optional explicit MCP session id sent as X-Ditto-Session-Id (see 'session').
   DITTO_CONFIG_DIR  Optional config directory. Defaults to $XDG_CONFIG_HOME/heyditto/cli
                     or ~/.config/heyditto/cli.
@@ -863,6 +871,9 @@ Coding agents:
   heyditto claude / heyditto codex launch the agent through one of your Ditto
   inference endpoints with a temporary key that is revoked when it exits, so
   every session becomes its own thread with full traces in the Ditto app.
+  First run with no login? They open your browser to sign in (or create an
+  account) and pick an endpoint — no setup needed:
+    npx @heyditto/cli@latest claude
 `,
     );
 
@@ -1132,27 +1143,14 @@ your own graph or an app graph.`,
 
   program
     .command("login")
-    .description("sign in (browser device flow) or save an API key")
+    .description("sign in through your browser (device flow) or save an API key")
     .argument("[key]", "Ditto API key (omit to sign in through the browser)")
     .option("--paste", "open the key creation page and paste a key instead of the device flow")
     .option("--stdin", "read the API key from stdin")
     .addOption(hiddenOutputOption())
     .action(cmdLogin);
 
-  addExamples(
-    program
-      .command("endpoints")
-      .description("list your inference endpoints (used by heyditto claude / codex)")
-      .summary("list inference endpoints")
-      .option("--set-default <slug>", "endpoint to use when --endpoint is omitted")
-      .option("--clear-default", "forget the default endpoint")
-      .addOption(outputOption())
-      .action(cmdEndpoints),
-    `  heyditto endpoints
-  heyditto endpoints --set-default my-endpoint
-  heyditto endpoints --output json`,
-  );
-
+  registerEndpointCommands(program, addExamples, outputOption);
   registerHarnessCommands(program, addExamples);
   registerSessionCommands(program, addExamples);
 

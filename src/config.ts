@@ -32,8 +32,19 @@ export function sessionsDir(): string {
   return path.join(configDir(), "sessions");
 }
 
+/** Ditto web app base URL (browser pages: /device, /settings/…, /agent/claim). */
+export function appBaseURL(): string {
+  return (process.env.DITTO_APP_BASE || "https://app.heyditto.ai").replace(/\/+$/, "");
+}
+
 export function newKeyURL(): string {
-  return "https://app.heyditto.ai/mcp/newkey";
+  return `${appBaseURL()}/mcp/newkey`;
+}
+
+/** Settings → Developer page in the Ditto app, optionally focused on one endpoint. */
+export function endpointSettingsURL(slug?: string): string {
+  const base = `${appBaseURL()}/settings/developer`;
+  return slug ? `${base}?endpoint=${encodeURIComponent(slug)}` : base;
 }
 
 export function agentSignupURL(): string {
