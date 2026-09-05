@@ -35,6 +35,12 @@ Rebase merging is allowed but only if every individual commit on the branch is c
 - semantic-release computes the next version from git tags + commit messages, bumps `package.json` (and `package-lock.json`), builds via `prepack: npm run build`, publishes to npm with provenance, creates a GitHub release, and commits the bumped manifests back to `main`.
 - The runtime version is read from `package.json` at startup (see `createRequire` in `src/config.ts`), so the installed CLI always reports the correct published version.
 
+## Release authentication
+
+The `Release` workflow uses the repository Actions secret `RELEASE_TOKEN` for both checkout and semantic-release, matching `ditto-subnet`. Use a token owned by an existing organization or repository admin authorized by the `main protection` bypass list. A fine-grained PAT needs access to this repository with Contents, Issues, and Pull requests read/write. Keep npm trusted publishing via OIDC enabled. Never store the token in source or logs.
+
+The built-in `GITHUB_TOKEN` cannot push the generated version commit through the required-pull-request rule. Do not fall back to it or weaken branch protection. Release commits retain `[skip ci]` to prevent a token-authenticated push from starting another release.
+
 ## Local development
 
 ```bash
