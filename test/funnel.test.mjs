@@ -260,11 +260,15 @@ test("endpoints list --output json and bare endpoints --set-default still work",
     const show = await runAsync(["endpoints", "show", "alpha"], env);
     assert.equal(show.status, 0, show.stderr);
     assert.match(show.stdout, /slug:\s+alpha/);
-    assert.match(show.stdout, /web:\s+https:\/\/app\.heyditto\.ai\/settings\/developer\?endpoint=alpha/);
+    assert.match(show.stdout, /web:\s+https:\/\/developer\.heyditto\.ai\/endpoints\/11111111-1111-1111-1111-111111111111/);
 
-    const open = await runAsync(["endpoints", "open", "beta", "--print"], { ...env, DITTO_APP_BASE: "https://app.example.test/" });
+    const open = await runAsync(["endpoints", "open", "beta", "--print"], { ...env, DITTO_DEVELOPER_BASE: "https://dev.example.test/" });
     assert.equal(open.status, 0, open.stderr);
-    assert.equal(open.stdout.trim(), "https://app.example.test/settings/developer?endpoint=beta");
+    assert.equal(open.stdout.trim(), "https://dev.example.test/endpoints/22222222-2222-2222-2222-222222222222");
+
+    const openDefault = await runAsync(["endpoints", "open", "--print"], env);
+    assert.equal(openDefault.status, 0, openDefault.stderr);
+    assert.equal(openDefault.stdout.trim(), "https://developer.heyditto.ai/endpoints/22222222-2222-2222-2222-222222222222");
   } finally {
     stub.close();
   }
@@ -347,11 +351,13 @@ test("a pending_plan endpoint blocks launch and prints the activation notice wit
   );
   const env = { DITTO_API_BASE: stub.base, DITTO_CONFIG_DIR: configDir };
   try {
-    const launch = await runAsync(["claude", "--dry-run", "--endpoint", "alpha"], env);
-    assert.equal(launch.status, 1);
-    assert.match(launch.stderr, /endpoint "alpha" is not active yet \(pending_plan\)/);
-    assert.match(launch.stderr, /inactive until your user claims this agent/);
-    assert.match(launch.stderr, /Activation link: https:\/\/app\.example\.test\/agent\/claim\?activate=1111.*&t=tok_abc/);
+    for (const harness of ["claude", "codex"]) {
+      const launch = await runAsync([harness, "--dry-run", "--endpoint", "alpha"], env);
+      assert.equal(launch.status, 1, `${harness}: ${launch.stderr}`);
+      assert.match(launch.stderr, /endpoint "alpha" is not active yet \(pending_plan\)/);
+      assert.match(launch.stderr, /inactive until your user claims this agent/);
+      assert.match(launch.stderr, /Activation link: https:\/\/app\.example\.test\/agent\/claim\?activate=1111.*&t=tok_abc/);
+    }
 
     const list = await runAsync(["endpoints"], env);
     assert.equal(list.status, 0, list.stderr);
@@ -360,21 +366,28 @@ test("a pending_plan endpoint blocks launch and prints the activation notice wit
     const json = await runAsync(["endpoints", "list", "--output", "json"], env);
     assert.match(JSON.parse(json.stdout).endpoints[0].activation.url, /t=tok_abc/);
 
-    // The healthy endpoint still launches.
-    const okLaunch = await runAsync(["claude", "--dry-run", "--endpoint", "beta"], env);
-    assert.equal(okLaunch.status, 0, okLaunch.stderr);
+    // The healthy endpoint still launches, for both harnesses, and points at
+    // the endpoint's developer-console page for traces.
+    for (const harness of ["claude", "codex"]) {
+      const okLaunch = await runAsync([harness, "--dry-run", "--endpoint", "beta"], env);
+      assert.equal(okLaunch.status, 0, `${harness}: ${okLaunch.stderr}`);
+      assert.equal(JSON.parse(okLaunch.stdout).command, harness);
+      assert.match(okLaunch.stderr, /traces: https:\/\/developer\.heyditto\.ai\/endpoints\/22222222-2222-2222-2222-222222222222/);
+    }
   } finally {
     stub.close();
   }
 });
 
-test("claude without a key and without a TTY still fails fast (no device flow)", async () => {
+test("claude/codex without a key and without a TTY still fail fast (no device flow)", async () => {
   const stub = await startStub();
   try {
-    const result = await runAsync(["claude", "--endpoint", "alpha"], { DITTO_API_BASE: stub.base });
-    assert.equal(result.status, 1);
-    assert.match(result.stderr, /no Ditto API key configured/);
-    assert.match(result.stderr, /heyditto login/);
+    for (const harness of ["claude", "codex"]) {
+      const result = await runAsync([harness, "--endpoint", "alpha"], { DITTO_API_BASE: stub.base });
+      assert.equal(result.status, 1, harness);
+      assert.match(result.stderr, /no Ditto API key configured/);
+      assert.match(result.stderr, /heyditto login/);
+    }
     assert.ok(!stub.calls.some((c) => c.url === "/api/v2/mcp/device-code"), "non-interactive runs must not start a device flow");
   } finally {
     stub.close();

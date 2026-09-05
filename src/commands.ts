@@ -19,7 +19,7 @@ import {
   updateEndpoint,
 } from "./api.js";
 import { openInBrowser } from "./browser.js";
-import { endpointSettingsURL } from "./config.js";
+import { endpointURL } from "./config.js";
 import { activationLink, formatActivation } from "./endpoint-format.js";
 import {
   SESSION_ENV,
@@ -115,7 +115,7 @@ export async function cmdEndpoints(options: EndpointsOptions): Promise<void> {
   }
   if (catalog.endpoints.length === 0) {
     process.stdout.write(
-      "No inference endpoints yet. Create one with `heyditto endpoints create`, or in the Ditto app: Settings → Developer → Inference endpoints.\n",
+      `No inference endpoints yet. Create one with \`heyditto endpoints create\`, or at ${endpointURL()}.\n`,
     );
     return;
   }
@@ -182,7 +182,7 @@ export async function cmdEndpointShow(ref: string, options: { output?: string })
     `traces:        ${endpoint.recordTrace ? "on" : "off"}`,
     `tools:         ${(endpoint.tools ?? []).join(", ") || "(none)"}`,
     `gateway:       ${catalog.baseUrl}`,
-    `web:           ${endpointSettingsURL(endpoint.slug)}`,
+    `web:           ${endpointURL(endpoint.id)}`,
   ];
   if (endpoint.systemPrompt) lines.push(`system prompt: ${endpoint.systemPrompt.length > 120 ? `${endpoint.systemPrompt.slice(0, 117)}…` : endpoint.systemPrompt}`);
   process.stdout.write(`${lines.join("\n")}\n`);
@@ -217,13 +217,11 @@ export async function cmdEndpointPick(options: { output?: string }): Promise<voi
 }
 
 export async function cmdEndpointOpen(ref: string | undefined, options: { print?: boolean }): Promise<void> {
-  let slug: string | undefined;
-  if (ref) {
-    slug = (await getEndpoint(ref)).endpoint.slug;
-  } else {
-    slug = (await readStoredAuth())?.defaultEndpoint;
-  }
-  const url = endpointSettingsURL(slug);
+  // The developer console addresses endpoints by id; resolve the slug (or the
+  // stored default) through the catalog. No target → the endpoints list.
+  const target = ref ?? (await readStoredAuth())?.defaultEndpoint;
+  const id = target ? (await getEndpoint(target)).endpoint.id : undefined;
+  const url = endpointURL(id);
   process.stdout.write(`${url}\n`);
   if (!options.print) {
     process.stderr.write("Opening in your browser…\n");

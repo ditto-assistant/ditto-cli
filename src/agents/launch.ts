@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import os from "node:os";
 import { createInterface } from "node:readline/promises";
 import {
+  ApiError,
   type InferenceEndpoint,
   type InferenceKey,
   type SelectedEndpoint,
@@ -14,7 +15,7 @@ import {
   revokeKey,
 } from "../api.js";
 import { openInBrowser } from "../browser.js";
-import { resolveApiKey } from "../config.js";
+import { endpointURL, resolveApiKey } from "../config.js";
 import { deviceLogin } from "../device-login.js";
 import { formatActivation } from "../endpoint-format.js";
 import { readStoredAuth, saveLogin, updateStoredAuth } from "../store.js";
@@ -161,7 +162,7 @@ async function resolveEndpoint(
       return created;
     }
     throw new Error(
-      "you have no inference endpoints yet. Create one with `heyditto endpoints create`, or in the Ditto app: Settings → Developer → Inference endpoints.",
+      `you have no inference endpoints yet. Create one with \`heyditto endpoints create\`, or at ${endpointURL()}.`,
     );
   }
   const stored = (await readStoredAuth())?.defaultEndpoint;
@@ -204,6 +205,11 @@ async function ensureLoggedIn(harness: Harness): Promise<SelectedEndpoint | unde
     return undefined;
   }
   log(`no Ditto login yet — opening your browser to sign in and pick an endpoint for ${harness === "claude" ? "Claude Code" : "Codex"}.`);
+  return browserLogin(harness);
+}
+
+/** Runs the browser device flow for a harness and saves the result. */
+async function browserLogin(harness: Harness): Promise<SelectedEndpoint | undefined> {
   const result = await deviceLogin({
     intent: harness,
     onCode: (userCode, url) => {
@@ -285,8 +291,20 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     if (!record.harnessSessionId) resumeLast = true;
   }
 
-  const selected = options.dryRun ? undefined : await ensureLoggedIn(harness);
-  const catalog = await listEndpoints();
+  let selected = options.dryRun ? undefined : await ensureLoggedIn(harness);
+  let catalog: Awaited<ReturnType<typeof listEndpoints>>;
+  try {
+    catalog = await listEndpoints();
+  } catch (err) {
+    // A saved key that lapsed (device-flow keys expire) sends the user back
+    // through the browser instead of a dead 401.
+    if (!(err instanceof ApiError) || err.status !== 401 || options.dryRun || !interactive()) throw err;
+    const { source } = await resolveApiKey();
+    if (source !== "config") throw err;
+    log("your saved Ditto login is no longer valid — opening your browser to sign in again.");
+    selected = await browserLogin(harness);
+    catalog = await listEndpoints();
+  }
   const endpoint = await resolveEndpoint(options.endpoint ?? record?.endpointSlug, catalog.endpoints, selected);
   await assertEndpointActive(endpoint);
 
@@ -348,7 +366,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     .filter(Boolean)
     .join("  ");
   log(banner);
-  log(`traces: Ditto app → Settings → Developer → Inference endpoints → ${endpoint.slug}`);
+  log(`traces: ${endpointURL(endpoint.id)}`);
 
   if (options.dryRun) {
     const env = Object.fromEntries(

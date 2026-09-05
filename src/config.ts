@@ -41,10 +41,15 @@ export function newKeyURL(): string {
   return `${appBaseURL()}/mcp/newkey`;
 }
 
-/** Settings → Developer page in the Ditto app, optionally focused on one endpoint. */
-export function endpointSettingsURL(slug?: string): string {
-  const base = `${appBaseURL()}/settings/developer`;
-  return slug ? `${base}?endpoint=${encodeURIComponent(slug)}` : base;
+/** Ditto developer console base URL (inference endpoints live at /endpoints and /endpoints/<id>). */
+export function developerBaseURL(): string {
+  return (process.env.DITTO_DEVELOPER_BASE || "https://developer.heyditto.ai").replace(/\/+$/, "");
+}
+
+/** An endpoint's page in the developer console, or the endpoints list when no id is given. */
+export function endpointURL(id?: string): string {
+  const base = `${developerBaseURL()}/endpoints`;
+  return id ? `${base}/${encodeURIComponent(id)}` : base;
 }
 
 export function agentSignupURL(): string {

@@ -332,8 +332,8 @@ Print a Claude Desktop / Cursor / generic-MCP-client config snippet for the Ditt
 ## Coding agents
 
 `heyditto claude` and `heyditto codex` launch Claude Code or Codex through one of
-your Ditto **inference endpoints** (Settings → Developer → Inference endpoints
-in the Ditto app). Each launch:
+your Ditto **inference endpoints** (managed at https://developer.heyditto.ai/endpoints;
+the Ditto app's Settings → Developer page still works too). Each launch:
 
 1. signs you in through the browser if this machine has no key yet, then uses
    the endpoint you picked there, `--endpoint`, the saved default, or a picker,
@@ -390,7 +390,8 @@ How the wiring works:
 ### `endpoints`
 
 Manage the inference endpoints the launchers route through — a CLI mirror of
-Settings → Developer → Inference endpoints in the Ditto app:
+the developer console at https://developer.heyditto.ai/endpoints (`open` takes
+you to an endpoint's page there; set `DITTO_DEVELOPER_BASE` to point elsewhere):
 
 ```
 heyditto endpoints [--set-default <slug>] [--clear-default]   list (* = default)

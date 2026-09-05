@@ -863,6 +863,7 @@ Environment:
   DITTO_API_KEY     Optional override, taking precedence over the saved key.
   DITTO_API_BASE    Optional API base URL. Defaults to https://api.heyditto.ai.
   DITTO_APP_BASE    Optional web app URL for browser pages. Defaults to https://app.heyditto.ai.
+  DITTO_DEVELOPER_BASE  Optional developer console URL (endpoints). Defaults to https://developer.heyditto.ai.
   DITTO_SESSION_ID  Optional explicit MCP session id sent as X-Ditto-Session-Id (see 'session').
   DITTO_CONFIG_DIR  Optional config directory. Defaults to $XDG_CONFIG_HOME/heyditto/cli
                     or ~/.config/heyditto/cli.
