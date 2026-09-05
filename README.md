@@ -429,7 +429,14 @@ heyditto teleport push ~/code/project --mirror all
 heyditto teleport pull project ~/code/project --restore-harness --resume
 heyditto teleport list
 heyditto teleport status project        # mirror + verification state
+heyditto teleport generations project   # every committed generation
+heyditto teleport targets               # mirror targets, quota and capsule limit for your plan
 ```
+
+Every teleport command accepts `--json` (or `--output json`). `pull --json`
+prints `{cwd, harnessSessionId, harnessKind, …}`, which is what the Ditto Code
+runner reads when it restores a capsule before starting the harness. Capsules
+can be referred to by name or id everywhere.
 
 `push` bundles each repo (thin against the previous generation when possible),
 tars the dirty and untracked files, and captures the harness transcript for the

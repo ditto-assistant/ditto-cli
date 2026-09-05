@@ -1,15 +1,13 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { packageVersion } from "../config.js";
 import * as tapi from "./api.js";
 import { basisFromRefs, createBundle, readRepoState } from "./bundle.js";
-import { chunkFile, dedupedBytes } from "./chunks.js";
+import { chunkFile, dedupedBytes, readChunk, sha256 } from "./chunks.js";
 import { discoverRepos } from "./discover.js";
-import { locateHarness } from "./harness.js";
-import { readChunk } from "./chunks.js";
+import { captureHarness, locateHarness } from "./harness.js";
 import { captureWorktree, dirtyPaths, pickCompression } from "./worktree.js";
-import { captureHarness } from "./harness.js";
 import {
   type ChunkRef,
   type HarnessKind,
@@ -32,6 +30,8 @@ export interface PushInput {
   ignoredIncludes: string[];
   rootName: string;
   rootKind: "repo" | "folder";
+  /** Who is committing: the CLI on a user's machine, or the Ditto Code runner. */
+  committedBy?: tapi.CommittedBy;
 }
 
 export interface PushOutput {
@@ -123,25 +123,38 @@ export async function pushCapsule(input: PushInput): Promise<PushOutput> {
       totals: { chunks: allChunks.length, bytes: bytesTotal, dedupedBytes: dedupedBytes(allChunks) },
     };
 
-    // Distinct chunks, negotiate in batches.
+    // The manifest is itself a chunk: write it, hash it, and negotiate it with
+    // the rest so commit can reference it by sha256.
+    const manifestBytes = Buffer.from(JSON.stringify(manifest));
+    const manifestSha256 = sha256(manifestBytes);
+    const manifestFile = path.join(tmp, "manifest.json");
+    await writeFile(manifestFile, manifestBytes);
+    const manifestRef: ChunkRef = { sha256: manifestSha256, size: manifestBytes.length };
+    allChunks.push(manifestRef);
+    if (!sources.has(manifestSha256)) sources.set(manifestSha256, { file: manifestFile, index: 0, size: manifestBytes.length });
+
+    // Distinct chunks, negotiate in batches of ≤ 200.
     const distinct = new Map<string, ChunkRef>();
     for (const c of allChunks) distinct.set(c.sha256, c);
     const wanted = [...distinct.values()];
     let uploaded = 0;
     for (let i = 0; i < wanted.length; i += NEGOTIATE_BATCH) {
       const batch = wanted.slice(i, i + NEGOTIATE_BATCH);
-      const neg = await tapi.negotiate(input.capsuleId, {
-        generation,
-        parentGeneration: input.parentGeneration,
-        chunks: batch.map((c) => ({ sha256: c.sha256, size: c.size })),
-      });
+      const neg = await tapi.negotiate(
+        input.capsuleId,
+        batch.map((c) => ({ sha256: c.sha256, size: c.size })),
+      );
       await uploadMissing(neg.missing, sources);
       uploaded += neg.missing.length;
     }
 
-    await tapi.commit(input.capsuleId, { generation, manifest });
+    const committed = await tapi.commit(input.capsuleId, {
+      manifest,
+      manifestSha256,
+      committedBy: input.committedBy ?? detectCommitter(),
+    });
     return {
-      generation,
+      generation: committed.generation ?? generation,
       bytesTotal,
       dedupedBytes: manifest.totals.dedupedBytes,
       chunkCount: distinct.size,
@@ -196,6 +209,13 @@ async function putWithRetry(url: string, body: Buffer, attempts = 4): Promise<vo
     await sleep(delay);
     delay *= 2;
   }
+}
+
+/** The Ditto Code runner authenticates with a ditto_agent_ token and pins the harness session via env. */
+export function detectCommitter(): tapi.CommittedBy {
+  const key = process.env.DITTO_API_KEY ?? "";
+  if (key.startsWith("ditto_agent_") || process.env.TELEPORT_HARNESS_SESSION_ID) return "runner";
+  return "cli";
 }
 
 function sleep(ms: number): Promise<void> {

@@ -16,9 +16,7 @@ export async function pullCapsule(
   destRoot: string,
   opts: { restoreHarness?: boolean } = {},
 ): Promise<RestoreResult> {
-  const capsule = await tapi.getCapsule(capsuleId);
-  const gen = generation ?? capsule.headGeneration;
-  const { manifest, chunks } = await tapi.resolveGeneration(capsuleId, gen);
+  const { manifest, chunks } = await tapi.resolveGeneration(capsuleId, generation);
   const chunkDir = await mkdtemp(path.join(os.tmpdir(), "teleport-chunks-"));
   try {
     await downloadChunks(chunks, chunkDir);
