@@ -97,35 +97,52 @@ function startTeleportStub() {
       }
       const capMatch = /^\/api\/v5\/teleport\/capsules\/([^/]+)(\/.*)?$/.exec(p);
       if (capMatch) {
-        const cap = capsules.get(capMatch[1]);
+        // {capsule} accepts a uuid or the name.
+        const ref = decodeURIComponent(capMatch[1]);
+        const cap = capsules.get(ref) ?? [...capsules.values()].find((c) => c.name === ref);
         if (!cap) return send(404, { error: "no capsule" });
+        const view = () => ({ id: cap.id, name: cap.name, rootKind: cap.rootKind, headGeneration: cap.headGeneration, bytesTotal: cap.bytesTotal ?? 0, status: cap.status ?? "active" });
         const sub = capMatch[2] ?? "";
-        if (sub === "" && req.method === "GET") return send(200, { id: cap.id, name: cap.name, rootKind: cap.rootKind, headGeneration: cap.headGeneration });
+        if (sub === "" && req.method === "GET") return send(200, view());
+        if (sub === "" && req.method === "PATCH") {
+          Object.assign(cap, jsonBody());
+          return send(200, view());
+        }
         if (sub === "/negotiate" && req.method === "POST") {
-          const { chunks: wanted } = jsonBody();
-          const missing = wanted
+          const body = jsonBody();
+          if ("generation" in body || "parentGeneration" in body) return send(400, { error: "negotiate takes {chunks} only" });
+          if (body.chunks.length > 200) return send(400, { error: "too many chunks" });
+          const missing = body.chunks
             .filter((c) => !chunks.has(c.sha256))
-            .map((c) => ({ sha256: c.sha256, putUrl: `${base}/obj/${c.sha256}` }));
-          return send(200, { missing, uploadedCount: wanted.length - missing.length });
+            .map((c) => ({ sha256: c.sha256, size: c.size, putUrl: `${base}/obj/${c.sha256}`, expiresAt: new Date(Date.now() + 900e3).toISOString() }));
+          return send(200, { missing, uploadedCount: body.chunks.length - missing.length });
         }
         if (sub === "/commit" && req.method === "POST") {
-          const { generation, manifest } = jsonBody();
-          cap.generations.set(generation, manifest);
+          const { manifest, manifestSha256, committedBy } = jsonBody();
+          if (!manifestSha256 || !chunks.has(manifestSha256)) return send(412, { error: "manifest chunk missing" });
+          if (!["cli", "runner"].includes(committedBy)) return send(400, { error: "bad committedBy" });
+          const generation = cap.headGeneration + 1;
+          cap.generations.set(generation, { manifest: { ...manifest, generation }, manifestSha256, committedBy, committedAt: new Date().toISOString() });
           cap.headGeneration = generation;
           cap.bytesTotal = manifest.totals.bytes;
-          return send(200, { generation, mirrors: [{ target: "ditto-primary", generation, status: "complete", verifiedAt: new Date().toISOString() }] });
+          return send(200, { capsule: view(), generation, mirrors: [{ target: "ditto-primary", providerId: "hippius", generation, status: "complete", verifiedAt: new Date().toISOString(), required: true }] });
         }
-        const genMatch = /^\/generations\/(\d+)$/.exec(sub);
-        if (genMatch && req.method === "GET") {
-          const manifest = cap.generations.get(Number(genMatch[1]));
-          if (!manifest) return send(404, { error: "no generation" });
+        if (sub === "/generations" && req.method === "GET") {
+          return send(200, { generations: [...cap.generations.entries()].map(([generation, g]) => ({ generation, manifestSha256: g.manifestSha256, bytes: g.manifest.totals.bytes, chunkCount: g.manifest.totals.chunks, committedAt: g.committedAt, committedBy: g.committedBy })) });
+        }
+        if (sub === "/resolve" && req.method === "GET") {
+          const wanted = url.searchParams.get("generation");
+          const generation = wanted ? Number(wanted) : cap.headGeneration;
+          const g = cap.generations.get(generation);
+          if (!g) return send(404, { error: "no generation" });
+          const manifest = g.manifest;
           const seen = new Set();
           const chunkList = [];
           const collect = (refs) => {
             for (const r of refs ?? []) {
               if (seen.has(r.sha256)) continue;
               seen.add(r.sha256);
-              chunkList.push({ sha256: r.sha256, getUrl: `${base}/obj/${r.sha256}` });
+              chunkList.push({ sha256: r.sha256, size: r.size, getUrl: `${base}/obj/${r.sha256}` });
             }
           };
           for (const repo of manifest.repos) {
@@ -133,11 +150,19 @@ function startTeleportStub() {
             if (repo.worktree) collect(repo.worktree.chunks);
           }
           collect(manifest.harness.chunks);
-          return send(200, { manifest, chunks: chunkList });
+          return send(200, { capsule: view(), manifest, chunks: chunkList, generation });
         }
         if (sub === "/status" && req.method === "GET") {
-          return send(200, { headGeneration: cap.headGeneration, offloadReady: true, mirrors: [{ target: "ditto-primary", generation: cap.headGeneration, status: "complete", verifiedAt: new Date().toISOString() }] });
+          return send(200, { capsule: view(), headGeneration: cap.headGeneration, bytesTotal: cap.bytesTotal ?? 0, offloadReady: true, mirrors: [{ target: "ditto-primary", providerId: "hippius", generation: cap.headGeneration, status: "complete", verifiedAt: new Date().toISOString(), required: true }] });
         }
+        if (sub === "/cloud-session" && req.method === "POST") {
+          const body = jsonBody();
+          if (!body.prompt) return send(400, { error: "prompt required" });
+          return send(202, { jobId: "job-1", sessionId: "sess-1", agentId: "agent-1", threadId: "thread-1", endpointId: body.endpointId ?? "ep-1", harness: body.harness ?? "claude-code", harnessSessionId: "hs-1", generation: cap.headGeneration });
+        }
+      }
+      if (p === "/api/v5/teleport/targets" && req.method === "GET") {
+        return send(200, { targets: [{ target: "ditto-primary", providerId: "hippius", label: "Ditto (Hippius)", required: true, available: true }, { target: "ditto-secondary", providerId: "backblaze", label: "Ditto (Backblaze)", required: true, available: true }], quotaGb: 250, capsuleLimit: -1 });
       }
       send(404, { error: `unhandled ${req.method} ${p}` });
     });
