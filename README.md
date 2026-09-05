@@ -408,6 +408,71 @@ List your Ditto agents (`GET /api/v5/chat-agents`): id, kind (`main`, `chat`,
 `inference_endpoint`, `mcp`, `connector`), name, thread count, last activity and
 the live connections (API keys, OAuth grants, endpoints) writing into each.
 
+## Teleport
+
+Worktrees, clones, package caches and agent traces pile up until a laptop runs
+out of disk. **Teleport** moves a coding project — one repo or a whole folder of
+repos, plus your Claude Code / Codex session — to Ditto Cloud, so you can resume
+it in the cloud or on another machine, and reclaim the local space. It is a
+Hero-tier ($20) feature.
+
+A **capsule** is one teleportable root. Each `push` appends an immutable
+**generation**; only content-addressed chunks (≤ 24 MiB, deduplicated) reach
+storage, and unchanged chunks are never re-uploaded, so re-pushing a mostly
+unchanged tree is cheap. Secrets never travel: `.env*`, key files and package
+caches are excluded by construction.
+
+```bash
+heyditto teleport                       # push the current directory as a capsule
+heyditto teleport --cloud --endpoint work   # push, then resume in a Ditto Code cloud job
+heyditto teleport push ~/code/project --mirror all
+heyditto teleport pull project ~/code/project --restore-harness --resume
+heyditto teleport list
+heyditto teleport status project        # mirror + verification state
+heyditto teleport generations project   # every committed generation
+heyditto teleport targets               # mirror targets, quota and capsule limit for your plan
+```
+
+Every teleport command accepts `--json` (or `--output json`). `pull --json`
+prints `{cwd, harnessSessionId, harnessKind, …}`, which is what the Ditto Code
+runner reads when it restores a capsule before starting the harness. Capsules
+can be referred to by name or id everywhere.
+
+`push` bundles each repo (thin against the previous generation when possible),
+tars the dirty and untracked files, and captures the harness transcript for the
+session that was working there. `pull` reconstructs the repos from their
+bundles, restores branches, upstreams and the dirty worktree, and places the
+harness transcript under the restored path so `--resume` continues the exact
+session.
+
+## Offload
+
+`offload` is the safe "back it up, then delete it" command. It pushes the
+project, waits until the capsule is verified on a redundant mirror, then removes
+the local copy (into the Trash on macOS). It refuses when a repo holds commits
+no remote has, unless you pass `--allow-unpushed`.
+
+```bash
+heyditto offload ~/code/old-project      # verify, confirm, delete
+heyditto offload --yes                   # skip the confirmation
+```
+
+Recover any time with `heyditto teleport pull <capsule> <path>`.
+
+## Storage mirrors
+
+Ditto stores capsules redundantly on its own storage. You can also bring your
+own S3-compatible bucket (AWS S3, Cloudflare R2, Backblaze B2, MinIO, Hippius)
+and mirror capsules to it — to all buckets or a chosen subset.
+
+```bash
+heyditto storage add --name my-r2 --endpoint https://<acct>.r2.cloudflarestorage.com \
+  --region auto --bucket ditto-teleport --access-key … --secret-key …
+heyditto storage list
+heyditto storage test <id>
+heyditto storage mirror project all      # or: heyditto storage mirror project <id>,<id>
+```
+
 ## Environment
 
 - `DITTO_API_KEY` (optional) — MCP API key override. Agents can instead run `heyditto init --json` for no-human setup.

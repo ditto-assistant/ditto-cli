@@ -26,6 +26,7 @@ import {
   registerSessionCommands,
 } from "./commands.js";
 import { type ActiveSession, markSessionUsed, resolveActiveSession, sessionHeaders } from "./mcp-session.js";
+import { registerTeleportCommands } from "./teleport/commands.js";
 import { deviceLogin } from "./device-login.js";
 
 type OutputFormat = "json" | "text" | "markdown" | "raw";
@@ -1155,6 +1156,7 @@ your own graph or an app graph.`,
 
   registerHarnessCommands(program, addExamples);
   registerSessionCommands(program, addExamples);
+  registerTeleportCommands(program, addExamples);
 
   addExamples(
     program
