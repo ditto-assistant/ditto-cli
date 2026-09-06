@@ -71,8 +71,12 @@ async function restoreRepo(
     await mkdir(bundleDir, { recursive: true });
     const scratch = path.join(tmp, `scratch-${sanitize(repo.relPath)}`);
     gitOrThrow(["init", "--bare", scratch], tmp);
-    // Full packs first, then thin, so prerequisites exist before dependent bundles.
-    const ordered = [...repo.packs].sort((a, b) => (a.kind === b.kind ? 0 : a.kind === "full" ? -1 : 1));
+    // Full packs first, then thin packs oldest basis → newest, so every
+    // bundle's prerequisites are present before it is fetched.
+    const ordered = [...repo.packs].sort((a, b) => {
+      if (a.kind !== b.kind) return a.kind === "full" ? -1 : 1;
+      return (a.basisGeneration ?? 0) - (b.basisGeneration ?? 0);
+    });
     for (let i = 0; i < ordered.length; i++) {
       const bundleFile = path.join(bundleDir, `pack-${i}.bundle`);
       await concatChunks(ordered[i].chunks.map((c) => c.sha256), chunkPath, bundleFile);

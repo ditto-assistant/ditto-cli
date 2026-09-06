@@ -367,6 +367,85 @@ test("teleport --help and push --dry-run work without auth", () => {
   assert.deepEqual(plan.repos, ["."]);
 });
 
+/**
+ * Runs the built CLI against the stub with an isolated config dir. Async on
+ * purpose: spawnSync would block the event loop the in-process stub needs.
+ */
+function cli(stub, cfg, args) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [cliPath, ...args], {
+      env: { ...process.env, DITTO_API_BASE: stub.base, DITTO_API_KEY: "ditto_mcp_test", DITTO_CONFIG_DIR: cfg },
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (c) => (stdout += c));
+    child.stderr.on("data", (c) => (stderr += c));
+    child.on("close", (status) => resolve({ status, stdout, stderr }));
+  });
+}
+
+test("commit-free second push restores full history plus the dirty worktree", async () => {
+  const stub = await startTeleportStub();
+  const cfg = tmp("teleport-cfg-");
+  const src = makeRepo(); // 1 commit, dirty README.md, untracked scratch.txt, .env
+  try {
+    let r = await cli(stub, cfg, ["teleport", "push", src, "--name", "nocommit"]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /Pushed generation 1/);
+    // Append to a tracked file without committing, then push again (HEAD == basis → no new bundle).
+    writeFileSync(path.join(src, "README.md"), "# hello\nmodified locally\nmore\n");
+    r = await cli(stub, cfg, ["teleport", "push", src, "--name", "nocommit"]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /Pushed generation 2/);
+    const gen2 = stub.capsules.get("cap-1").generations.get(2).manifest;
+    assert.ok(gen2.repos[0].packs.length >= 1, "generation 2 must still reference a pack chain");
+
+    const dest = tmp("teleport-dest-");
+    r = await cli(stub, cfg, ["teleport", "pull", "nocommit", dest, "--json"]);
+    assert.equal(r.status, 0, r.stderr);
+    const headSrc = git(["rev-parse", "HEAD"], src).trim();
+    assert.equal(git(["rev-parse", "HEAD"], dest).trim(), headSrc, "same HEAD");
+    assert.equal(git(["symbolic-ref", "--short", "HEAD"], dest).trim(), "main");
+    const status = git(["status", "--short"], dest).split("\n").map((l) => l.trimEnd()).filter(Boolean).sort();
+    assert.deepEqual(status, [" M README.md", "?? scratch.txt"]);
+    assert.equal(readFileSync(path.join(dest, "README.md"), "utf8"), "# hello\nmodified locally\nmore\n");
+    assert.equal(readFileSync(path.join(dest, "scratch.txt"), "utf8"), "untracked work in progress\n");
+    assert.throws(() => readFileSync(path.join(dest, ".env")), ".env must not be restored");
+  } finally {
+    stub.close();
+  }
+});
+
+test("thin second push after a new commit restores the new HEAD", async () => {
+  const stub = await startTeleportStub();
+  const cfg = tmp("teleport-cfg-");
+  const src = makeRepo();
+  try {
+    let r = await cli(stub, cfg, ["teleport", "push", src, "--name", "thin"]);
+    assert.equal(r.status, 0, r.stderr);
+    writeFileSync(path.join(src, "second.txt"), "second commit\n");
+    git(["add", "second.txt"], src);
+    git(["commit", "-m", "second"], src);
+    const newHead = git(["rev-parse", "HEAD"], src).trim();
+    r = await cli(stub, cfg, ["teleport", "push", src, "--name", "thin"]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /Pushed generation 2/);
+    const gen2 = stub.capsules.get("cap-1").generations.get(2).manifest;
+    const kinds = gen2.repos[0].packs.map((p) => p.kind);
+    assert.ok(kinds.includes("thin"), `generation 2 should carry a thin pack, got ${kinds}`);
+    assert.ok(kinds.includes("full"), `generation 2 should reference its full basis pack, got ${kinds}`);
+
+    const dest = tmp("teleport-dest-");
+    r = await cli(stub, cfg, ["teleport", "pull", "thin", dest]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(git(["rev-parse", "HEAD"], dest).trim(), newHead, "HEAD is the new commit");
+    assert.equal(readFileSync(path.join(dest, "second.txt"), "utf8"), "second commit\n");
+    assert.equal(git(["rev-list", "--count", "HEAD"], dest).trim(), "2", "full history present");
+  } finally {
+    stub.close();
+  }
+});
+
 test("teleport pull and --cloud refuse a capsule with no generations", async () => {
   const stub = await startTeleportStub();
   const cfg = tmp("teleport-gen0-");
