@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -166,6 +166,50 @@ test("unknown endpoint slug is rejected with the available list", async () => {
     const result = await runAsync(["claude", "--dry-run", "-e", "nope"], { DITTO_API_BASE: stub.base, DITTO_API_KEY: "ditto_mcp_test" });
     assert.equal(result.status, 1);
     assert.match(result.stderr, /no endpoint named "nope". Available: alpha, beta/);
+  } finally {
+    stub.close();
+  }
+});
+
+test("--resume falls back to the original directory when the worktree is gone", async () => {
+  // Regression: `spawn claude ENOENT` when the recorded worktree had been
+  // removed since the last launch (Node reports a missing cwd as ENOENT).
+  const stub = await startStub();
+  const configDir = mkdtempSync(path.join(os.tmpdir(), "heyditto-resume-"));
+  const repoDir = mkdtempSync(path.join(os.tmpdir(), "heyditto-repo-"));
+  const goneWorktree = path.join(repoDir, ".worktrees", "claude-gone");
+  const id = "09be41e4-5684-426a-a962-366c4fd6d6aa";
+  mkdirSync(path.join(configDir, "sessions"), { recursive: true });
+  const record = {
+    id,
+    harness: "claude",
+    endpointId: ENDPOINTS.endpoints[0].id,
+    endpointSlug: "alpha",
+    harnessSessionId: id,
+    cwd: repoDir,
+    worktree: goneWorktree,
+    createdAt: "2026-09-05T12:18:07.313Z",
+    lastLaunchedAt: "2026-09-06T15:26:28.321Z",
+    launches: 4,
+  };
+  writeFileSync(path.join(configDir, "sessions", `${id}.json`), JSON.stringify(record));
+  const env = { DITTO_API_BASE: stub.base, DITTO_API_KEY: "ditto_mcp_test", DITTO_CONFIG_DIR: configDir };
+  try {
+    const gone = await runAsync(["claude", "--dry-run", "--resume", id, "--yolo"], env);
+    assert.equal(gone.status, 0, gone.stderr);
+    const plan = JSON.parse(gone.stdout);
+    assert.equal(plan.cwd, repoDir, "falls back to the directory the session started from");
+    assert.deepEqual(plan.args, ["--dangerously-skip-permissions", "--resume", id]);
+    assert.equal(plan.sessionId, id);
+    assert.match(gone.stderr, /worktree .*claude-gone no longer exists; resuming in /);
+    assert.match(gone.stderr, /--worktree <name> to recreate it/);
+
+    // A worktree that still exists keeps being used.
+    mkdirSync(goneWorktree, { recursive: true });
+    const present = await runAsync(["claude", "--dry-run", "--resume", id], env);
+    assert.equal(present.status, 0, present.stderr);
+    assert.equal(JSON.parse(present.stdout).cwd, goneWorktree);
+    assert.doesNotMatch(present.stderr, /no longer exists/);
   } finally {
     stub.close();
   }

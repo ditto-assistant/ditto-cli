@@ -1,5 +1,6 @@
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { stat } from "node:fs/promises";
 import os from "node:os";
 import { createInterface } from "node:readline/promises";
 import {
@@ -65,6 +66,33 @@ function planFor(harness: Harness, input: PlanInput): HarnessPlan {
 function binaryAvailable(command: string): boolean {
   const probe = process.platform === "win32" ? "where" : "which";
   return spawnSync(probe, [command], { stdio: "ignore" }).status === 0;
+}
+
+async function isDirectory(dir: string): Promise<boolean> {
+  try {
+    return (await stat(dir)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Picks the directory a resumed session runs in. Node reports a missing spawn
+ * cwd as `spawn claude ENOENT`, which reads as "claude is not installed", so a
+ * worktree that was removed since the last launch (Claude Code offers to delete
+ * its worktree on exit) is detected here and the launch falls back to the
+ * directory the session was originally started from.
+ */
+async function resolveResumeCwd(record: SessionRecord): Promise<{ cwd: string; worktree?: string }> {
+  if (record.worktree) {
+    if (await isDirectory(record.worktree)) return { cwd: record.worktree, worktree: record.worktree };
+    const fallback = (await isDirectory(record.cwd)) ? record.cwd : process.cwd();
+    log(`worktree ${record.worktree} no longer exists; resuming in ${fallback} (pass --worktree <name> to recreate it)`);
+    return { cwd: fallback };
+  }
+  if (await isDirectory(record.cwd)) return { cwd: record.cwd };
+  log(`directory ${record.cwd} no longer exists; resuming in ${process.cwd()}`);
+  return { cwd: process.cwd() };
 }
 
 function parseBudget(raw: string | undefined): number | undefined {
@@ -241,9 +269,16 @@ function forwardSignals(child: ChildProcess): () => void {
   };
 }
 
-function waitForExit(child: ChildProcess): Promise<number | null> {
+function waitForExit(child: ChildProcess, command: string, cwd: string): Promise<number | null> {
   return new Promise((resolve, reject) => {
-    child.on("error", reject);
+    child.on("error", (err) => {
+      // spawn reports both a missing binary and a missing cwd as ENOENT.
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        reject(new Error(`could not start ${command} in ${cwd}: ${err.message} (is "${command}" on your PATH and does the directory exist?)`));
+        return;
+      }
+      reject(err);
+    });
     child.on("exit", (code, signal) => resolve(code ?? (signal ? 128 + (os.constants.signals[signal] ?? 0) : null)));
   });
 }
@@ -308,8 +343,9 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   const endpoint = await resolveEndpoint(options.endpoint ?? record?.endpointSlug, catalog.endpoints, selected);
   await assertEndpointActive(endpoint);
 
-  let cwd = record?.worktree ?? process.cwd();
-  let worktreePath: string | undefined = record?.worktree;
+  let cwd = process.cwd();
+  let worktreePath: string | undefined;
+  if (record) ({ cwd, worktree: worktreePath } = await resolveResumeCwd(record));
   if (options.worktree !== undefined && options.worktree !== false) {
     const name = typeof options.worktree === "string" ? options.worktree : defaultWorktreeName(harness);
     if (options.dryRun) {
@@ -329,6 +365,8 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   const harnessSessionId = record?.harnessSessionId ?? (harness === "claude" && !resumeLast ? sessionId : undefined);
   const model = options.model ?? record?.model ?? (harness === "codex" ? endpoint.slug : undefined);
   const now = new Date().toISOString();
+
+  if (!(await isDirectory(cwd))) throw new Error(`launch directory ${cwd} does not exist`);
 
   const keyName = options.name?.trim() || `cli:${harness}:${os.hostname()}`;
   let key: InferenceKey | undefined;
@@ -418,7 +456,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   const restore = forwardSignals(child);
   let exitCode: number | null = null;
   try {
-    exitCode = await waitForExit(child);
+    exitCode = await waitForExit(child, plan.command, cwd);
   } finally {
     restore();
     if (options.keepKey) {
