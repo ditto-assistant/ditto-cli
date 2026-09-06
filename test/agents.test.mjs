@@ -212,7 +212,7 @@ test("FORCE_COLOR paints the launch banner even when stderr is a pipe", async ()
   }
 });
 
-test("--dry-run codex defaults the model to the endpoint slug and uses -c overrides", async () => {
+test("--dry-run codex passes the model through by default and uses -c overrides", async () => {
   const stub = await startStub();
   try {
     const result = await runAsync(["codex", "--dry-run", "-e", "beta", "--yolo", "-p", "say hi", "--json"], {
@@ -227,7 +227,7 @@ test("--dry-run codex defaults the model to the endpoint slug and uses -c overri
     assert.ok(plan.args.includes('model_providers.ditto.base_url="https://api.example.test/v1"'));
     assert.ok(plan.args.includes("--dangerously-bypass-approvals-and-sandbox"));
     assert.deepEqual(plan.args.slice(-3), ["--skip-git-repo-check", "--json", "say hi"]);
-    assert.equal(plan.args[plan.args.indexOf("-m") + 1], "beta");
+    assert.ok(!plan.args.includes("-m"), "codex must not be pinned to the endpoint slug");
     assert.equal(plan.env.DITTO_INFERENCE_API_KEY, "<key>");
   } finally {
     stub.close();

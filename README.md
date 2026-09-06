@@ -370,7 +370,7 @@ Options shared by both commands:
 | `--resume [id]` / `-c, --continue` | resume a local session (`heyditto sessions`) / the agent's most recent conversation |
 | `--yolo` / `--yellow` / `--plan` | bypass permissions / auto-accept edits / plan mode (Claude only) |
 | `-p, --prompt <text>` | headless run: `claude -p` or `codex exec` |
-| `-m, --model <id>` | model to request (Codex defaults to the endpoint slug; Claude's ids follow the endpoint's routes) |
+| `-m, --model <id>` | model to request (default: the agent's own model id passes through and the endpoint routes it) |
 | `-w, --worktree [name]` | run inside `<repo>/.worktrees/<name>` on a branch of that name; `.worktrees/` is added to `.gitignore` |
 | `--name <label>` | key name shown in the app (default `cli:<agent>:<hostname>`) |
 | `--dry-run` | print the command, args and env with the key masked; mints nothing |
