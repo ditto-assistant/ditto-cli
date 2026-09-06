@@ -690,7 +690,7 @@ export function registerHarnessCommands(program: Command, addExamples: (c: Comma
       .option("--yolo", `bypass all permission prompts (${harness === "claude" ? "--dangerously-skip-permissions" : "--dangerously-bypass-approvals-and-sandbox"})`)
       .option("--yellow", `auto-accept edits (${harness === "claude" ? "--permission-mode acceptEdits" : "-a on-request -s workspace-write"})`)
       .option("-p, --prompt <text>", `headless run (${harness === "claude" ? "claude -p" : "codex exec"}); pair with --output-format etc.`)
-      .option("-m, --model <id>", harness === "codex" ? "model id (default: the endpoint slug)" : "model id (default: let the endpoint route Claude's ids)")
+      .option("-m, --model <id>", `model id (default: let the endpoint route ${harness === "codex" ? "Codex's" : "Claude's"} own model ids)`)
       .option("-w, --worktree [name]", "run inside <repo>/.worktrees/<name> (created on a branch of the same name)")
       .option("--name <label>", "key name shown in the Ditto app (default: cli:<harness>:<hostname>)")
       .option("--dry-run", "print the command, args and env (key masked) without minting a key")

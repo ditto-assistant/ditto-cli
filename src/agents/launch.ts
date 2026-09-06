@@ -374,7 +374,12 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     throw new Error("--session must match ^[A-Za-z0-9._:@-]{1,128}$");
   }
   const harnessSessionId = record?.harnessSessionId ?? (harness === "claude" && !resumeLast ? sessionId : undefined);
-  const model = options.model ?? record?.model ?? (harness === "codex" ? endpoint.slug : undefined);
+  // No model flag means the harness's own model choice passes through and the
+  // endpoint routes it (Codex's default gpt-* id normalizes like Claude's
+  // claude-* ids). Earlier releases pinned Codex sessions to the endpoint
+  // slug; that pin is dropped on resume so they pass through too.
+  const recordedModel = record?.model === endpoint.slug ? undefined : record?.model;
+  const model = options.model ?? recordedModel;
   const now = new Date().toISOString();
 
   if (!(await isDirectory(cwd))) throw new Error(`launch directory ${cwd} does not exist`);
