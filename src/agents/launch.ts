@@ -20,10 +20,12 @@ import { endpointURL, resolveApiKey } from "../config.js";
 import { deviceLogin } from "../device-login.js";
 import { formatActivation } from "../endpoint-format.js";
 import { readStoredAuth, saveLogin, updateStoredAuth } from "../store.js";
+import { err as c } from "../ui.js";
 import { planClaude } from "./claude.js";
 import { planCodex } from "./codex.js";
 import { type SessionRecord, latestSession, readSession, writeSession } from "./sessions.js";
 import {
+  DEFAULT_LAUNCH_EXPIRY,
   type Harness,
   type HarnessPlan,
   KEY_EXPIRIES,
@@ -56,7 +58,16 @@ export interface LaunchOptions {
 const DRY_RUN_KEY = "ditto_inf_<minted-at-launch>";
 
 function log(line: string): void {
-  process.stderr.write(`ditto: ${line}\n`);
+  process.stderr.write(`${c("dim", "ditto:")} ${line}\n`);
+}
+
+/**
+ * Prints the command that reopens this session on a line of its own, with no
+ * prefix or trailing text, so a triple-click (or a mouse drag) grabs exactly
+ * the command.
+ */
+function logResumeHint(harness: Harness, sessionId: string): void {
+  process.stderr.write(`${c("dim", "ditto:")} resume this session with:\n\n  ${c(["bold", "green"], `heyditto ${harness} --resume ${sessionId}`)}\n\n`);
 }
 
 function planFor(harness: Harness, input: PlanInput): HarnessPlan {
@@ -103,7 +114,7 @@ function parseBudget(raw: string | undefined): number | undefined {
 }
 
 function parseExpiry(raw: string | undefined): KeyExpiry {
-  const value = (raw ?? "1d").trim();
+  const value = (raw ?? DEFAULT_LAUNCH_EXPIRY).trim();
   if ((KEY_EXPIRIES as readonly string[]).includes(value)) return value as KeyExpiry;
   throw new Error(`--expires must be one of: ${KEY_EXPIRIES.join(", ")}`);
 }
@@ -140,16 +151,16 @@ export async function pickEndpoint(endpoints: InferenceEndpoint[], defaultSlug?:
       "no endpoint selected. Pass --endpoint <slug>, or set a default with `heyditto endpoints use <slug>`.",
     );
   }
-  process.stderr.write("Ditto inference endpoints:\n\n");
+  process.stderr.write(`${c("bold", "Ditto inference endpoints:")}\n\n`);
   endpoints.forEach((e, i) => {
     const marks = [
-      e.slug === defaultSlug ? "default" : "",
-      isEndpointPending(e) ? "inactive" : "",
+      e.slug === defaultSlug ? c("green", "default") : "",
+      isEndpointPending(e) ? c("yellow", "inactive") : "",
     ].filter(Boolean);
     process.stderr.write(
-      `  ${i + 1}) ${e.slug}  ${e.name !== e.slug ? `(${e.name})  ` : ""}model=${e.model}${marks.length ? `  [${marks.join(", ")}]` : ""}\n`,
+      `  ${c("cyan", `${i + 1})`)} ${c("bold", e.slug)}  ${e.name !== e.slug ? c("dim", `(${e.name})  `) : ""}${c("dim", "model=")}${e.model}${marks.length ? `  [${marks.join(", ")}]` : ""}\n`,
     );
-    process.stderr.write(`     ${formatSpend(e)}${e.recordTrace ? "  · traces on" : "  · traces off"}\n`);
+    process.stderr.write(c("dim", `     ${formatSpend(e)}${e.recordTrace ? "  · traces on" : "  · traces off"}\n`));
   });
   process.stderr.write("\n");
   const rl = createInterface({ input: process.stdin, output: process.stderr });
@@ -352,7 +363,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
       log(`would create worktree .worktrees/${name}`);
     } else {
       const wt = await ensureWorktree(process.cwd(), name);
-      log(`${wt.created ? "created" : "reusing"} worktree ${wt.path} (branch ${wt.branch})`);
+      log(`${wt.created ? "created" : "reusing"} worktree ${c("bold", wt.path)} ${c("dim", `(branch ${wt.branch})`)}`);
       cwd = wt.path;
       worktreePath = wt.path;
     }
@@ -393,18 +404,19 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     env: process.env,
   });
 
+  const field = (name: string, value: string): string => `${c("dim", `${name}=`)}${value}`;
   const banner = [
-    `endpoint=${endpoint.slug}`,
-    `model=${model ?? "(harness default → endpoint routes)"}`,
-    `key=${key ? `…${key.keyHint || maskKey(key.key ?? "")}` : "(dry run)"}`,
-    `expires=${expiresIn}${options.keepKey ? "" : " (revoked on exit)"}`,
-    budget !== undefined ? `budget=${budget.toLocaleString()} tokens` : undefined,
-    `session=${sessionId}`,
+    field("endpoint", c(["bold", "cyan"], endpoint.slug)),
+    field("model", model ?? c("dim", "(harness default → endpoint routes)")),
+    field("key", key ? `…${key.keyHint || maskKey(key.key ?? "")}` : "(dry run)"),
+    field("expires", `${expiresIn}${options.keepKey ? "" : c("dim", " (revoked on exit)")}`),
+    budget !== undefined ? field("budget", `${budget.toLocaleString()} tokens`) : undefined,
+    field("session", c("bold", sessionId)),
   ]
     .filter(Boolean)
     .join("  ");
   log(banner);
-  log(`traces: ${endpointURL(endpoint.id)}`);
+  log(`traces: ${c(["underline", "cyan"], endpointURL(endpoint.id))}`);
 
   if (options.dryRun) {
     const env = Object.fromEntries(
@@ -459,16 +471,18 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     exitCode = await waitForExit(child, plan.command, cwd);
   } finally {
     restore();
+    process.stderr.write("\n");
     if (options.keepKey) {
-      log(`kept key …${key.keyHint} (expires ${expiresIn}); revoke it from the Ditto app when done`);
+      log(`kept key …${key.keyHint} ${c("dim", `(expires ${expiresIn})`)}; revoke it from the Ditto app when done`);
     } else {
       try {
         await revokeKey(endpoint.id, key.id);
-        log(`revoked session key …${key.keyHint}; thread kept (resume with: heyditto ${harness} --resume ${sessionId})`);
+        log(`${c("green", "revoked")} session key …${key.keyHint}; the thread and its traces are kept`);
       } catch (err) {
-        log(`could not revoke key …${key.keyHint} (${err instanceof Error ? err.message : String(err)}); it expires in ${expiresIn}`);
+        log(`${c("yellow", "could not revoke")} key …${key.keyHint} (${err instanceof Error ? err.message : String(err)}); it expires in ${expiresIn}`);
       }
     }
+    logResumeHint(harness, sessionId);
     await writeSession({ ...nextRecord, endedAt: new Date().toISOString(), exitCode });
   }
   process.exitCode = exitCode ?? 1;

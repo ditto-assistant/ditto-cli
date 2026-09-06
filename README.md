@@ -342,7 +342,8 @@ the Ditto app's Settings → Developer page still works too). Each launch:
    session becomes its own thread with full traces under the endpoint,
 4. **revokes the key when the agent exits** (Ctrl+C included). The thread and
    traces are kept; `--keep-key` opts out, `--expires` sets a server-side
-   safety expiry (default `1d`).
+   safety expiry (default `1mo`, so a session left open for days keeps
+   working; the key is still revoked on exit).
 
 ```bash
 npx -y @heyditto/cli login

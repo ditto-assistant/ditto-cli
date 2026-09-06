@@ -138,6 +138,64 @@ test("--dry-run claude resolves the endpoint and prints the plan (no key minted)
   }
 });
 
+test("launch keys default to a month-long safety expiry (revoked on exit anyway)", async () => {
+  const stub = await startStub();
+  try {
+    const result = await runAsync(["claude", "--dry-run", "--endpoint", "alpha"], { DITTO_API_BASE: stub.base, DITTO_API_KEY: "ditto_mcp_test" });
+    assert.equal(result.status, 0, result.stderr);
+    // A 1d default killed multi-day `--worktree` sessions with "401 this Ditto endpoint key has expired".
+    assert.equal(JSON.parse(result.stdout).key.expiresIn, "1mo");
+    assert.match(result.stderr, /expires=1mo \(revoked on exit\)/);
+    const help = run(["claude", "--help"]);
+    assert.match(help.stdout, /--expires <duration>[\s\S]*default: "1mo"/);
+  } finally {
+    stub.close();
+  }
+});
+
+/** Writes a fake `claude` binary that records argv and exits 0. */
+function fakeClaude() {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "heyditto-fake-claude-"));
+  const bin = path.join(dir, "claude");
+  writeFileSync(bin, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$FAKE_CLAUDE_LOG\"\nexit 0\n", { mode: 0o755 });
+  const log = path.join(dir, "argv.log");
+  return { log, env: (extra = {}) => ({ PATH: `${dir}${path.delimiter}${process.env.PATH}`, FAKE_CLAUDE_LOG: log, ...extra }) };
+}
+
+test("a real launch mints a 1mo key, revokes it on exit and prints a copyable resume line", async () => {
+  const stub = await startStub();
+  const claude = fakeClaude();
+  try {
+    const result = await runAsync(
+      ["claude", "--endpoint", "alpha", "--session", "sess-copy"],
+      claude.env({ DITTO_API_BASE: stub.base, DITTO_API_KEY: "ditto_mcp_test", NO_COLOR: "1" }),
+    );
+    assert.equal(result.status, 0, result.stderr);
+    const post = stub.calls.find((c) => c.method === "POST" && /\/keys$/.test(c.url));
+    assert.ok(post, "a key was minted");
+    assert.equal(JSON.parse(post.body).expiresIn, "1mo");
+    assert.ok(stub.calls.some((c) => c.method === "DELETE" && /\/keys\/key-1$/.test(c.url)), "the key was revoked on exit");
+    assert.match(readFileSync(claude.log, "utf8"), /--session-id\nsess-copy/);
+    // The resume command sits alone on its own line so it can be copied whole.
+    assert.match(result.stderr, /^  heyditto claude --resume sess-copy$/m);
+    assert.match(result.stderr, /revoked session key …ab12/);
+    assert.doesNotMatch(result.stderr, /\u001b\[/, "NO_COLOR output carries no escape codes");
+  } finally {
+    stub.close();
+  }
+});
+
+test("FORCE_COLOR paints the launch banner even when stderr is a pipe", async () => {
+  const stub = await startStub();
+  try {
+    const result = await runAsync(["claude", "--dry-run", "--endpoint", "alpha"], { DITTO_API_BASE: stub.base, DITTO_API_KEY: "ditto_mcp_test", FORCE_COLOR: "1" });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stderr, /\u001b\[2mendpoint=\u001b\[22m\u001b\[1m\u001b\[36malpha/);
+  } finally {
+    stub.close();
+  }
+});
+
 test("--dry-run codex defaults the model to the endpoint slug and uses -c overrides", async () => {
   const stub = await startStub();
   try {
