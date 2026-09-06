@@ -19,6 +19,14 @@ export const KEY_EXPIRIES = [
 ] as const;
 export type KeyExpiry = (typeof KEY_EXPIRIES)[number];
 
+/**
+ * Server-side safety expiry for the key a launcher mints. The key is normally
+ * revoked the moment the agent exits, so this only has to outlive the longest
+ * session anyone leaves open; a day was too short for multi-day worktree
+ * sessions, which died mid-work with "401 this Ditto endpoint key has expired".
+ */
+export const DEFAULT_LAUNCH_EXPIRY: KeyExpiry = "1mo";
+
 /** Header the Ditto gateway groups turns by; every launch sends one. */
 export const SESSION_HEADER = "X-Ditto-Session-Id";
 

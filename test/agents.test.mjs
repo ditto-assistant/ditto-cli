@@ -63,7 +63,8 @@ function startStub() {
 function childEnvFor(env) {
   // The launchers merge inherited harness env (e.g. ANTHROPIC_CUSTOM_HEADERS
   // when this test itself runs under a Ditto-launched Claude Code), so drop it.
-  const { ANTHROPIC_CUSTOM_HEADERS: _headers, ANTHROPIC_API_KEY: _key, ...parent } = process.env;
+  // Likewise the developer's color settings: each test opts into color explicitly.
+  const { ANTHROPIC_CUSTOM_HEADERS: _headers, ANTHROPIC_API_KEY: _key, NO_COLOR: _nc, NODE_DISABLE_COLORS: _ndc, FORCE_COLOR: _fc, ...parent } = process.env;
   return {
     ...parent,
     DITTO_API_KEY: "",
@@ -133,6 +134,79 @@ test("--dry-run claude resolves the endpoint and prints the plan (no key minted)
     assert.equal(plan.key.spendLimitTokens, 500000);
     assert.match(result.stderr, /endpoint=alpha/);
     assert.ok(stub.calls.every((c) => c.method === "GET"), "dry run must not POST keys");
+  } finally {
+    stub.close();
+  }
+});
+
+test("launch keys default to a month-long safety expiry (revoked on exit anyway)", async () => {
+  const stub = await startStub();
+  try {
+    const result = await runAsync(["claude", "--dry-run", "--endpoint", "alpha"], { DITTO_API_BASE: stub.base, DITTO_API_KEY: "ditto_mcp_test" });
+    assert.equal(result.status, 0, result.stderr);
+    // A 1d default killed multi-day `--worktree` sessions with "401 this Ditto endpoint key has expired".
+    assert.equal(JSON.parse(result.stdout).key.expiresIn, "1mo");
+    assert.match(result.stderr, /expires=1mo \(revoked on exit\)/);
+    const help = run(["claude", "--help"]);
+    assert.match(help.stdout, /--expires <duration>[\s\S]*default: "1mo"/);
+  } finally {
+    stub.close();
+  }
+});
+
+/** Writes a fake `claude` binary that records argv and exits 0. */
+function fakeClaude() {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "heyditto-fake-claude-"));
+  const bin = path.join(dir, "claude");
+  writeFileSync(bin, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$FAKE_CLAUDE_LOG\"\nexit 0\n", { mode: 0o755 });
+  const log = path.join(dir, "argv.log");
+  return { log, env: (extra = {}) => ({ PATH: `${dir}${path.delimiter}${process.env.PATH}`, FAKE_CLAUDE_LOG: log, ...extra }) };
+}
+
+test("a real launch mints a 1mo key, revokes it on exit and prints a copyable resume line", async () => {
+  const stub = await startStub();
+  const claude = fakeClaude();
+  try {
+    const result = await runAsync(
+      ["claude", "--endpoint", "alpha", "--session", "sess-copy"],
+      claude.env({ DITTO_API_BASE: stub.base, DITTO_API_KEY: "ditto_mcp_test", NO_COLOR: "1" }),
+    );
+    assert.equal(result.status, 0, result.stderr);
+    const post = stub.calls.find((c) => c.method === "POST" && /\/keys$/.test(c.url));
+    assert.ok(post, "a key was minted");
+    assert.equal(JSON.parse(post.body).expiresIn, "1mo");
+    assert.ok(stub.calls.some((c) => c.method === "DELETE" && /\/keys\/key-1$/.test(c.url)), "the key was revoked on exit");
+    assert.match(readFileSync(claude.log, "utf8"), /--session-id\nsess-copy/);
+    // The resume command sits alone on its own line so it can be copied whole.
+    assert.match(result.stderr, /^  heyditto claude --resume sess-copy$/m);
+    assert.match(result.stderr, /revoked session key …ab12/);
+    assert.doesNotMatch(result.stderr, /\u001b\[/, "NO_COLOR output carries no escape codes");
+  } finally {
+    stub.close();
+  }
+});
+
+test("a headless -p launch skips the resume epilogue", async () => {
+  const stub = await startStub();
+  const claude = fakeClaude();
+  try {
+    const result = await runAsync(["claude", "--endpoint", "alpha", "-p", "say hi"], claude.env({ DITTO_API_BASE: stub.base, DITTO_API_KEY: "ditto_mcp_test" }));
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(readFileSync(claude.log, "utf8"), /-p\nsay hi/);
+    assert.match(result.stderr, /revoked session key/);
+    assert.doesNotMatch(result.stderr, /resume this session/);
+  } finally {
+    stub.close();
+  }
+});
+
+test("FORCE_COLOR paints the launch banner even when stderr is a pipe", async () => {
+  const stub = await startStub();
+  try {
+    const result = await runAsync(["claude", "--dry-run", "--endpoint", "alpha"], { DITTO_API_BASE: stub.base, DITTO_API_KEY: "ditto_mcp_test", FORCE_COLOR: "1" });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stderr, /\u001b\[/, "FORCE_COLOR turns colors on for a pipe");
+    assert.match(result.stderr, /endpoint=(\u001b\[\d+m)*alpha/);
   } finally {
     stub.close();
   }

@@ -2,7 +2,7 @@ import { createInterface } from "node:readline/promises";
 import { Command, Option } from "commander";
 import { launchHarness, pickEndpoint } from "./agents/launch.js";
 import { listSessions, removeSession } from "./agents/sessions.js";
-import { HARNESSES, type Harness, KEY_EXPIRIES, type KeyExpiry, apiRootOf } from "./agents/types.js";
+import { DEFAULT_LAUNCH_EXPIRY, HARNESSES, type Harness, KEY_EXPIRIES, type KeyExpiry, apiRootOf } from "./agents/types.js";
 import {
   type ChatAgent,
   type EndpointInput,
@@ -679,9 +679,9 @@ export function registerHarnessCommands(program: Command, addExamples: (c: Comma
       .option("-e, --endpoint <slug>", "inference endpoint slug or id (default: saved default, or a picker)")
       .option("--budget <tokens>", "spend cap for this session's key, in Ditto tokens")
       .addOption(
-        new Option("--expires <duration>", "server-side safety expiry for the key")
+        new Option("--expires <duration>", "server-side safety expiry for the key (revoked on exit anyway unless --keep-key)")
           .choices([...KEY_EXPIRIES])
-          .default("1d"),
+          .default(DEFAULT_LAUNCH_EXPIRY),
       )
       .option("--keep-key", "do not revoke the key when the agent exits")
       .option("--session <id>", "reuse a Ditto session id (X-Ditto-Session-Id) for the traces thread")
