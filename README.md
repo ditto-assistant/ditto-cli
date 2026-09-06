@@ -469,9 +469,17 @@ and mirror capsules to it — to all buckets or a chosen subset.
 heyditto storage add --name my-r2 --endpoint https://<acct>.r2.cloudflarestorage.com \
   --region auto --bucket ditto-teleport --access-key … --secret-key …
 heyditto storage list
-heyditto storage test <id>
+heyditto storage test my-r2               # name or id
+heyditto storage remove my-r2
 heyditto storage mirror project all      # or: heyditto storage mirror project <id>,<id>
 ```
+
+Buckets are managed through the teleport API (`/api/v5/teleport/buckets`), so the
+saved CLI key is all you need. A bucket added with `storage add` is a teleport
+mirror by default; pass `--no-mirror` to keep it out of mirror policies.
+
+`teleport pull` and `teleport --cloud` need a committed generation: a capsule that
+was created but whose push failed reports `has no generations yet`.
 
 ## Environment
 

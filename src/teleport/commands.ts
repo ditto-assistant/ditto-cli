@@ -73,6 +73,14 @@ async function resolveCapsule(
   return { capsule, previous };
 }
 
+/** Pull and cloud sessions need at least one committed generation. */
+function requireGenerations(capsule: tapi.Capsule): void {
+  if (capsule.headGeneration > 0) return;
+  throw new Error(
+    `capsule ${capsule.name} has no generations yet — push it first with \`heyditto teleport push\``,
+  );
+}
+
 interface PushOptions extends OutputOptions {
   name?: string;
   mirror?: string;
@@ -141,6 +149,7 @@ export async function cmdTeleportPull(nameArg: string | undefined, pathArg: stri
   const ref = options.capsule ?? nameArg;
   if (!ref) throw new Error("which capsule? pass a name/id argument or --capsule");
   const capsule = await tapi.getCapsule(ref);
+  requireGenerations(capsule);
   const dest = path.resolve(options.into ?? pathArg ?? path.join(process.cwd(), capsule.name));
   const generation = options.generation ? Number(options.generation) : undefined;
   err(`Pulling capsule ${capsule.name}${generation ? ` @${generation}` : ""} → ${dest}…`);
@@ -243,6 +252,7 @@ export async function cmdTeleport(pathArg: string | undefined, options: Teleport
   if (!options.cloud) return;
 
   const name = options.name?.trim() || path.basename(root);
+  requireGenerations(await tapi.getCapsule(name));
   const harnessKind = harnessKindOf(match?.harness ?? options.harness);
   const session = await tapi.launchCloudSession(name, {
     prompt: options.prompt?.trim() || "Resume the teleported session and continue where it left off.",
@@ -299,9 +309,12 @@ interface StorageAddOptions extends OutputOptions {
   accessKey?: string;
   secretKey?: string;
   default?: boolean;
+  /** commander maps --no-mirror to mirror=false */
+  mirror?: boolean;
 }
 
 export async function cmdStorageAdd(options: StorageAddOptions): Promise<void> {
+  const endpoint = options.endpoint ?? (await requireTty("S3 endpoint URL: "));
   const bucket = options.bucket ?? (await requireTty("Bucket name: "));
   const accessKeyID = options.accessKey ?? (await requireTty("Access key id: "));
   const secretAccessKey = options.secretKey ?? (await requireTty("Secret access key: "));
@@ -310,42 +323,54 @@ export async function cmdStorageAdd(options: StorageAddOptions): Promise<void> {
     accessKeyID,
     secretAccessKey,
     bucket,
-    endpoint: options.endpoint,
+    endpoint,
     region: options.region,
     default: options.default,
+    teleportMirror: options.mirror !== false,
   };
   const probe = await storage.testDraft(input);
   if (!probe.ok) throw new Error(`could not connect to that bucket${probe.error ? `: ${probe.error}` : ""}`);
   const saved = await storage.addBucket(input);
   if (json(options)) return out(JSON.stringify(saved, null, 2));
-  out(`Added bucket ${saved.name ?? saved.bucket} (${storage.bucketEndpointLabel(saved)}).`);
+  out(`Added bucket ${saved.name ?? saved.bucket} (${storage.bucketEndpointLabel(saved)}, ${saved.providerKind ?? "s3"}).`);
 }
 
 export async function cmdStorageList(options: OutputOptions): Promise<void> {
-  const [status, targets] = await Promise.all([storage.getStorage(), tapi.listTargets().catch(() => undefined)]);
-  if (json(options)) return out(JSON.stringify({ ...status, targets: targets?.targets ?? [] }, null, 2));
+  const [buckets, targets] = await Promise.all([storage.listBuckets(), tapi.listTargets().catch(() => undefined)]);
+  if (json(options)) return out(JSON.stringify({ buckets, targets: targets?.targets ?? [] }, null, 2));
   if (targets) {
     out("Mirror targets:");
     for (const t of targets.targets) out(`  ${pad(t.target, 20)} ${pad(t.label, 24)} ${t.required ? "required" : "optional"}${t.available ? "" : "  (unavailable)"}`);
   }
-  if (status.buckets.length === 0) return out("No buckets of your own. Add one with `heyditto storage add`.");
+  if (buckets.length === 0) return out("No buckets of your own. Add one with `heyditto storage add`.");
   out("Your buckets:");
-  for (const b of status.buckets) {
-    const flags = [b.default ? "default" : "", b.enabled ? "" : "disabled"].filter(Boolean).join(", ");
+  for (const b of buckets) {
+    const flags = [
+      b.default ? "default" : "",
+      b.enabled ? "" : "disabled",
+      b.teleportMirror ? "mirror" : "",
+      b.credentialState && b.credentialState !== "ready" ? b.credentialState : "",
+    ]
+      .filter(Boolean)
+      .join(", ");
     out(`  ${b.id}  ${pad(b.name ?? b.bucket, 20)}  ${pad(storage.bucketEndpointLabel(b), 28)}${flags ? `  (${flags})` : ""}`);
   }
 }
 
-export async function cmdStorageTest(id: string, options: OutputOptions): Promise<void> {
-  const res = await storage.testBucket(id);
-  if (json(options)) return out(JSON.stringify(res, null, 2));
-  out(res.ok ? `Bucket ${id}: connection ok.` : `Bucket ${id}: FAILED${res.error ? ` — ${res.error}` : ""}`);
+/** `<bucket>` is a friendly name or an id. */
+export async function cmdStorageTest(ref: string, options: OutputOptions): Promise<void> {
+  const bucket = await storage.resolveBucket(ref);
+  const res = await storage.testBucket(bucket.id);
+  const label = bucket.name ?? bucket.bucket;
+  if (json(options)) return out(JSON.stringify({ id: bucket.id, ...res }, null, 2));
+  out(res.ok ? `Bucket ${label}: connection ok.` : `Bucket ${label}: FAILED${res.error ? ` — ${res.error}` : ""}`);
   if (!res.ok) process.exitCode = 1;
 }
 
-export async function cmdStorageRemove(id: string): Promise<void> {
-  await storage.removeBucket(id);
-  out(`Removed bucket ${id}.`);
+export async function cmdStorageRemove(ref: string): Promise<void> {
+  const bucket = await storage.resolveBucket(ref);
+  await storage.removeBucket(bucket.id);
+  out(`Removed bucket ${bucket.name ?? bucket.bucket}.`);
 }
 
 export async function cmdStorageMirror(ref: string, targetsArg: string): Promise<void> {
@@ -447,7 +472,8 @@ export function registerTeleportCommands(program: Command, addExamples: (c: Comm
       .command("add")
       .description("add a bucket (prompts for anything not passed)")
       .option("--name <name>", "friendly label")
-      .option("--endpoint <url>", "S3 endpoint (default: Hippius)")
+      .option("--endpoint <url>", "S3 endpoint URL (AWS, R2, B2, MinIO, Hippius)")
+      .option("--no-mirror", "add the bucket without using it as a teleport mirror")
       .option("--region <region>", "region")
       .option("--bucket <bucket>", "bucket name")
       .option("--access-key <id>", "access key id")
@@ -456,8 +482,8 @@ export function registerTeleportCommands(program: Command, addExamples: (c: Comm
       .action(cmdStorageAdd),
   );
   withOutput(store.command("list").description("list mirror targets and your buckets").action(cmdStorageList));
-  withOutput(store.command("test <id>").description("test a bucket's connection").action(cmdStorageTest));
-  store.command("remove <id>").description("remove a bucket").action(cmdStorageRemove);
+  withOutput(store.command("test <bucket>").description("test a bucket's connection (name or id)").action(cmdStorageTest));
+  store.command("remove <bucket>").description("remove a bucket (name or id)").action(cmdStorageRemove);
   store.command("mirror <capsule> <targets>").description("set a capsule's mirror policy: all | <target>[,…]").action(cmdStorageMirror);
 }
 
