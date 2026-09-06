@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -47,6 +47,8 @@ const PENDING = {
     url: "https://app.example.test/agent/claim?activate=11111111-1111-1111-1111-111111111111",
   },
 };
+
+const MINTED_PLAINTEXT = "ditto_inf_PLAINTEXT_MUST_NEVER_PRINT_zz99";
 
 /** Stub of the Ditto API covering the device flow and endpoint management. */
 function startStub({ endpoints = [ALPHA, BETA], tokenPollsUntilOk = 2 } = {}) {
@@ -98,6 +100,10 @@ function startStub({ endpoints = [ALPHA, BETA], tokenPollsUntilOk = 2 } = {}) {
         return json(200, { ...endpoints.find((e) => e.id === m[1]), ...patch });
       }
       if (m && !m[2] && req.method === "DELETE") return json(204);
+      if (m && m[2] === "/keys" && req.method === "POST") {
+        const input = JSON.parse(body);
+        return json(201, { id: "key-2", endpointId: m[1], name: input.name, keyHint: "zz99", key: MINTED_PLAINTEXT, expiresAt: "2027-09-05T00:00:00Z", spendLimitTokens: input.spendLimitTokens ?? null, spendPeriod: input.spendPeriod ?? "never" });
+      }
       if (m && m[2] === "/keys" && req.method === "GET") {
         return json(200, { keys: [{ id: "key-1", endpointId: m[1], name: "cli:claude:host", keyHint: "ab12", expiresAt: null, lastUsedAt: null, revokedAt: null }] });
       }
@@ -222,6 +228,14 @@ test("endpoints group help works without auth", () => {
   for (const sub of ["list", "create", "show", "use", "pick", "open", "set", "delete", "keys"]) {
     assert.match(top.stdout, new RegExp(`^\\s+${sub}\\b`, "m"), `missing subcommand ${sub}`);
   }
+  const keysCreate = run(["endpoints", "keys", "create", "--help"]);
+  assert.equal(keysCreate.status, 0, keysCreate.stderr);
+  assert.match(keysCreate.stdout, /Usage: heyditto endpoints keys create/);
+  assert.match(keysCreate.stdout, /--gh-secret <NAME>/);
+  assert.match(keysCreate.stdout, /--repo <owner\/repo>/);
+  assert.match(keysCreate.stdout, /--env <environment>/);
+  assert.match(keysCreate.stdout, /--org <org>/);
+  assert.match(keysCreate.stdout, /default: "1y"/);
   const create = run(["endpoints", "create", "--help"]);
   assert.equal(create.status, 0, create.stderr);
   assert.match(create.stdout, /Usage: heyditto endpoints create/);
@@ -389,6 +403,174 @@ test("claude/codex without a key and without a TTY still fail fast (no device fl
       assert.match(result.stderr, /heyditto login/);
     }
     assert.ok(!stub.calls.some((c) => c.url === "/api/v2/mcp/device-code"), "non-interactive runs must not start a device flow");
+  } finally {
+    stub.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// endpoints keys create --gh-secret: fake `gh` on PATH
+// ---------------------------------------------------------------------------
+
+/**
+ * Writes a fake `gh` into a temp dir. It records argv per subcommand and the
+ * full stdin of `secret set`, and honours FAKE_GH_NO_AUTH / FAKE_GH_FAIL_SECRET.
+ */
+function fakeGh() {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "heyditto-fake-gh-"));
+  const log = path.join(dir, "log");
+  const script = `#!/bin/sh
+LOG="$FAKE_GH_LOG"
+case "$1" in
+  --version) echo "gh version 9.9.9 (fake)"; exit 0;;
+esac
+case "$1 $2" in
+  "auth status")
+    printf '%s\n' "$@" > "$LOG.auth.argv"
+    if [ -n "$FAKE_GH_NO_AUTH" ]; then echo "You are not logged into any GitHub hosts." >&2; exit 1; fi
+    echo "Logged in to github.com" >&2; exit 0;;
+  "repo view")
+    printf '%s\n' "$@" > "$LOG.repo.argv"
+    echo "cwd-owner/cwd-repo"; exit 0;;
+  "secret set")
+    printf '%s\n' "$@" > "$LOG.secret.argv"
+    cat > "$LOG.secret.stdin"
+    if [ -n "$FAKE_GH_FAIL_SECRET" ]; then echo "HTTP 403: Resource not accessible by integration" >&2; exit 1; fi
+    echo "Set Actions secret $3" >&2; exit 0;;
+esac
+echo "fake gh: unexpected args: $*" >&2; exit 2
+`;
+  writeFileSync(path.join(dir, "gh"), script);
+  chmodSync(path.join(dir, "gh"), 0o755);
+  const read = (suffix) => (existsSync(`${log}.${suffix}`) ? readFileSync(`${log}.${suffix}`, "utf8") : undefined);
+  return {
+    env: (extra = {}) => ({ PATH: `${dir}${path.delimiter}${process.env.PATH}`, FAKE_GH_LOG: log, ...extra }),
+    secretArgv: () => read("secret.argv")?.replace(/\n$/, "").split("\n"),
+    secretStdin: () => read("secret.stdin"),
+    repoArgv: () => read("repo.argv")?.replace(/\n$/, "").split("\n"),
+    authCalled: () => read("auth.argv") !== undefined,
+  };
+}
+
+const keyPosts = (stub) => stub.calls.filter((c) => c.method === "POST" && c.url.endsWith("/keys"));
+
+test("endpoints keys create --gh-secret refuses without --yes on a non-TTY before minting anything", async () => {
+  const stub = await startStub();
+  const gh = fakeGh();
+  try {
+    const refused = await runAsync(["endpoints", "keys", "create", "alpha", "--gh-secret", "DITTO_KEY", "--repo", "o/r"], gh.env({ DITTO_API_BASE: stub.base, DITTO_API_KEY: "ditto_mcp_test" }));
+    assert.equal(refused.status, 1);
+    assert.match(refused.stderr, /refusing to mint a key on alpha and set secret DITTO_KEY without confirmation/);
+    assert.equal(keyPosts(stub).length, 0, "must not mint without confirmation");
+    assert.equal(gh.secretArgv(), undefined, "must not touch gh secret set");
+    assert.doesNotMatch(refused.stdout + refused.stderr, /PLAINTEXT/);
+  } finally {
+    stub.close();
+  }
+});
+
+test("endpoints keys create --gh-secret mints, pipes the key to gh over stdin only, and never prints it", async () => {
+  const stub = await startStub();
+  const gh = fakeGh();
+  const env = gh.env({ DITTO_API_BASE: stub.base, DITTO_API_KEY: "ditto_mcp_test" });
+  try {
+    const text = await runAsync(["endpoints", "keys", "create", "alpha", "--gh-secret", "DITTO_KEY", "--repo", "o/r", "--yes"], env);
+    assert.equal(text.status, 0, text.stderr);
+    assert.equal(keyPosts(stub).length, 1);
+    const post = keyPosts(stub)[0];
+    assert.equal(post.url, `/api/v5/inference/endpoints/${ALPHA.id}/keys`);
+    assert.deepEqual(post.body, { name: "gh:o/r:DITTO_KEY", expiresIn: "1y" });
+    assert.ok(gh.authCalled(), "gh auth status must run");
+    assert.deepEqual(gh.secretArgv(), ["secret", "set", "DITTO_KEY", "--repo", "o/r"], "no --body: value goes over stdin");
+    assert.equal(gh.secretStdin(), MINTED_PLAINTEXT);
+    assert.doesNotMatch(text.stdout + text.stderr, /PLAINTEXT/, "plaintext must never be printed");
+    assert.match(text.stdout, /Minted key …zz99 \(gh:o\/r:DITTO_KEY\) on alpha: expires 1y/);
+    assert.match(text.stdout, /secret DITTO_KEY on o\/r \(repository secret\)/);
+    assert.match(text.stdout, /\$\{\{ secrets\.DITTO_KEY \}\}/);
+    assert.match(text.stdout, /ANTHROPIC_BASE_URL: https:\/\/api\.example\.test\n/);
+    assert.match(text.stdout, /OPENAI_BASE_URL: https:\/\/api\.example\.test\/v1/);
+    assert.ok(!stub.calls.some((c) => c.method === "DELETE"), "a successful run must not revoke");
+
+    // --repo omitted → resolved like gh does; --budget adds a monthly cap; --env scopes the secret.
+    const json = await runAsync(
+      ["endpoints", "keys", "create", "alpha", "--gh-secret", "CI_DITTO", "--env", "production", "--budget", "5,000,000", "--expires", "6mo", "--yes", "--output", "json"],
+      env,
+    );
+    assert.equal(json.status, 0, json.stderr);
+    assert.deepEqual(gh.repoArgv(), ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"]);
+    assert.deepEqual(keyPosts(stub)[1].body, { name: "gh:cwd-owner/cwd-repo:CI_DITTO", expiresIn: "6mo", spendLimitTokens: 5000000, spendPeriod: "monthly" });
+    assert.deepEqual(gh.secretArgv(), ["secret", "set", "CI_DITTO", "--repo", "cwd-owner/cwd-repo", "--env", "production"]);
+    assert.equal(gh.secretStdin(), MINTED_PLAINTEXT);
+    assert.doesNotMatch(json.stdout + json.stderr, /PLAINTEXT/);
+    const out = JSON.parse(json.stdout);
+    assert.equal(out.key.keyHint, "zz99");
+    assert.equal(out.key.id, "key-2");
+    assert.equal(out.key.key, undefined, "json output must not carry the key");
+    assert.ok(!JSON.stringify(out).includes(MINTED_PLAINTEXT));
+    assert.equal(out.key.expiresIn, "6mo");
+    assert.equal(out.key.spendLimitTokens, 5000000);
+    assert.equal(out.key.spendPeriod, "monthly");
+    assert.deepEqual(out.secret, { name: "CI_DITTO", kind: "env", repo: "cwd-owner/cwd-repo", env: "production", snippet: "${{ secrets.CI_DITTO }}" });
+    assert.equal(out.endpoint.slug, "alpha");
+    assert.equal(out.gateway.openaiBaseUrl, "https://api.example.test/v1");
+    assert.equal(out.gateway.anthropicBaseUrl, "https://api.example.test");
+
+    // --org secrets and the org fallback key name.
+    const org = await runAsync(["endpoints", "keys", "create", "beta", "--gh-secret", "ORG_KEY", "--org", "acme", "--yes", "--output", "json"], env);
+    assert.equal(org.status, 0, org.stderr);
+    assert.equal(keyPosts(stub)[2].body.name, "gh-secret:ORG_KEY");
+    assert.deepEqual(gh.secretArgv(), ["secret", "set", "ORG_KEY", "--org", "acme"]);
+    assert.equal(gh.repoArgv().length, 6, "org secrets must not resolve a repo");
+
+    const conflict = await runAsync(["endpoints", "keys", "create", "beta", "--gh-secret", "X", "--org", "acme", "--repo", "o/r", "--yes"], env);
+    assert.equal(conflict.status, 1);
+    assert.match(conflict.stderr, /--org cannot be combined with --repo/);
+    const badName = await runAsync(["endpoints", "keys", "create", "beta", "--gh-secret", "GITHUB_TOKEN", "--repo", "o/r", "--yes"], env);
+    assert.equal(badName.status, 1);
+    assert.match(badName.stderr, /reserved/);
+    assert.equal(keyPosts(stub).length, 3, "validation failures must not mint");
+  } finally {
+    stub.close();
+  }
+});
+
+test("endpoints keys create revokes the minted key when gh secret set fails", async () => {
+  const stub = await startStub();
+  const gh = fakeGh();
+  try {
+    const failed = await runAsync(
+      ["endpoints", "keys", "create", "alpha", "--gh-secret", "DITTO_KEY", "--repo", "o/r", "--yes"],
+      gh.env({ DITTO_API_BASE: stub.base, DITTO_API_KEY: "ditto_mcp_test", FAKE_GH_FAIL_SECRET: "1" }),
+    );
+    assert.equal(failed.status, 1);
+    assert.equal(keyPosts(stub).length, 1);
+    assert.equal(gh.secretStdin(), MINTED_PLAINTEXT);
+    assert.match(failed.stderr, /gh secret set DITTO_KEY failed: HTTP 403/);
+    assert.match(failed.stderr, /was revoked again/);
+    assert.ok(stub.calls.some((c) => c.method === "DELETE" && c.url === `/api/v5/inference/endpoints/${ALPHA.id}/keys/key-2`), "must revoke the minted key");
+    assert.doesNotMatch(failed.stdout + failed.stderr, /PLAINTEXT/);
+  } finally {
+    stub.close();
+  }
+});
+
+test("endpoints keys create fails before minting when gh is missing or signed out", async () => {
+  const stub = await startStub();
+  const gh = fakeGh();
+  try {
+    const emptyPath = mkdtempSync(path.join(os.tmpdir(), "heyditto-no-gh-"));
+    const missing = await runAsync(["endpoints", "keys", "create", "alpha", "--gh-secret", "DITTO_KEY", "--repo", "o/r", "--yes"], { DITTO_API_BASE: stub.base, DITTO_API_KEY: "ditto_mcp_test", PATH: emptyPath });
+    assert.equal(missing.status, 1);
+    assert.match(missing.stderr, /needs the GitHub CLI \(gh\) on PATH/);
+    assert.match(missing.stderr, /cli\.github\.com/);
+
+    const signedOut = await runAsync(["endpoints", "keys", "create", "alpha", "--gh-secret", "DITTO_KEY", "--repo", "o/r", "--yes"], gh.env({ DITTO_API_BASE: stub.base, DITTO_API_KEY: "ditto_mcp_test", FAKE_GH_NO_AUTH: "1" }));
+    assert.equal(signedOut.status, 1);
+    assert.match(signedOut.stderr, /gh is not signed in/);
+    assert.match(signedOut.stderr, /gh auth login/);
+
+    assert.equal(keyPosts(stub).length, 0, "preflight failures must not mint");
+    assert.ok(!stub.calls.some((c) => c.url.startsWith("/api/v5")), "preflight runs before any API call");
   } finally {
     stub.close();
   }
