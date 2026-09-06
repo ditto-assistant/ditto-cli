@@ -60,7 +60,8 @@ export interface NegotiateResponse {
 
 export interface CommitResponse {
   capsule: Capsule;
-  generation: number;
+  /** The committed generation record (the number is `.generation`). */
+  generation: GenerationSummary;
   mirrors: MirrorStatus[];
 }
 

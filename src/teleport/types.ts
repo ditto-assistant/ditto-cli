@@ -3,16 +3,23 @@
  * of repos) plus the coding-harness session that was working in it. Every
  * push appends an immutable generation; only content-addressed chunks
  * (≤ 24 MiB) ever reach object storage, and the manifest is itself a chunk.
+ *
+ * The manifest shape mirrors the backend's Go structs in
+ * pkg/services/teleport/manifest.go field for field (json tags). A copy of
+ * those structs lives in test/fixtures/manifest.go and a contract test fails
+ * when the two drift, so change both together.
  */
 
 import os from "node:os";
 
 /** Chunk size: below the storage providers' 25 MB single-object cap. */
 export const CHUNK_BYTES = 24 * 1024 * 1024;
+/** `v` in the manifest; the backend validates it equals 1. */
 export const MANIFEST_VERSION = 1;
 
 export type RootKind = "repo" | "folder";
 export type HarnessKind = "claude-code" | "codex" | "none";
+/** Tar compression used for worktree and harness captures; detected from the bytes on restore. */
 export type Compression = "zstd" | "gzip";
 
 export interface ChunkRef {
@@ -22,8 +29,9 @@ export interface ChunkRef {
 
 export interface RepoPack {
   kind: "full" | "thin";
-  basisGeneration?: number;
   chunks: ChunkRef[];
+  /** Generation whose head the thin bundle assumes present; omitted for full bundles. */
+  basisGeneration?: number;
 }
 
 export interface RepoRemote {
@@ -33,55 +41,53 @@ export interface RepoRemote {
 
 export interface RepoHead {
   sha: string;
-  /** Current branch, or null when detached. */
-  branch: string | null;
-  /** Upstream ref such as origin/main, when configured. */
-  upstream: string | null;
+  /** Current branch; omitted when detached. */
+  branch?: string;
+  /** Upstream ref such as origin/main; omitted when not configured. */
+  upstream?: string;
 }
 
-export interface RepoRefs {
-  /** Local branch name → commit sha. */
-  branches: Record<string, string>;
-  tags: Record<string, string>;
+export interface RepoWorktree {
+  chunks: ChunkRef[];
+  entries: number;
+  bytes: number;
 }
 
 export interface RepoManifest {
+  head: RepoHead;
   relPath: string;
   remotes: RepoRemote[];
-  head: RepoHead;
-  refs: RepoRefs;
-  stashes: string[];
+  /** Local branch names carried by the bundle. */
+  branches?: string[];
+  tags?: string[];
+  stashes?: string[];
   packs: RepoPack[];
-  worktree: {
-    compression: Compression;
-    chunks: ChunkRef[];
-    entries: number;
-    bytes: number;
-  } | null;
-  ignoredIncludes: string[];
+  ignoredIncludes?: string[];
+  /** Modified + untracked files; empty chunks when the tree was clean. */
+  worktree: RepoWorktree;
 }
 
 export interface HarnessState {
   kind: HarnessKind;
-  sessionId: string | null;
+  sessionId?: string;
   /** Absolute working directory the harness session was recorded under. */
-  cwd: string | null;
-  compression: Compression | null;
+  cwd?: string;
   chunks: ChunkRef[];
 }
 
 export interface Manifest {
-  version: number;
+  v: number;
   capsuleId: string;
   generation: number;
-  parentGeneration: number | null;
+  /** generation - 1; 0 for the first generation. */
+  parentGeneration: number;
   createdAt: string;
-  machine: { hostname: string; os: string; arch: string; cliVersion: string };
+  machine: Record<string, unknown>;
   root: { kind: RootKind; name: string };
   repos: RepoManifest[];
+  excludes?: string[];
   harness: HarnessState;
-  excludes: string[];
-  totals: { chunks: number; bytes: number; dedupedBytes: number };
+  totals: { chunks: number; bytes: number; dedupedBytes?: number };
 }
 
 /** Paths that never travel in a capsule: secrets, caches and build output. */

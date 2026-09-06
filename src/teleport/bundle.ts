@@ -1,11 +1,13 @@
 import { stat } from "node:fs/promises";
 import { git, gitOrThrow } from "./git.js";
-import type { RepoHead, RepoRefs, RepoRemote } from "./types.js";
+import type { RepoHead, RepoManifest, RepoRemote } from "./types.js";
 
 export interface RepoState {
   remotes: RepoRemote[];
   head: RepoHead;
-  refs: RepoRefs;
+  /** Local branch and tag names (the bundle carries their objects). */
+  branches: string[];
+  tags: string[];
   stashes: string[];
 }
 
@@ -19,23 +21,26 @@ export function readRepoState(repoDir: string): RepoState {
   const headRes = git(["rev-parse", "HEAD"], repoDir);
   const sha = headRes.ok ? headRes.stdout.trim() : "";
   const branchRes = git(["symbolic-ref", "--quiet", "--short", "HEAD"], repoDir);
-  const branch = branchRes.ok ? branchRes.stdout.trim() : null;
+  const branch = branchRes.ok ? branchRes.stdout.trim() : undefined;
   const upstreamRes = branch ? git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], repoDir) : undefined;
-  const upstream = upstreamRes?.ok ? upstreamRes.stdout.trim() : null;
-  const branches: Record<string, string> = {};
-  const tags: Record<string, string> = {};
-  const refsOut = git(["for-each-ref", "--format=%(refname) %(objectname)", "refs/heads", "refs/tags"], repoDir);
+  const upstream = upstreamRes?.ok ? upstreamRes.stdout.trim() : undefined;
+  const branches: string[] = [];
+  const tags: string[] = [];
+  const refsOut = git(["for-each-ref", "--format=%(refname)", "refs/heads", "refs/tags"], repoDir);
   if (refsOut.ok) {
     for (const line of refsOut.stdout.split("\n")) {
-      const [ref, obj] = line.trim().split(" ");
-      if (!ref || !obj) continue;
-      if (ref.startsWith("refs/heads/")) branches[ref.slice("refs/heads/".length)] = obj;
-      else if (ref.startsWith("refs/tags/")) tags[ref.slice("refs/tags/".length)] = obj;
+      const ref = line.trim();
+      if (!ref) continue;
+      if (ref.startsWith("refs/heads/")) branches.push(ref.slice("refs/heads/".length));
+      else if (ref.startsWith("refs/tags/")) tags.push(ref.slice("refs/tags/".length));
     }
   }
   const stashRes = git(["stash", "list", "--format=%H"], repoDir);
   const stashes = stashRes.ok ? stashRes.stdout.split("\n").map((s) => s.trim()).filter(Boolean) : [];
-  return { remotes, head: { sha, branch, upstream }, refs: { branches, tags }, stashes };
+  const head: RepoHead = { sha };
+  if (branch) head.branch = branch;
+  if (upstream) head.upstream = upstream;
+  return { remotes, head, branches, tags, stashes };
 }
 
 export interface BundleResult {
@@ -76,8 +81,12 @@ export function verifyBundle(file: string, repoDir: string): boolean {
   return git(["bundle", "verify", file], repoDir).ok;
 }
 
-/** Commits a thin bundle must assume present: the previous generation's branch tips. */
-export function basisFromRefs(refs: RepoRefs | undefined): string[] {
-  if (!refs) return [];
-  return [...new Set([...Object.values(refs.branches), ...Object.values(refs.tags)])];
+/**
+ * Commits a thin bundle may assume present: the previous generation's head.
+ * The manifest records branch names only, so the head sha is the one durable
+ * basis; objects on branches not reachable from it are simply re-sent.
+ */
+export function basisFromPrevious(prev: RepoManifest | undefined): string[] {
+  const sha = prev?.head?.sha;
+  return sha ? [sha] : [];
 }

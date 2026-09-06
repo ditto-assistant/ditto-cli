@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { createReadStream } from "node:fs";
+import { closeSync, createReadStream, openSync, readSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { binaryAvailable, git } from "./git.js";
@@ -76,8 +76,21 @@ export async function captureWorktree(
   return { file: outFile, compression, entries: paths.length, paths };
 }
 
-/** Extracts a worktree tar into `destDir`. */
-export function extractWorktree(file: string, destDir: string, compression: Compression): void {
+/** Reads the compression of a captured tar from its magic bytes (the manifest does not record it). */
+export function detectCompression(file: string): Compression {
+  const fd = openSync(file, "r");
+  try {
+    const head = Buffer.alloc(4);
+    const n = readSync(fd, head, 0, 4, 0);
+    if (n >= 4 && head[0] === 0x28 && head[1] === 0xb5 && head[2] === 0x2f && head[3] === 0xfd) return "zstd";
+    return "gzip";
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Extracts a worktree tar into `destDir`; compression is detected from the file when not given. */
+export function extractWorktree(file: string, destDir: string, compression: Compression = detectCompression(file)): void {
   const flag = compression === "zstd" ? "--zstd" : "--gzip";
   const res = spawnSync("tar", ["-x", flag, "-f", file, "-C", destDir], { maxBuffer: 64 * 1024 * 1024 });
   if (res.status !== 0) throw new Error(`tar extract failed: ${res.stderr?.toString().trim()}`);
