@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { packageVersion } from "../config.js";
 import * as tapi from "./api.js";
-import { basisFromRefs, createBundle, readRepoState } from "./bundle.js";
+import { basisFromPrevious, createBundle, readRepoState } from "./bundle.js";
 import { chunkFile, dedupedBytes, readChunk, sha256 } from "./chunks.js";
 import { discoverRepos } from "./discover.js";
 import { captureHarness, locateHarness } from "./harness.js";
@@ -11,9 +11,12 @@ import { captureWorktree, dirtyPaths, pickCompression } from "./worktree.js";
 import {
   type ChunkRef,
   type HarnessKind,
+  type HarnessState,
   type Manifest,
   type RepoManifest,
+  type RepoPack,
   DEFAULT_EXCLUDES,
+  MANIFEST_VERSION,
   machineInfo,
 } from "./types.js";
 
@@ -71,7 +74,7 @@ export async function pushCapsule(input: PushInput): Promise<PushOutput> {
       const repoDir = rel === "." ? discovery.root : path.join(discovery.root, rel);
       const state = readRepoState(repoDir);
       const prev = prevByRel.get(rel);
-      const basis = basisFromRefs(prev?.refs);
+      const basis = basisFromPrevious(prev);
       const bundleFile = path.join(tmp, `bundle-${safe(rel)}.bundle`);
       const bundle = await createBundle(repoDir, bundleFile, basis);
       const packChunks = bundle ? await addFileChunks(bundle.file, sources, allChunks) : [];
@@ -79,47 +82,53 @@ export async function pushCapsule(input: PushInput): Promise<PushOutput> {
       const wtFile = path.join(tmp, `worktree-${safe(rel)}.tar`);
       const capture = await captureWorktree(repoDir, dirty, wtFile, compression);
       const wtChunks = capture ? await addFileChunks(capture.file, sources, allChunks) : [];
-      repos.push({
+      const packs: RepoPack[] = [];
+      if (bundle) {
+        const pack: RepoPack = { kind: bundle.kind, chunks: packChunks };
+        if (bundle.kind === "thin" && input.parentGeneration) pack.basisGeneration = input.parentGeneration;
+        packs.push(pack);
+      }
+      const repo: RepoManifest = {
+        head: state.head,
         relPath: rel,
         remotes: state.remotes,
-        head: state.head,
-        refs: state.refs,
-        stashes: state.stashes,
-        packs: bundle ? [{ kind: bundle.kind, basisGeneration: bundle.kind === "thin" ? input.parentGeneration ?? undefined : undefined, chunks: packChunks }] : [],
-        worktree: capture ? { compression, chunks: wtChunks, entries: capture.entries, bytes: bundleBytes(wtChunks) } : null,
-        ignoredIncludes: input.ignoredIncludes,
-      });
+        packs,
+        worktree: capture
+          ? { chunks: wtChunks, entries: capture.entries, bytes: bundleBytes(wtChunks) }
+          : { chunks: [], entries: 0, bytes: 0 },
+      };
+      if (state.branches.length) repo.branches = state.branches;
+      if (state.tags.length) repo.tags = state.tags;
+      if (state.stashes.length) repo.stashes = state.stashes;
+      if (input.ignoredIncludes.length) repo.ignoredIncludes = input.ignoredIncludes;
+      repos.push(repo);
     }
 
     // Harness transcript.
-    let harnessChunks: ChunkRef[] = [];
-    let harnessCompression: Manifest["harness"]["compression"] = null;
-    let harnessSessionId = input.harness.sessionId ?? null;
-    let harnessCwd = input.harness.cwd ?? null;
+    const harness: HarnessState = { kind: input.harness.kind, chunks: [] };
+    if (input.harness.sessionId) harness.sessionId = input.harness.sessionId;
+    if (input.harness.cwd) harness.cwd = input.harness.cwd;
     if (input.harness.kind !== "none" && input.harness.sessionId && input.harness.cwd) {
       const loc = await locateHarness(input.harness.kind, input.harness.sessionId, input.harness.cwd);
       if (loc) {
         const hFile = path.join(tmp, "harness.tar");
         const cap = await captureHarness(loc, hFile, compression);
-        if (cap) {
-          harnessChunks = await addFileChunks(cap.file, sources, allChunks);
-          harnessCompression = compression;
-        }
+        if (cap) harness.chunks = await addFileChunks(cap.file, sources, allChunks);
       }
     }
 
     const bytesTotal = allChunks.reduce((n, c) => n + c.size, 0);
     const manifest: Manifest = {
-      version: 1,
+      v: MANIFEST_VERSION,
       capsuleId: input.capsuleId,
       generation,
-      parentGeneration: input.parentGeneration,
+      parentGeneration: input.parentGeneration ?? 0,
       createdAt: new Date().toISOString(),
       machine: machineInfo(packageVersion),
       root: { kind: input.rootKind, name: input.rootName },
       repos,
-      harness: { kind: input.harness.kind, sessionId: harnessSessionId, cwd: harnessCwd, compression: harnessCompression, chunks: harnessChunks },
       excludes: [...DEFAULT_EXCLUDES],
+      harness,
       totals: { chunks: allChunks.length, bytes: bytesTotal, dedupedBytes: dedupedBytes(allChunks) },
     };
 
@@ -154,9 +163,10 @@ export async function pushCapsule(input: PushInput): Promise<PushOutput> {
       committedBy: input.committedBy ?? detectCommitter(),
     });
     return {
-      generation: committed.generation ?? generation,
+      // The server's generation record is authoritative for the number.
+      generation: committed.generation?.generation ?? generation,
       bytesTotal,
-      dedupedBytes: manifest.totals.dedupedBytes,
+      dedupedBytes: manifest.totals.dedupedBytes ?? 0,
       chunkCount: distinct.size,
       uploaded,
       reused: distinct.size - uploaded,

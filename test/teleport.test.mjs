@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import http from "node:http";
@@ -14,7 +14,53 @@ import { isExcluded, globMatch, cwdSlug } from "../dist/teleport/types.js";
 import { pushCapsule } from "../dist/teleport/push.js";
 import { pullCapsule } from "../dist/teleport/pull.js";
 
+const fixtureDir = fileURLToPath(new URL("./fixtures/", import.meta.url));
+
+/**
+ * Parses the json tags out of the checked-in copy of the backend's manifest
+ * structs (test/fixtures/manifest.go). Returns struct name -> { field: omitempty }.
+ */
+function goJsonTags(source) {
+  const structs = {};
+  const re = /type (\w+) struct \{([^}]*)\}/g;
+  let m;
+  while ((m = re.exec(source))) {
+    const fields = {};
+    for (const line of m[2].split("\n")) {
+      const t = /json:"([^",]+)(,omitempty)?"/.exec(line);
+      if (t) fields[t[1]] = Boolean(t[2]);
+    }
+    structs[m[1]] = fields;
+  }
+  return structs;
+}
+
+/** Asserts `obj` only uses fields the Go struct declares and carries every non-omitempty one. */
+function assertMatchesStruct(obj, structName, tags, where) {
+  const fields = tags[structName];
+  assert.ok(fields, `fixture has no struct ${structName}`);
+  for (const key of Object.keys(obj)) {
+    assert.ok(key in fields, `${where}: field "${key}" is not in Go struct ${structName} (${Object.keys(fields).join(", ")})`);
+  }
+  for (const [key, omitempty] of Object.entries(fields)) {
+    if (!omitempty) assert.ok(key in obj, `${where}: required field "${key}" (Go ${structName}) is missing`);
+  }
+}
+
 const cliPath = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
+
+/** Runs the built CLI without blocking the event loop (the stub API lives in this process). */
+function runAsync(args, env) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [cliPath, ...args], { env, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (c) => (stdout += c));
+    child.stderr.on("data", (c) => (stderr += c));
+    child.on("error", reject);
+    child.on("close", (status) => resolve({ status, stdout, stderr }));
+  });
+}
 
 function git(args, cwd) {
   const r = spawnSync("git", args, { cwd, encoding: "utf8" });
@@ -49,6 +95,7 @@ function makeRepo() {
 function startTeleportStub() {
   const chunks = new Map(); // sha256 -> Buffer
   const capsules = new Map(); // id -> { generations: Map<gen, manifest> }
+  const buckets = new Map(); // id -> bucket
   const calls = [];
   const server = http.createServer((req, res) => {
     const bodyParts = [];
@@ -121,11 +168,18 @@ function startTeleportStub() {
           const { manifest, manifestSha256, committedBy } = jsonBody();
           if (!manifestSha256 || !chunks.has(manifestSha256)) return send(412, { error: "manifest chunk missing" });
           if (!["cli", "runner"].includes(committedBy)) return send(400, { error: "bad committedBy" });
-          const generation = cap.headGeneration + 1;
-          cap.generations.set(generation, { manifest: { ...manifest, generation }, manifestSha256, committedBy, committedAt: new Date().toISOString() });
+          // Mirror the backend's ParseManifest/Validate: `v` must be 1 and
+          // parentGeneration must be generation-1 (the old `version` key is rejected).
+          if (manifest.v !== 1 || "version" in manifest) return send(400, { error: "invalid teleport request: unsupported version" });
+          if (manifest.parentGeneration !== manifest.generation - 1) return send(400, { error: "invalid teleport request: parentGeneration" });
+          if (manifest.generation !== cap.headGeneration + 1) return send(409, { error: "stale parent" });
+          const generation = manifest.generation;
+          const committedAt = new Date().toISOString();
+          cap.generations.set(generation, { manifest, manifestSha256, committedBy, committedAt });
           cap.headGeneration = generation;
           cap.bytesTotal = manifest.totals.bytes;
-          return send(200, { capsule: view(), generation, mirrors: [{ target: "ditto-primary", providerId: "hippius", generation, status: "complete", verifiedAt: new Date().toISOString(), required: true }] });
+          const record = { generation, manifestSha256, bytes: manifest.totals.bytes, chunkCount: manifest.totals.chunks, committedAt, committedBy };
+          return send(200, { capsule: view(), generation: record, mirrors: [{ target: "ditto-primary", providerId: "hippius", generation, status: "complete", verifiedAt: committedAt, required: true }] });
         }
         if (sub === "/generations" && req.method === "GET") {
           return send(200, { generations: [...cap.generations.entries()].map(([generation, g]) => ({ generation, manifestSha256: g.manifestSha256, bytes: g.manifest.totals.bytes, chunkCount: g.manifest.totals.chunks, committedAt: g.committedAt, committedBy: g.committedBy })) });
@@ -161,6 +215,40 @@ function startTeleportStub() {
           return send(202, { jobId: "job-1", sessionId: "sess-1", agentId: "agent-1", threadId: "thread-1", endpointId: body.endpointId ?? "ep-1", harness: body.harness ?? "claude-code", harnessSessionId: "hs-1", generation: cap.headGeneration });
         }
       }
+      // Bring-your-own buckets (/api/v5/teleport/buckets).
+      if (p === "/api/v5/teleport/buckets" && req.method === "GET") {
+        return send(200, { buckets: [...buckets.values()] });
+      }
+      if (p === "/api/v5/teleport/buckets" && req.method === "POST") {
+        const body = jsonBody();
+        if (!body.accessKeyID || !body.secretAccessKey || !body.bucket || !body.endpoint) return send(400, { error: "missing fields" });
+        const id = `bkt-${buckets.size + 1}`;
+        const { secretAccessKey, accessKeyID, ...rest } = body;
+        const bucket = { id, providerKind: /hippius/.test(body.endpoint) ? "hippius" : "s3", region: body.region ?? "us-east-1", enabled: true, default: Boolean(body.default), teleportMirror: body.teleportMirror !== false, keyHint: accessKeyID.slice(-4), credentialState: "ready", ...rest };
+        buckets.set(id, bucket);
+        return send(201, bucket);
+      }
+      if (p === "/api/v5/teleport/buckets/test" && req.method === "POST") {
+        const body = jsonBody();
+        if (body.bucketId) return buckets.has(body.bucketId) ? send(200, { ok: true }) : send(404, { error: "no bucket" });
+        if (body.settings) return send(200, /fail/.test(body.settings.endpoint ?? "") ? { ok: false, error: "connection refused" } : { ok: true });
+        return send(400, { error: "bucketId or settings required" });
+      }
+      const bucketMatch = /^\/api\/v5\/teleport\/buckets\/([^/]+)$/.exec(p);
+      if (bucketMatch) {
+        const id = decodeURIComponent(bucketMatch[1]);
+        const bucket = buckets.get(id);
+        if (!bucket) return send(404, { error: "no bucket" });
+        if (req.method === "PATCH") {
+          Object.assign(bucket, jsonBody());
+          return send(200, bucket);
+        }
+        if (req.method === "DELETE") {
+          buckets.delete(id);
+          res.statusCode = 204;
+          return res.end();
+        }
+      }
       if (p === "/api/v5/teleport/targets" && req.method === "GET") {
         return send(200, { targets: [{ target: "ditto-primary", providerId: "hippius", label: "Ditto (Hippius)", required: true, available: true }, { target: "ditto-secondary", providerId: "backblaze", label: "Ditto (Backblaze)", required: true, available: true }], quotaGb: 250, capsuleLimit: -1 });
       }
@@ -171,7 +259,7 @@ function startTeleportStub() {
   return new Promise((resolve) => {
     server.listen(0, "127.0.0.1", () => {
       base = `http://127.0.0.1:${server.address().port}`;
-      resolve({ base, chunks, capsules, calls, close: () => { server.closeAllConnections(); server.close(); } });
+      resolve({ base, chunks, capsules, buckets, calls, close: () => { server.closeAllConnections(); server.close(); } });
     });
   });
 }
@@ -223,6 +311,29 @@ test("push then pull reproduces HEAD, branch, dirty edit, and untracked file", a
     assert.equal(push.generation, 1);
     assert.ok(push.uploaded > 0, "some chunks uploaded");
 
+    // Contract: the committed manifest matches the backend's Go structs field for field.
+    const committed = stub.capsules.get("cap-1").generations.get(1).manifest;
+    const tags = goJsonTags(readFileSync(path.join(fixtureDir, "manifest.go"), "utf8"));
+    assertMatchesStruct(committed, "Manifest", tags, "manifest");
+    assert.equal(committed.v, 1, "manifest version travels as `v`");
+    assert.equal(committed.parentGeneration, 0, "first generation has parentGeneration 0");
+    assertMatchesStruct(committed.root, "Root", tags, "root");
+    assertMatchesStruct(committed.harness, "Harness", tags, "harness");
+    assertMatchesStruct(committed.totals, "Totals", tags, "totals");
+    for (const repo of committed.repos) {
+      assertMatchesStruct(repo, "Repo", tags, "repo");
+      assertMatchesStruct(repo.head, "Head", tags, "repo.head");
+      assertMatchesStruct(repo.worktree, "Worktree", tags, "repo.worktree");
+      for (const remote of repo.remotes) assertMatchesStruct(remote, "Remote", tags, "repo.remotes");
+      for (const pack of repo.packs) {
+        assertMatchesStruct(pack, "Pack", tags, "repo.packs");
+        for (const c of pack.chunks) assertMatchesStruct(c, "Chunk", tags, "chunk");
+      }
+      for (const c of repo.worktree.chunks) assertMatchesStruct(c, "Chunk", tags, "chunk");
+    }
+    assert.equal(committed.repos[0].head.branch, "main");
+    assert.ok(committed.repos[0].branches.includes("main"), "branches are names");
+
     const headSrc = git(["rev-parse", "HEAD"], src).trim();
     const dest = tmp("teleport-dest-");
     const restored = await pullCapsule("cap-1", undefined, dest, { restoreHarness: false });
@@ -254,4 +365,51 @@ test("teleport --help and push --dry-run work without auth", () => {
   const plan = JSON.parse(dry.stdout);
   assert.equal(plan.rootKind, "repo");
   assert.deepEqual(plan.repos, ["."]);
+});
+
+test("teleport pull and --cloud refuse a capsule with no generations", async () => {
+  const stub = await startTeleportStub();
+  const cfg = tmp("teleport-gen0-");
+  stub.capsules.set("cap-0", { id: "cap-0", name: "empty", rootKind: "repo", headGeneration: 0, generations: new Map() });
+  const env = { ...process.env, DITTO_API_BASE: stub.base, DITTO_API_KEY: "ditto_mcp_test", DITTO_CONFIG_DIR: cfg };
+  try {
+    const pull = await runAsync(["teleport", "pull", "empty", tmp("teleport-gen0-dest-")], env);
+    assert.equal(pull.status, 1);
+    assert.match(pull.stderr, /has no generations yet/);
+    assert.ok(!stub.calls.some((c) => c.path.endsWith("/resolve")), "pull must not hit resolve on an empty capsule");
+  } finally {
+    stub.close();
+  }
+});
+
+test("storage add/list/test/remove round trip by name against the buckets API", async () => {
+  const stub = await startTeleportStub();
+  const cfg = tmp("teleport-storage-");
+  const env = { ...process.env, DITTO_API_BASE: stub.base, DITTO_API_KEY: "ditto_mcp_test", DITTO_CONFIG_DIR: cfg };
+  const run = (...args) => runAsync(args, env);
+  try {
+    const add = await run("storage", "add", "--name", "qa", "--endpoint", "https://s3.example.test", "--bucket", "qa-bucket", "--access-key", "AKIAQA", "--secret-key", "shh", "--json");
+    assert.equal(add.status, 0, add.stderr);
+    const saved = JSON.parse(add.stdout);
+    assert.equal(saved.name, "qa");
+    assert.equal(saved.providerKind, "s3");
+    assert.equal(saved.teleportMirror, true);
+    assert.ok(!("secretAccessKey" in saved), "secret never echoed back");
+    const list = await run("storage", "list", "--json");
+    assert.equal(list.status, 0, list.stderr);
+    assert.equal(JSON.parse(list.stdout).buckets.length, 1);
+    const testByName = await run("storage", "test", "qa");
+    assert.equal(testByName.status, 0, testByName.stderr);
+    assert.match(testByName.stdout, /connection ok/);
+    const remove = await run("storage", "remove", "qa");
+    assert.equal(remove.status, 0, remove.stderr);
+    assert.equal(JSON.parse((await run("storage", "list", "--json")).stdout).buckets.length, 0);
+    const missing = await run("storage", "test", "nope");
+    assert.equal(missing.status, 1);
+    assert.match(missing.stderr, /no bucket named "nope"/);
+    // Only v5 teleport routes were used; the v2 storage routes need Firebase auth.
+    assert.ok(stub.calls.every((c) => !c.path.startsWith("/api/v2/")), "no v2 storage calls");
+  } finally {
+    stub.close();
+  }
 });

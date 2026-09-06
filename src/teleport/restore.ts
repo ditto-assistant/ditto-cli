@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { git, gitOrThrow, isGitRepo } from "./git.js";
 import { restoreClaudeTranscript } from "./harness.js";
-import { extractWorktree } from "./worktree.js";
+import { detectCompression, extractWorktree } from "./worktree.js";
 import type { Manifest, RepoManifest } from "./types.js";
 
 export interface RestoreResult {
@@ -42,17 +42,12 @@ export async function restoreCapsule(
       const originalCwd = manifest.harness.cwd ?? destRoot;
       const targetCwd =
         manifest.root.kind === "repo" ? path.resolve(destRoot, manifest.repos[0]?.relPath ?? ".") : destRoot;
+      const compression = detectCompression(tar);
       if (manifest.harness.kind === "claude-code" && manifest.harness.sessionId) {
-        await restoreClaudeTranscript(
-          tar,
-          manifest.harness.compression ?? "gzip",
-          manifest.harness.sessionId,
-          originalCwd,
-          targetCwd,
-        );
+        await restoreClaudeTranscript(tar, compression, manifest.harness.sessionId, originalCwd, targetCwd);
       } else {
         // Codex keys transcripts on absolute cwd inside a shared home; extract as-is.
-        extractWorktree(tar, os.homedir(), manifest.harness.compression ?? "gzip");
+        extractWorktree(tar, os.homedir(), compression);
       }
       harnessCwd = targetCwd;
     }
@@ -88,7 +83,7 @@ async function restoreRepo(
     gitOrThrow(["clone", scratch, repoDest], tmp);
     // Local tracking branches for every branch the capsule carried, so a later
     // checkout of any of them works offline.
-    for (const branch of Object.keys(repo.refs.branches)) {
+    for (const branch of repo.branches ?? []) {
       if (git(["rev-parse", "--verify", `refs/heads/${branch}`], repoDest).ok) continue;
       git(["branch", "--no-track", branch, `refs/remotes/origin/${branch}`], repoDest);
     }
@@ -105,17 +100,17 @@ async function restoreRepo(
     }
   }
   // Check out the recorded HEAD/branch.
-  if (repo.head.branch && repo.refs.branches[repo.head.branch]) {
+  if (repo.head.branch && (repo.branches ?? []).includes(repo.head.branch)) {
     git(["checkout", "-f", repo.head.branch], repoDest);
     if (repo.head.upstream) git(["branch", `--set-upstream-to=${repo.head.upstream}`, repo.head.branch], repoDest);
   } else if (repo.head.sha) {
     git(["checkout", "-f", repo.head.sha], repoDest);
   }
   // Dirty worktree over the checkout.
-  if (repo.worktree && repo.worktree.chunks.length > 0) {
+  if (repo.worktree?.chunks?.length) {
     const tar = path.join(tmp, `worktree-${sanitize(repo.relPath)}.tar`);
     await concatChunks(repo.worktree.chunks.map((c) => c.sha256), chunkPath, tar);
-    extractWorktree(tar, repoDest, repo.worktree.compression);
+    extractWorktree(tar, repoDest);
   }
 }
 
