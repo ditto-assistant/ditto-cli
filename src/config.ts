@@ -17,6 +17,20 @@ export function mcpServerURL(): string {
   return `${apiBaseURL()}/mcp`;
 }
 
+/**
+ * Inference gateway host (API-key traffic from Claude Code / Codex). Production
+ * serves it from the DNS-only https://inference.heyditto.ai so long-running
+ * completions bypass Cloudflare's proxy read timeout; control-plane calls
+ * (login, /api/v5, /mcp) stay on apiBaseURL(). DITTO_INFERENCE_BASE overrides;
+ * otherwise a custom DITTO_API_BASE (local/staging) reuses that same host.
+ */
+export function inferenceBaseURL(): string {
+  const explicit = process.env.DITTO_INFERENCE_BASE;
+  if (explicit) return explicit.replace(/\/+$/, "");
+  if (process.env.DITTO_API_BASE) return apiBaseURL();
+  return "https://inference.heyditto.ai";
+}
+
 export function configDir(): string {
   if (process.env.DITTO_CONFIG_DIR) return process.env.DITTO_CONFIG_DIR;
   const base = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config");

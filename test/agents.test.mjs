@@ -226,6 +226,7 @@ test("helpers: separator, api root, worktree names", async () => {
   assert.deepEqual(stripSeparator(["--", "--a", "--", "b"]), ["--a", "--", "b"]);
   assert.deepEqual(stripSeparator(["x"]), ["x"]);
   assert.equal(apiRootOf("https://api.heyditto.ai/v1/"), "https://api.heyditto.ai");
+  assert.equal(apiRootOf("https://inference.heyditto.ai/v1/"), "https://inference.heyditto.ai");
   assert.equal(apiRootOf("http://localhost:3400"), "http://localhost:3400");
   assert.equal(defaultWorktreeName("claude", new Date(2026, 8, 4, 15, 7)), "claude-20260904-1507");
   assert.ok(validWorktreeName("feature/x-1"));

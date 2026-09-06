@@ -9,6 +9,7 @@ import {
   agentSignupURL,
   apiBaseURL,
   authFilePath,
+  inferenceBaseURL,
   mcpServerURL,
   newKeyURL,
   packageName,
@@ -680,6 +681,8 @@ interface StatusReport {
   package: string;
   version: string;
   endpoint: string;
+  /** Inference gateway host the launchers fall back to when the server names none. */
+  inferenceBase: string;
   apiKey: { present: boolean; source: ApiKeySource };
   agent?: {
     enabled: boolean;
@@ -705,6 +708,7 @@ async function cmdStatus(options: CommonOptions): Promise<void> {
     package: packageName,
     version: packageVersion,
     endpoint: mcpServerURL(),
+    inferenceBase: inferenceBaseURL(),
     apiKey: { present: !!key, source },
   };
   if (session) report.session = { id: session.id, name: session.name, source: session.source };
@@ -752,6 +756,7 @@ async function cmdStatus(options: CommonOptions): Promise<void> {
   const lines = [
     `${report.package} ${report.version}`,
     `endpoint:  ${report.endpoint}`,
+    `gateway:   ${report.inferenceBase}  (inference; heyditto claude / codex)`,
     `api key:   ${report.apiKey.present ? "set" : "MISSING"}  (source: ${report.apiKey.source})`,
   ];
   if (!report.apiKey.present) {
@@ -783,7 +788,7 @@ function cmdConfig(options: CommonOptions): void {
         headers: { Authorization: "Bearer ${DITTO_API_KEY}" },
       },
     },
-    notes: { apiBase: apiBaseURL(), newKey: newKeyURL() },
+    notes: { apiBase: apiBaseURL(), inferenceBase: inferenceBaseURL(), newKey: newKeyURL() },
   };
   process.stdout.write(`${JSON.stringify(config, null, 2)}\n`);
 }
@@ -862,6 +867,8 @@ Notes:
 Environment:
   DITTO_API_KEY     Optional override, taking precedence over the saved key.
   DITTO_API_BASE    Optional API base URL. Defaults to https://api.heyditto.ai.
+  DITTO_INFERENCE_BASE  Optional inference gateway URL used when the server names none.
+                    Defaults to https://inference.heyditto.ai (or DITTO_API_BASE when set).
   DITTO_APP_BASE    Optional web app URL for browser pages. Defaults to https://app.heyditto.ai.
   DITTO_DEVELOPER_BASE  Optional developer console URL (endpoints). Defaults to https://developer.heyditto.ai.
   DITTO_SESSION_ID  Optional explicit MCP session id sent as X-Ditto-Session-Id (see 'session').

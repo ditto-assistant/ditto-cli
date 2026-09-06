@@ -379,6 +379,10 @@ and Codex's own options keep working.
 
 How the wiring works:
 
+- Inference traffic goes to the gateway host the server reports (production:
+  `https://inference.heyditto.ai/v1`, a DNS-only host that bypasses Cloudflare's
+  proxy timeout on long completions), while login, `endpoints` and MCP stay on
+  `https://api.heyditto.ai`.
 - **Claude Code** gets `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` (a bearer
   token, which skips Claude's "use this API key?" prompt) and
   `ANTHROPIC_CUSTOM_HEADERS` with the session id. Any inherited
@@ -494,6 +498,7 @@ the live connections (API keys, OAuth grants, endpoints) writing into each.
 
 - `DITTO_API_KEY` (optional) — MCP API key override. Agents can instead run `heyditto init --json` for no-human setup.
 - `DITTO_API_BASE` (optional) — API base URL. Defaults to `https://api.heyditto.ai`. Useful for local dev (`http://localhost:3400`).
+- `DITTO_INFERENCE_BASE` (optional) — inference gateway URL used when the server does not report one. Defaults to `https://inference.heyditto.ai`, or to `DITTO_API_BASE` when that is set (local/staging backends proxy inference themselves).
 - `DITTO_SESSION_ID` (optional) — pin an explicit MCP session id for this shell (see `session`).
 - `DITTO_CONFIG_DIR` (optional) — config directory for the saved key, default endpoint and session records. Defaults to `$XDG_CONFIG_HOME/heyditto/cli` or `~/.config/heyditto/cli`.
 
