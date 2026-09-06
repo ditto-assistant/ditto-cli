@@ -22,6 +22,8 @@ import {
 
 const PUT_CONCURRENCY = 4;
 const NEGOTIATE_BATCH = 200;
+/** Thin packs chained past this length are compacted into a fresh full bundle. */
+const MAX_PACK_CHAIN = 8;
 
 export interface PushInput {
   root: string;
@@ -57,12 +59,20 @@ interface ChunkSource {
  * Builds a generation, negotiates which chunks are missing, uploads them via
  * presigned PUTs, then commits the manifest. The manifest is content-addressed
  * too, so a re-push with no changes uploads nothing.
+ *
+ * Every generation's manifest carries each repo's complete pack chain (the
+ * basis packs by reference plus this generation's thin pack), so a pull of any
+ * generation rebuilds full history from that one manifest. When the server no
+ * longer holds a referenced basis chunk, the affected repos are re-bundled in
+ * full and the push retried once.
  */
-export async function pushCapsule(input: PushInput): Promise<PushOutput> {
+export async function pushCapsule(input: PushInput, forceFull: Set<string> = new Set()): Promise<PushOutput> {
   const tmp = await mkdtemp(path.join(os.tmpdir(), "teleport-push-"));
   const compression = pickCompression();
   const generation = (input.parentGeneration ?? 0) + 1;
   const sources = new Map<string, ChunkSource>();
+  /** Chunks referenced from a previous generation (no local bytes) → their repo. */
+  const carried = new Map<string, string>();
   const allChunks: ChunkRef[] = [];
   try {
     const discovery = await discoverRepos(input.root);
@@ -74,15 +84,31 @@ export async function pushCapsule(input: PushInput): Promise<PushOutput> {
       const repoDir = rel === "." ? discovery.root : path.join(discovery.root, rel);
       const state = readRepoState(repoDir);
       const prev = prevByRel.get(rel);
-      const basis = basisFromPrevious(prev);
+      // Thin against the previous generation unless forced, unless there is no
+      // usable basis, or unless the chain is long enough that a restore would
+      // crawl; those cases compact into a fresh full bundle.
+      const useBasis = !forceFull.has(rel) && !!prev && prev.packs.length > 0 && prev.packs.length < MAX_PACK_CHAIN;
+      const basis = useBasis ? basisFromPrevious(prev) : [];
       const bundleFile = path.join(tmp, `bundle-${safe(rel)}.bundle`);
       const bundle = await createBundle(repoDir, bundleFile, basis);
+      const packs: RepoPack[] = [];
+      if (useBasis && (bundle === null || bundle.kind === "thin")) {
+        // Carry the basis chain by reference: the server already holds these
+        // chunks and dedups them, and a pull needs them to rebuild history.
+        for (const pack of prev!.packs) {
+          packs.push(pack);
+          for (const c of pack.chunks) {
+            allChunks.push(c);
+            if (!sources.has(c.sha256)) carried.set(c.sha256, rel);
+          }
+        }
+      }
       const packChunks = bundle ? await addFileChunks(bundle.file, sources, allChunks) : [];
+      for (const c of packChunks) carried.delete(c.sha256);
       const dirty = dirtyPaths(repoDir, input.ignoredIncludes);
       const wtFile = path.join(tmp, `worktree-${safe(rel)}.tar`);
       const capture = await captureWorktree(repoDir, dirty, wtFile, compression);
       const wtChunks = capture ? await addFileChunks(capture.file, sources, allChunks) : [];
-      const packs: RepoPack[] = [];
       if (bundle) {
         const pack: RepoPack = { kind: bundle.kind, chunks: packChunks };
         if (bundle.kind === "thin" && input.parentGeneration) pack.basisGeneration = input.parentGeneration;
@@ -153,6 +179,17 @@ export async function pushCapsule(input: PushInput): Promise<PushOutput> {
         input.capsuleId,
         batch.map((c) => ({ sha256: c.sha256, size: c.size })),
       );
+      // A basis chunk the server no longer has cannot be re-sent by reference:
+      // rebuild those repos with a full bundle and push again (once).
+      const lost = neg.missing.filter((m) => !sources.has(m.sha256) && carried.has(m.sha256));
+      if (lost.length > 0) {
+        const repos = new Set(lost.map((m) => carried.get(m.sha256)!));
+        if ([...repos].every((r) => forceFull.has(r))) {
+          throw new Error(`server is missing basis chunks for ${[...repos].join(", ")} even after a full re-bundle`);
+        }
+        await rm(tmp, { recursive: true, force: true });
+        return pushCapsule(input, new Set([...forceFull, ...repos]));
+      }
       await uploadMissing(neg.missing, sources);
       uploaded += neg.missing.length;
     }

@@ -16,13 +16,59 @@ export async function pullCapsule(
   destRoot: string,
   opts: { restoreHarness?: boolean } = {},
 ): Promise<RestoreResult> {
-  const { manifest, chunks } = await tapi.resolveGeneration(capsuleId, generation);
+  const resolved = await tapi.resolveGeneration(capsuleId, generation);
+  const { manifest } = resolved;
+  const chunks = [...resolved.chunks];
+  await completePackChains(capsuleId, manifest, chunks);
   const chunkDir = await mkdtemp(path.join(os.tmpdir(), "teleport-chunks-"));
   try {
     await downloadChunks(chunks, chunkDir);
     return await restoreCapsule(manifest, (sha) => path.join(chunkDir, sha), destRoot, opts);
   } finally {
     await rm(chunkDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Fallback for manifests whose repos carry only thin packs (older pushes did
+ * not reference their basis packs): walk `basisGeneration` back through the
+ * capsule's generations until a full pack is found, prepending each basis
+ * generation's packs and chunk URLs so the restore has complete history.
+ */
+async function completePackChains(
+  capsuleId: string,
+  manifest: import("./types.js").Manifest,
+  chunks: { sha256: string; size: number; getUrl: string }[],
+): Promise<void> {
+  const known = new Set(chunks.map((c) => c.sha256));
+  const resolvedGenerations = new Map<number, tapi.ResolveResponse>();
+  for (const repo of manifest.repos) {
+    let guard = 0;
+    while (!repo.packs.some((p) => p.kind === "full") && repo.packs.length > 0 && guard++ < 64) {
+      const oldest = repo.packs.reduce((a, b) => ((a.basisGeneration ?? 0) <= (b.basisGeneration ?? 0) ? a : b));
+      const basisGen = oldest.basisGeneration;
+      if (!basisGen) break; // thin pack with no recorded basis: nothing more to fetch
+      let basis = resolvedGenerations.get(basisGen);
+      if (!basis) {
+        basis = await tapi.resolveGeneration(capsuleId, basisGen);
+        resolvedGenerations.set(basisGen, basis);
+      }
+      const basisRepo = basis.manifest.repos.find((r) => r.relPath === repo.relPath);
+      if (!basisRepo || basisRepo.packs.length === 0) break;
+      const have = new Set(repo.packs.map((p) => p.chunks.map((c) => c.sha256).join(",")));
+      for (const pack of basisRepo.packs) {
+        if (have.has(pack.chunks.map((c) => c.sha256).join(","))) continue;
+        repo.packs.unshift(pack);
+        for (const c of pack.chunks) {
+          if (known.has(c.sha256)) continue;
+          const url = basis.chunks.find((x) => x.sha256 === c.sha256);
+          if (url) {
+            chunks.push(url);
+            known.add(c.sha256);
+          }
+        }
+      }
+    }
   }
 }
 
