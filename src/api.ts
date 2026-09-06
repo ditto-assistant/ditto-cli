@@ -1,5 +1,5 @@
 import os from "node:os";
-import { packageName, packageVersion, resolveApiKey } from "./config.js";
+import { apiBaseURL, inferenceBaseURL, packageName, packageVersion, resolveApiKey } from "./config.js";
 
 /** Minimal authenticated REST client for the Ditto management API. */
 
@@ -15,7 +15,7 @@ export class ApiError extends Error {
 }
 
 export function apiBase(): string {
-  return (process.env.DITTO_API_BASE || "https://api.heyditto.ai").replace(/\/+$/, "");
+  return apiBaseURL();
 }
 
 function userAgent(): string {
@@ -143,7 +143,8 @@ export interface InferenceEndpointsResponse {
 export async function listEndpoints(): Promise<InferenceEndpointsResponse> {
   const res = await apiFetch<InferenceEndpointsResponse>("/api/v5/inference/endpoints");
   return {
-    baseUrl: (res.baseUrl || `${apiBase()}/v1`).replace(/\/+$/, ""),
+    // The server names the gateway host; fall back to the inference host, not the control plane.
+    baseUrl: (res.baseUrl || `${inferenceBaseURL()}/v1`).replace(/\/+$/, ""),
     endpoints: res.endpoints ?? [],
     limit: res.limit,
     used: res.used,

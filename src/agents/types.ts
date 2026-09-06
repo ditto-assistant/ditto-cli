@@ -27,7 +27,11 @@ export const CODEX_KEY_ENV = "DITTO_INFERENCE_API_KEY";
 
 /** Everything a harness planner needs to build argv + env. */
 export interface PlanInput {
-  /** Inference gateway base URL ending in /v1, e.g. https://api.heyditto.ai/v1 */
+  /**
+   * Inference gateway base URL ending in /v1, e.g. https://inference.heyditto.ai/v1
+   * (a DNS-only host separate from the api.heyditto.ai control plane so long
+   * completions are not cut off by Cloudflare's proxy timeout).
+   */
   baseUrl: string;
   /** Plaintext endpoint key (already minted) or a placeholder for --dry-run. */
   apiKey: string;
