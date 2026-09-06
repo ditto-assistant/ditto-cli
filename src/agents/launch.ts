@@ -160,7 +160,7 @@ export async function pickEndpoint(endpoints: InferenceEndpoint[], defaultSlug?:
     process.stderr.write(
       `  ${c("cyan", `${i + 1})`)} ${c("bold", e.slug)}  ${e.name !== e.slug ? c("dim", `(${e.name})  `) : ""}${c("dim", "model=")}${e.model}${marks.length ? `  [${marks.join(", ")}]` : ""}\n`,
     );
-    process.stderr.write(c("dim", `     ${formatSpend(e)}${e.recordTrace ? "  · traces on" : "  · traces off"}\n`));
+    process.stderr.write(`${c("dim", `     ${formatSpend(e)}${e.recordTrace ? "  · traces on" : "  · traces off"}`)}\n`);
   });
   process.stderr.write("\n");
   const rl = createInterface({ input: process.stdin, output: process.stderr });
@@ -472,6 +472,11 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   } finally {
     restore();
     process.stderr.write("\n");
+    if (key.expiresAt && Date.parse(key.expiresAt) <= Date.now()) {
+      // The gateway answers an expired key with a 401 the harness shows, not us;
+      // name the cause here so the fix (--expires) is discoverable.
+      log(`${c("yellow", "the session key expired")} at ${key.expiresAt} while the agent was still running; relaunch with a longer --expires (this one was ${expiresIn})`);
+    }
     if (options.keepKey) {
       log(`kept key …${key.keyHint} ${c("dim", `(expires ${expiresIn})`)}; revoke it from the Ditto app when done`);
     } else {
@@ -482,7 +487,9 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
         log(`${c("yellow", "could not revoke")} key …${key.keyHint} (${err instanceof Error ? err.message : String(err)}); it expires in ${expiresIn}`);
       }
     }
-    logResumeHint(harness, sessionId);
+    // Headless runs (-p / codex exec) are scripted, and a launch whose spawn
+    // failed has no conversation to reopen; neither wants the resume epilogue.
+    if (options.prompt === undefined && exitCode !== null) logResumeHint(harness, sessionId);
     await writeSession({ ...nextRecord, endedAt: new Date().toISOString(), exitCode });
   }
   process.exitCode = exitCode ?? 1;

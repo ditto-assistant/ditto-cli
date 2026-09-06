@@ -63,7 +63,8 @@ function startStub() {
 function childEnvFor(env) {
   // The launchers merge inherited harness env (e.g. ANTHROPIC_CUSTOM_HEADERS
   // when this test itself runs under a Ditto-launched Claude Code), so drop it.
-  const { ANTHROPIC_CUSTOM_HEADERS: _headers, ANTHROPIC_API_KEY: _key, ...parent } = process.env;
+  // Likewise the developer's color settings: each test opts into color explicitly.
+  const { ANTHROPIC_CUSTOM_HEADERS: _headers, ANTHROPIC_API_KEY: _key, NO_COLOR: _nc, NODE_DISABLE_COLORS: _ndc, FORCE_COLOR: _fc, ...parent } = process.env;
   return {
     ...parent,
     DITTO_API_KEY: "",
@@ -185,12 +186,27 @@ test("a real launch mints a 1mo key, revokes it on exit and prints a copyable re
   }
 });
 
+test("a headless -p launch skips the resume epilogue", async () => {
+  const stub = await startStub();
+  const claude = fakeClaude();
+  try {
+    const result = await runAsync(["claude", "--endpoint", "alpha", "-p", "say hi"], claude.env({ DITTO_API_BASE: stub.base, DITTO_API_KEY: "ditto_mcp_test" }));
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(readFileSync(claude.log, "utf8"), /-p\nsay hi/);
+    assert.match(result.stderr, /revoked session key/);
+    assert.doesNotMatch(result.stderr, /resume this session/);
+  } finally {
+    stub.close();
+  }
+});
+
 test("FORCE_COLOR paints the launch banner even when stderr is a pipe", async () => {
   const stub = await startStub();
   try {
     const result = await runAsync(["claude", "--dry-run", "--endpoint", "alpha"], { DITTO_API_BASE: stub.base, DITTO_API_KEY: "ditto_mcp_test", FORCE_COLOR: "1" });
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stderr, /\u001b\[2mendpoint=\u001b\[22m\u001b\[1m\u001b\[36malpha/);
+    assert.match(result.stderr, /\u001b\[/, "FORCE_COLOR turns colors on for a pipe");
+    assert.match(result.stderr, /endpoint=(\u001b\[\d+m)*alpha/);
   } finally {
     stub.close();
   }

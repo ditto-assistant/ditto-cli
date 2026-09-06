@@ -120,7 +120,7 @@ function startStub({ endpoints = [ALPHA, BETA], tokenPollsUntilOk = 2 } = {}) {
 }
 
 function childEnvFor(env) {
-  const { ANTHROPIC_CUSTOM_HEADERS: _h, ANTHROPIC_API_KEY: _k, ...parent } = process.env;
+  const { ANTHROPIC_CUSTOM_HEADERS: _h, ANTHROPIC_API_KEY: _k, NO_COLOR: _nc, NODE_DISABLE_COLORS: _ndc, FORCE_COLOR: _fc, ...parent } = process.env;
   return {
     ...parent,
     DITTO_API_KEY: "",

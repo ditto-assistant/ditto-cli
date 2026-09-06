@@ -13,6 +13,7 @@ test("colorEnabled follows TTY, NO_COLOR, FORCE_COLOR and TERM=dumb", () => {
   assert.equal(colorEnabled({ isTTY: true }, { FORCE_COLOR: "0" }), false);
   assert.equal(colorEnabled({ isTTY: true }, { NO_COLOR: "1", FORCE_COLOR: "1" }), false, "NO_COLOR wins");
   assert.equal(colorEnabled({ isTTY: true }, { TERM: "dumb" }), false);
+  assert.equal(colorEnabled({ isTTY: true }, { NODE_DISABLE_COLORS: "1" }), false);
 });
 
 test("painter wraps in SGR codes only when enabled", () => {

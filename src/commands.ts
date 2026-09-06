@@ -679,7 +679,7 @@ export function registerHarnessCommands(program: Command, addExamples: (c: Comma
       .option("-e, --endpoint <slug>", "inference endpoint slug or id (default: saved default, or a picker)")
       .option("--budget <tokens>", "spend cap for this session's key, in Ditto tokens")
       .addOption(
-        new Option("--expires <duration>", "server-side safety expiry for the key (it is still revoked on exit)")
+        new Option("--expires <duration>", "server-side safety expiry for the key (revoked on exit anyway unless --keep-key)")
           .choices([...KEY_EXPIRIES])
           .default(DEFAULT_LAUNCH_EXPIRY),
       )

@@ -7,6 +7,7 @@
 
 export interface ColorEnv {
   NO_COLOR?: string;
+  NODE_DISABLE_COLORS?: string;
   FORCE_COLOR?: string;
   TERM?: string;
 }
@@ -14,6 +15,7 @@ export interface ColorEnv {
 /** Decides whether `stream` should receive ANSI colors under `env`. */
 export function colorEnabled(stream: { isTTY?: boolean } | undefined, env: ColorEnv = process.env): boolean {
   if (env.NO_COLOR !== undefined && env.NO_COLOR !== "") return false;
+  if (env.NODE_DISABLE_COLORS !== undefined && env.NODE_DISABLE_COLORS !== "") return false;
   if (env.FORCE_COLOR !== undefined) return env.FORCE_COLOR !== "0" && env.FORCE_COLOR !== "false";
   if (env.TERM === "dumb") return false;
   return Boolean(stream?.isTTY);
