@@ -2,12 +2,13 @@ import { createInterface } from "node:readline/promises";
 import { Command, Option } from "commander";
 import { launchHarness, pickEndpoint } from "./agents/launch.js";
 import { listSessions, removeSession } from "./agents/sessions.js";
-import { HARNESSES, type Harness, KEY_EXPIRIES } from "./agents/types.js";
+import { HARNESSES, type Harness, KEY_EXPIRIES, type KeyExpiry, apiRootOf } from "./agents/types.js";
 import {
   type ChatAgent,
   type EndpointInput,
   type InferenceEndpoint,
   createEndpoint,
+  createKey,
   deleteEndpoint,
   findEndpoint,
   getEndpoint,
@@ -21,6 +22,15 @@ import {
 import { openInBrowser } from "./browser.js";
 import { endpointURL } from "./config.js";
 import { activationLink, formatActivation } from "./endpoint-format.js";
+import {
+  type SecretTarget,
+  describeTarget,
+  preflightGh,
+  resolveRepoFromCwd,
+  setGitHubSecret,
+  validateRepo,
+  validateSecretName,
+} from "./gh-secret.js";
 import {
   SESSION_ENV,
   SESSION_ID_HEADER,
@@ -58,14 +68,23 @@ function isJSON(options: { output?: string }): boolean {
  * terminal and without `--yes` the command refuses.
  */
 async function confirmElevated(action: string, slug: string, yes: boolean | undefined): Promise<void> {
-  if (yes) return;
+  await confirmTyped({ action: `${action} "${slug}"`, expected: slug, label: "the endpoint slug", yes });
+}
+
+/**
+ * Generic typed confirmation: the operator must type `expected` back (or pass
+ * `--yes`). Refuses without a terminal so scripts cannot stumble into it.
+ */
+async function confirmTyped(input: { action: string; expected: string; label: string; yes: boolean | undefined; preview?: string }): Promise<void> {
+  if (input.yes) return;
   if (!process.stdin.isTTY || !process.stderr.isTTY) {
-    throw new Error(`refusing to ${action} "${slug}" without confirmation. Re-run with --yes to confirm.`);
+    throw new Error(`refusing to ${input.action} without confirmation. Re-run with --yes to confirm.`);
   }
+  if (input.preview) process.stderr.write(`${input.preview}\n`);
   const rl = createInterface({ input: process.stdin, output: process.stderr });
   try {
-    const typed = (await rl.question(`Type the endpoint slug (${slug}) to ${action}: `)).trim();
-    if (typed !== slug) throw new Error(`aborted: "${typed}" did not match "${slug}"`);
+    const typed = (await rl.question(`Type ${input.label} (${input.expected}) to ${input.action}: `)).trim();
+    if (typed !== input.expected) throw new Error(`aborted: "${typed}" did not match "${input.expected}"`);
   } finally {
     rl.close();
   }
@@ -354,6 +373,133 @@ export async function cmdEndpointKeysRevoke(ref: string, keyId: string, options:
   process.stdout.write(`Revoked key ${keyId} on ${endpoint.slug}.\n`);
 }
 
+interface KeysCreateOptions {
+  output?: string;
+  ghSecret?: string;
+  repo?: string;
+  env?: string;
+  org?: string;
+  name?: string;
+  expires?: string;
+  budget?: string;
+  spendPeriod?: string;
+  yes?: boolean;
+}
+
+function parseKeyBudget(raw: string | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  const n = Number(raw.replace(/[_,]/g, ""));
+  if (!Number.isInteger(n) || n <= 0) throw new Error(`--budget must be a positive integer token count, got "${raw}"`);
+  return n;
+}
+
+function parseKeyExpiry(raw: string | undefined): KeyExpiry {
+  const value = (raw ?? "1y").trim();
+  if ((KEY_EXPIRIES as readonly string[]).includes(value)) return value as KeyExpiry;
+  throw new Error(`--expires must be one of: ${KEY_EXPIRIES.join(", ")}`);
+}
+
+/** Resolves where the secret goes from --repo / --env / --org (repo falls back to the cwd, like gh). */
+function resolveSecretTarget(options: KeysCreateOptions): SecretTarget {
+  const org = options.org?.trim();
+  const env = options.env?.trim();
+  if (org) {
+    if (options.repo || env) throw new Error("--org cannot be combined with --repo or --env (organization secrets are not scoped to one repository)");
+    if (!/^[A-Za-z0-9_.-]+$/.test(org)) throw new Error(`--org must be an organization login, got "${options.org}"`);
+    return { kind: "org", org };
+  }
+  const repo = options.repo ? validateRepo(options.repo) : resolveRepoFromCwd();
+  if (env) return { kind: "env", repo, env };
+  return { kind: "repo", repo };
+}
+
+/**
+ * Mints a key on an endpoint and hands the plaintext straight to `gh secret
+ * set` over stdin. The key is never printed, logged or stored locally; on a
+ * failed `gh` call it is revoked again so nothing usable is left behind.
+ */
+export async function cmdEndpointKeysCreate(ref: string, options: KeysCreateOptions): Promise<void> {
+  if (!options.ghSecret) throw new Error("--gh-secret <NAME> is required: this command only mints keys straight into a GitHub Actions secret");
+  const secretName = validateSecretName(options.ghSecret);
+  const budget = parseKeyBudget(options.budget);
+  const expiresIn = parseKeyExpiry(options.expires);
+  if (options.spendPeriod !== undefined && budget === undefined) throw new Error("--spend-period only applies together with --budget");
+  const spendPeriod = budget !== undefined ? (options.spendPeriod ?? "monthly") : undefined;
+
+  // Everything that can fail cheaply happens before any write: gh present and
+  // signed in, target repo known, endpoint exists, operator confirmed.
+  preflightGh();
+  const target = resolveSecretTarget(options);
+  const { endpoint, catalog } = await getEndpoint(ref);
+  const keyName =
+    options.name?.trim() || (target.kind === "org" ? `gh-secret:${secretName}` : `gh:${target.repo}:${secretName}`);
+  const plan = `Will mint key "${keyName}" on ${endpoint.slug} (expires ${expiresIn}${budget !== undefined ? `, budget ${budget.toLocaleString()} tokens ${spendPeriod}` : ""}) and set secret ${secretName} on ${describeTarget(target)}.`;
+  await confirmTyped({ action: `mint a key on ${endpoint.slug} and set secret ${secretName}`, expected: secretName, label: "the secret name", yes: options.yes, preview: plan });
+
+  const minted = await createKey(endpoint.id, {
+    name: keyName,
+    expiresIn,
+    ...(budget !== undefined ? { spendLimitTokens: budget, spendPeriod } : {}),
+  });
+  // Split the plaintext off immediately; only `plaintext` may reach gh's stdin.
+  const { key: plaintext, ...key } = minted;
+  try {
+    setGitHubSecret(secretName, target, plaintext ?? "");
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    try {
+      await revokeKey(endpoint.id, key.id);
+    } catch (revokeErr) {
+      const detail = revokeErr instanceof Error ? revokeErr.message : String(revokeErr);
+      throw new Error(
+        `${reason}\nMinted key ${key.id} (…${key.keyHint}) on ${endpoint.slug} could NOT be revoked (${detail}). Revoke it now: heyditto endpoints keys revoke ${endpoint.slug} ${key.id} --yes, or at ${endpointURL(endpoint.id)}`,
+      );
+    }
+    throw new Error(`${reason}\nThe key minted for it (…${key.keyHint}) was revoked again; nothing was stored.`);
+  }
+
+  const anthropicBaseUrl = apiRootOf(catalog.baseUrl);
+  const openaiBaseUrl = catalog.baseUrl;
+  const snippet = `\${{ secrets.${secretName} }}`;
+  if (isJSON(options)) {
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          endpoint: { id: endpoint.id, slug: endpoint.slug },
+          key: {
+            id: key.id,
+            name: key.name ?? keyName,
+            keyHint: key.keyHint,
+            expiresIn,
+            expiresAt: key.expiresAt ?? null,
+            spendLimitTokens: key.spendLimitTokens ?? budget ?? null,
+            spendPeriod: key.spendPeriod ?? spendPeriod ?? null,
+          },
+          secret: { name: secretName, ...target, snippet },
+          gateway: { baseUrl: catalog.baseUrl, anthropicBaseUrl, openaiBaseUrl },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    return;
+  }
+  process.stdout.write(
+    [
+      `Minted key …${key.keyHint} (${key.name ?? keyName}) on ${endpoint.slug}: expires ${expiresIn}${budget !== undefined ? `, budget ${budget.toLocaleString()} tokens ${spendPeriod}` : ", no spend cap"}.`,
+      `Stored it as GitHub Actions secret ${secretName} on ${describeTarget(target)}. The key was not printed and is not kept locally.`,
+      "",
+      "Use it in a workflow step:",
+      "  env:",
+      `    ANTHROPIC_AUTH_TOKEN: ${snippet}`,
+      `    ANTHROPIC_BASE_URL: ${anthropicBaseUrl}`,
+      `  # OpenAI-compatible clients: OPENAI_API_KEY: ${snippet} with OPENAI_BASE_URL: ${openaiBaseUrl}`,
+      "",
+      `Revoke later with: heyditto endpoints keys revoke ${endpoint.slug} ${key.id}`,
+    ].join("\n") + "\n",
+  );
+}
+
 /** Registers the `endpoints` group; bare `heyditto endpoints [flags]` still lists. */
 export function registerEndpointCommands(
   program: Command,
@@ -369,7 +515,9 @@ export function registerEndpointCommands(
       "after",
       `
 Endpoint controls spend your Ditto credits, so delete, key revocation and
-spend-limit increases ask you to type the slug back (or pass --yes).`,
+spend-limit increases ask you to type the slug back (or pass --yes).
+'keys create --gh-secret' mints a key straight into a GitHub Actions secret
+through the gh CLI; the plaintext never reaches your terminal.`,
     );
   addExamples(
     endpoints
@@ -452,6 +600,27 @@ spend-limit increases ask you to type the slug back (or pass --yes).`,
     .argument("<endpoint>", "endpoint slug or id")
     .addOption(outputOption())
     .action(cmdEndpointKeys);
+  addExamples(
+    keys
+      .command("create")
+      .description("mint a key and store it straight into a GitHub Actions secret via gh (the key is never printed)")
+      .argument("<endpoint>", "endpoint slug or id")
+      .requiredOption("--gh-secret <NAME>", "Actions secret name to set with the gh CLI")
+      .option("--repo <owner/repo>", "repository for the secret (default: the repo of the current directory, as gh resolves it)")
+      .option("--env <environment>", "set a deployment-environment secret on the repo instead of a repository secret")
+      .option("--org <org>", "set an organization secret instead (cannot be combined with --repo/--env)")
+      .option("--name <label>", "key name shown in the Ditto app (default: gh:<owner>/<repo>:<NAME>)")
+      .addOption(new Option("--expires <duration>", "server-side key expiry").choices([...KEY_EXPIRIES]).default("1y"))
+      .option("--budget <tokens>", "spend cap for the key, in Ditto tokens")
+      .addOption(new Option("--spend-period <period>", "window the key's spend cap resets on (with --budget; default monthly)").choices(["daily", "weekly", "monthly", "yearly", "never"]))
+      .option("--yes", "skip the confirmation prompt (required without a terminal)")
+      .addOption(outputOption())
+      .action(cmdEndpointKeysCreate),
+    `  heyditto endpoints keys create my-endpoint --gh-secret DITTO_KEY                  # repo of the current directory
+  heyditto endpoints keys create my-endpoint --gh-secret DITTO_KEY --repo acme/app --budget 5000000
+  heyditto endpoints keys create my-endpoint --gh-secret DITTO_KEY --repo acme/app --env production --yes
+  heyditto endpoints keys create my-endpoint --gh-secret DITTO_KEY --org acme --expires 6mo --output json`,
+  );
   keys
     .command("revoke")
     .description("revoke one key")

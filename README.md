@@ -405,12 +405,49 @@ heyditto endpoints set <endpoint> --model … --system-prompt … --spend-limit 
                                    --record on|off --memory-depth <n>
 heyditto endpoints delete <endpoint> [--yes]
 heyditto endpoints keys <endpoint>         list keys
+heyditto endpoints keys create <endpoint> --gh-secret <NAME> [--repo owner/repo] [--env <env>] [--org <org>]
+                                   [--name <label>] [--expires <1h…never>] [--budget <tokens>]
+                                   [--spend-period <p>] [--yes]
 heyditto endpoints keys revoke <endpoint> <keyId> [--yes]
 ```
 
 Endpoints spend your Ditto credits, so deleting one, revoking a key or raising a
 spend limit asks you to type the slug back; pass `--yes` in scripts. `--output
 json` is available everywhere and includes the gateway base URL.
+
+#### Put a key in GitHub Actions
+
+`keys create --gh-secret` mints a long-lived key on an endpoint and stores it as
+a GitHub Actions secret through the [`gh` CLI](https://cli.github.com) — **the
+key is never shown**. The plaintext goes to `gh secret set` over stdin, so it
+does not appear in argv, `ps`, shell history, logs or the CLI's own output, and
+the CLI does not keep a copy. If `gh` fails to store it, the freshly minted key
+is revoked again.
+
+```bash
+cd my-repo
+heyditto endpoints keys create my-endpoint --gh-secret DITTO_KEY               # repo from the current directory (like gh)
+heyditto endpoints keys create my-endpoint --gh-secret DITTO_KEY --repo acme/app --budget 5000000
+heyditto endpoints keys create my-endpoint --gh-secret DITTO_KEY --repo acme/app --env production --yes
+heyditto endpoints keys create my-endpoint --gh-secret DITTO_KEY --org acme --expires 6mo --output json
+```
+
+Requirements: `gh` on `PATH` and signed in (`gh auth status`) — both are checked
+before anything is minted. Without a terminal the command needs `--yes`;
+interactively it shows what it will do and asks you to type the secret name.
+Defaults: key name `gh:<owner>/<repo>:<NAME>`, expiry `1y`; `--budget` caps the
+key's spend (`--spend-period` defaults to `monthly`). The output shows the key's
+last four characters, expiry, budget, where the secret was set, and a workflow
+snippet:
+
+```yaml
+env:
+  ANTHROPIC_AUTH_TOKEN: ${{ secrets.DITTO_KEY }}
+  ANTHROPIC_BASE_URL: https://api.heyditto.ai
+  # OpenAI-compatible clients: OPENAI_API_KEY: ${{ secrets.DITTO_KEY }} with OPENAI_BASE_URL: https://api.heyditto.ai/v1
+```
+
+Revoke it any time with `heyditto endpoints keys revoke my-endpoint <keyId>`.
 
 **Agent accounts.** An agent set up with `heyditto init` can create and manage
 endpoints too, but an endpoint created by an unclaimed agent starts **inactive**:
