@@ -2,7 +2,7 @@ import { createInterface } from "node:readline/promises";
 import path from "node:path";
 import { Command, Option } from "commander";
 import { configDir } from "../config.js";
-import { type InferenceEndpoint, listEndpoints } from "../api.js";
+import { type InferenceEndpoint, ApiError, listEndpoints } from "../api.js";
 import { listSessions } from "../agents/sessions.js";
 import { launchHarness } from "../agents/launch.js";
 import * as tapi from "../teleport/api.js";
@@ -257,14 +257,27 @@ export async function cmdTeleport(pathArg: string | undefined, options: Teleport
   const harnessKind = harnessKindOf(match?.harness ?? options.harness);
   const endpoint = await resolveEndpoint(options.endpoint);
   if (endpoint) err(`Using inference endpoint ${endpoint.slug} (${endpoint.name}).`);
-  const session = await tapi.launchCloudSession(name, {
-    prompt: options.prompt?.trim() || "Resume the teleported session and continue where it left off.",
-    harness: harnessKind === "codex" ? "codex" : "claude-code",
-    endpointId: endpoint?.id,
-  });
+  let session: tapi.CloudSessionResponse;
+  try {
+    session = await tapi.launchCloudSession(name, {
+      prompt: options.prompt?.trim() || "Resume the teleported session and continue where it left off.",
+      harness: harnessKind === "codex" ? "codex" : "claude-code",
+      endpointId: endpoint?.id,
+    });
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404) {
+      throw new Error("inference endpoint not found; run `heyditto endpoints` and pass --endpoint <slug>.");
+    }
+    if (e instanceof ApiError && e.status === 503) {
+      throw new Error("cloud runner unavailable; try again shortly (the capsule is pushed, re-run `heyditto teleport --cloud`).");
+    }
+    throw e;
+  }
   if (json(options)) return out(JSON.stringify(session, null, 2));
   out(`Cloud session started: job ${session.jobId} (${session.harness}, generation ${session.generation}).`);
-  out(`Open it: ${tapi.appThreadUrl(session.threadId)}`);
+  // Newer backends return the absolute thread URL for their linked app base;
+  // older ones only return ids, so compose the production link as a fallback.
+  out(`Open it: ${session.threadUrl || tapi.appThreadUrl(session.threadId)}`);
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
