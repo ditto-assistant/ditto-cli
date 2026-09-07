@@ -436,7 +436,12 @@ heyditto teleport targets               # mirror targets, quota and capsule limi
 Every teleport command accepts `--json` (or `--output json`). `pull --json`
 prints `{cwd, harnessSessionId, harnessKind, …}`, which is what the Ditto Code
 runner reads when it restores a capsule before starting the harness. Capsules
-can be referred to by name or id everywhere.
+can be referred to by name or id everywhere. `--endpoint` for `--cloud` takes an
+endpoint id, slug or name; with a single endpoint it is chosen automatically.
+
+Under the hood a push negotiates which content-addressed chunks the server
+lacks, uploads only those via presigned URLs, then `commit`s the manifest (the
+server answers `201 Created` with the new generation and its mirror state).
 
 `push` bundles each repo (thin against the previous generation when possible),
 tars the dirty and untracked files, and captures the harness transcript for the

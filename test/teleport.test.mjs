@@ -94,6 +94,11 @@ function makeRepo() {
  */
 function startTeleportStub() {
   const chunks = new Map(); // sha256 -> Buffer
+  const defaultEndpoints = [
+    { id: "11111111-1111-4111-8111-111111111111", slug: "endpoint-1", name: "Endpoint 1", model: "openai/gpt-5.6-luna" },
+    { id: "22222222-2222-4222-8222-222222222222", slug: "work", name: "Work Endpoint", model: "openai/gpt-5.6-luna" },
+  ];
+  let stubEndpoints = [...defaultEndpoints];
   const capsules = new Map(); // id -> { generations: Map<gen, manifest> }
   const buckets = new Map(); // id -> bucket
   const calls = [];
@@ -212,8 +217,15 @@ function startTeleportStub() {
         if (sub === "/cloud-session" && req.method === "POST") {
           const body = jsonBody();
           if (!body.prompt) return send(400, { error: "prompt required" });
+          // The real backend parses endpointId as a UUID; a slug is a 400.
+          if (body.endpointId && !/^[0-9a-f-]{36}$/i.test(body.endpointId)) return send(400, { error: "create an inference endpoint" });
+          calls.push({ method: "CLOUD", path: p, endpointId: body.endpointId ?? null });
           return send(202, { jobId: "job-1", sessionId: "sess-1", agentId: "agent-1", threadId: "thread-1", endpointId: body.endpointId ?? "ep-1", harness: body.harness ?? "claude-code", harnessSessionId: "hs-1", generation: cap.headGeneration });
         }
+      }
+      // Inference endpoints, for --endpoint resolution.
+      if (p === "/api/v5/inference/endpoints" && req.method === "GET") {
+        return send(200, { baseUrl: `${base}/v1`, endpoints: stubEndpoints });
       }
       // Bring-your-own buckets (/api/v5/teleport/buckets).
       if (p === "/api/v5/teleport/buckets" && req.method === "GET") {
@@ -259,7 +271,18 @@ function startTeleportStub() {
   return new Promise((resolve) => {
     server.listen(0, "127.0.0.1", () => {
       base = `http://127.0.0.1:${server.address().port}`;
-      resolve({ base, chunks, capsules, buckets, calls, close: () => { server.closeAllConnections(); server.close(); } });
+      resolve({
+        base,
+        chunks,
+        capsules,
+        buckets,
+        calls,
+        defaultEndpoints,
+        setEndpoints: (list) => {
+          stubEndpoints = [...list];
+        },
+        close: () => { server.closeAllConnections(); server.close(); },
+      });
     });
   });
 }
@@ -441,6 +464,74 @@ test("thin second push after a new commit restores the new HEAD", async () => {
     assert.equal(git(["rev-parse", "HEAD"], dest).trim(), newHead, "HEAD is the new commit");
     assert.equal(readFileSync(path.join(dest, "second.txt"), "utf8"), "second commit\n");
     assert.equal(git(["rev-list", "--count", "HEAD"], dest).trim(), "2", "full history present");
+  } finally {
+    stub.close();
+  }
+});
+
+test("pull restores upstream tracking from a real origin without fetching", async () => {
+  const stub = await startTeleportStub();
+  const cfg = tmp("teleport-cfg-");
+  try {
+    // A bare origin and a repo whose qa-main tracks origin/qa-main.
+    const origin = tmp("teleport-origin-");
+    git(["init", "--bare", "-q", origin], os.tmpdir());
+    const src = tmp("teleport-src-");
+    git(["init", "-q", "-b", "qa-main"], src);
+    git(["config", "user.email", "t@example.test"], src);
+    git(["config", "user.name", "Teleport Test"], src);
+    writeFileSync(path.join(src, "a.txt"), "one\n");
+    git(["add", "."], src);
+    git(["commit", "-qm", "init"], src);
+    git(["remote", "add", "origin", origin], src);
+    git(["push", "-q", "-u", "origin", "qa-main"], src);
+    assert.equal(git(["rev-parse", "--abbrev-ref", "@{u}"], src).trim(), "origin/qa-main");
+
+    let r = await cli(stub, cfg, ["teleport", "push", src, "--name", "tracked", "--json"]);
+    assert.equal(r.status, 0, r.stderr);
+    const dest = path.join(tmp("teleport-dest-"), "tracked");
+    r = await cli(stub, cfg, ["teleport", "pull", "tracked", dest, "--json"]);
+    assert.equal(r.status, 0, r.stderr);
+
+    assert.equal(git(["rev-parse", "--abbrev-ref", "@{u}"], dest).trim(), "origin/qa-main", "upstream restored");
+    assert.equal(git(["config", "branch.qa-main.remote"], dest).trim(), "origin");
+    assert.equal(git(["remote", "get-url", "origin"], dest).trim(), origin, "remote url restored");
+    assert.equal(git(["rev-parse", "HEAD"], dest).trim(), git(["rev-parse", "HEAD"], src).trim());
+  } finally {
+    stub.close();
+  }
+});
+
+test("--cloud resolves --endpoint slug/name to the endpoint id, defaults to the only endpoint", async () => {
+  const stub = await startTeleportStub();
+  const cfg = tmp("teleport-cfg-");
+  try {
+    const src = makeRepo();
+    let r = await cli(stub, cfg, ["teleport", src, "--name", "cloudy", "--cloud", "--endpoint", "endpoint-1", "--json"]);
+    assert.equal(r.status, 0, r.stderr);
+    let cloud = stub.calls.filter((c) => c.method === "CLOUD");
+    assert.equal(cloud.at(-1).endpointId, "11111111-1111-4111-8111-111111111111", "slug resolved to the uuid");
+    assert.match(r.stderr, /Using inference endpoint endpoint-1/);
+
+    // Name, case-insensitively.
+    r = await cli(stub, cfg, ["teleport", src, "--name", "cloudy", "--cloud", "--endpoint", "WORK ENDPOINT", "--json"]);
+    assert.equal(r.status, 0, r.stderr);
+    cloud = stub.calls.filter((c) => c.method === "CLOUD");
+    assert.equal(cloud.at(-1).endpointId, "22222222-2222-4222-8222-222222222222");
+
+    // Unknown → error listing the available slugs, and no cloud-session call.
+    const before = stub.calls.filter((c) => c.method === "CLOUD").length;
+    r = await cli(stub, cfg, ["teleport", src, "--name", "cloudy", "--cloud", "--endpoint", "nope", "--json"]);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /no inference endpoint matches "nope"; available: endpoint-1, work/);
+    assert.equal(stub.calls.filter((c) => c.method === "CLOUD").length, before);
+
+    // Omitted with exactly one endpoint → that endpoint.
+    stub.setEndpoints([stub.defaultEndpoints[0]]);
+    r = await cli(stub, cfg, ["teleport", src, "--name", "cloudy", "--cloud", "--json"]);
+    assert.equal(r.status, 0, r.stderr);
+    cloud = stub.calls.filter((c) => c.method === "CLOUD");
+    assert.equal(cloud.at(-1).endpointId, "11111111-1111-4111-8111-111111111111");
   } finally {
     stub.close();
   }

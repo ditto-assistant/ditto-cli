@@ -2,6 +2,7 @@ import { createInterface } from "node:readline/promises";
 import path from "node:path";
 import { Command, Option } from "commander";
 import { configDir } from "../config.js";
+import { type InferenceEndpoint, listEndpoints } from "../api.js";
 import { listSessions } from "../agents/sessions.js";
 import { launchHarness } from "../agents/launch.js";
 import * as tapi from "../teleport/api.js";
@@ -254,14 +255,42 @@ export async function cmdTeleport(pathArg: string | undefined, options: Teleport
   const name = options.name?.trim() || path.basename(root);
   requireGenerations(await tapi.getCapsule(name));
   const harnessKind = harnessKindOf(match?.harness ?? options.harness);
+  const endpoint = await resolveEndpoint(options.endpoint);
+  if (endpoint) err(`Using inference endpoint ${endpoint.slug} (${endpoint.name}).`);
   const session = await tapi.launchCloudSession(name, {
     prompt: options.prompt?.trim() || "Resume the teleported session and continue where it left off.",
     harness: harnessKind === "codex" ? "codex" : "claude-code",
-    endpointId: options.endpoint,
+    endpointId: endpoint?.id,
   });
   if (json(options)) return out(JSON.stringify(session, null, 2));
   out(`Cloud session started: job ${session.jobId} (${session.harness}, generation ${session.generation}).`);
   out(`Open it: ${tapi.appThreadUrl(session.threadId)}`);
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Turns `--endpoint <id|slug|name>` into the endpoint the backend expects by
+ * UUID. Omitted: the user's only endpoint when exactly one exists, otherwise
+ * the backend's default. Unknown values list what is available.
+ */
+export async function resolveEndpoint(option: string | undefined): Promise<InferenceEndpoint | undefined> {
+  const { endpoints } = await listEndpoints();
+  const wanted = option?.trim();
+  if (!wanted) {
+    return endpoints.length === 1 ? endpoints[0] : undefined;
+  }
+  const found =
+    endpoints.find((e) => e.id === wanted) ??
+    endpoints.find((e) => e.slug === wanted) ??
+    endpoints.find((e) => e.name.toLowerCase() === wanted.toLowerCase());
+  if (found) return found;
+  if (UUID_RE.test(wanted)) {
+    // Let the backend judge an id we cannot see (e.g. a shared endpoint).
+    return { id: wanted, slug: wanted, name: wanted, model: "" };
+  }
+  const slugs = endpoints.map((e) => e.slug).join(", ") || "none";
+  throw new Error(`no inference endpoint matches "${wanted}"; available: ${slugs}. Create one in Settings → Developer → Inference endpoints.`);
 }
 
 export async function cmdOffload(pathArg: string | undefined, options: { yes?: boolean; allowUnpushed?: boolean; name?: string }): Promise<void> {
