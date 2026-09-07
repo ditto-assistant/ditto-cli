@@ -103,12 +103,12 @@ async function restoreRepo(
       git(["remote", "add", remote.name, remote.url], repoDest);
     }
   }
-  // Check out the recorded HEAD/branch.
+  // Check out the recorded HEAD/branch and re-establish upstream tracking.
   if (repo.head.branch && (repo.branches ?? []).includes(repo.head.branch)) {
-    git(["checkout", "-f", repo.head.branch], repoDest);
-    if (repo.head.upstream) git(["branch", `--set-upstream-to=${repo.head.upstream}`, repo.head.branch], repoDest);
+    gitOrThrow(["checkout", "-f", repo.head.branch], repoDest);
+    if (repo.head.upstream) restoreUpstream(repoDest, repo, repo.head.branch, repo.head.upstream);
   } else if (repo.head.sha) {
-    git(["checkout", "-f", repo.head.sha], repoDest);
+    gitOrThrow(["checkout", "-f", repo.head.sha], repoDest);
   }
   // Dirty worktree over the checkout.
   if (repo.worktree?.chunks?.length) {
@@ -116,6 +116,27 @@ async function restoreRepo(
     await concatChunks(repo.worktree.chunks.map((c) => c.sha256), chunkPath, tar);
     extractWorktree(tar, repoDest);
   }
+}
+
+/**
+ * Recreates `<remote>/<branch>` tracking without a network fetch. The clone we
+ * restore from has no remote-tracking refs (its origin was the scratch repo),
+ * so `branch --set-upstream-to` would fail; instead the tracking ref is
+ * pointed at the branch tip the capsule recorded, then the upstream is set.
+ * The tip is the last state this machine knew of the upstream, so ahead/behind
+ * reads 0 until the next fetch. Any failure here is a hard error: silently
+ * losing tracking is exactly the bug this guards against.
+ */
+function restoreUpstream(repoDest: string, repo: RepoManifest, branch: string, upstream: string): void {
+  const remote = repo.remotes.find((r) => upstream === r.name || upstream.startsWith(`${r.name}/`));
+  if (!remote) {
+    throw new Error(`cannot restore upstream ${upstream} for ${branch}: remote is not in the capsule (${repo.remotes.map((r) => r.name).join(", ") || "none"})`);
+  }
+  const remoteBranch = upstream.slice(remote.name.length + 1);
+  if (!remoteBranch) throw new Error(`cannot restore upstream ${upstream}: no branch component`);
+  const tip = gitOrThrow(["rev-parse", "--verify", `refs/heads/${branch}`], repoDest).trim();
+  gitOrThrow(["update-ref", `refs/remotes/${remote.name}/${remoteBranch}`, tip], repoDest);
+  gitOrThrow(["branch", `--set-upstream-to=${upstream}`, branch], repoDest);
 }
 
 async function concatChunks(
