@@ -162,6 +162,8 @@ interface PullOptions extends OutputOptions {
   into?: string;
   restoreHarness?: boolean;
   resume?: boolean;
+  /** With --resume: print the launch plan instead of starting the harness. */
+  dryRun?: boolean;
 }
 
 export async function cmdTeleportPull(nameArg: string | undefined, pathArg: string | undefined, options: PullOptions): Promise<void> {
@@ -186,8 +188,11 @@ export async function cmdTeleportPull(nameArg: string | undefined, pathArg: stri
   }
   if (options.resume && result.harnessSessionId && harnessKind !== "none") {
     const harness = harnessKind === "claude-code" ? "claude" : "codex";
-    err(`Resuming ${harness}…`);
-    await launchHarness(harness as "claude" | "codex", [], { resume: result.harnessSessionId });
+    // Resume inside the restored tree, never the source cwd (which may still
+    // exist on this machine): the transcript was placed under this slug.
+    const resumeCwd = result.harnessCwd ?? result.root;
+    err(`Resuming ${harness} in ${resumeCwd}…`);
+    await launchHarness(harness as "claude" | "codex", [], { resume: result.harnessSessionId, cwd: resumeCwd, dryRun: options.dryRun });
   }
 }
 
@@ -496,6 +501,7 @@ export function registerTeleportCommands(program: Command, addExamples: (c: Comm
       .option("--into <dir>", "destination directory")
       .option("--restore-harness", "also restore the coding-harness session state")
       .option("--resume", "resume the harness after restoring")
+      .option("--dry-run", "with --resume: print the launch plan instead of starting the harness")
       .action((name, pathArg, options) => cmdTeleportPull(name, pathArg, options)),
   );
 

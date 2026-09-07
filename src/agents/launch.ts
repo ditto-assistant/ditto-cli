@@ -2,6 +2,7 @@ import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { stat } from "node:fs/promises";
 import os from "node:os";
+import path from "node:path";
 import { createInterface } from "node:readline/promises";
 import {
   ApiError,
@@ -53,6 +54,12 @@ export interface LaunchOptions {
   worktree?: string | boolean;
   name?: string;
   dryRun?: boolean;
+  /**
+   * Run the harness in this directory instead of the saved session's cwd.
+   * Teleport passes the restored root here so `--resume` appends to the
+   * restored transcript even when the original directory still exists.
+   */
+  cwd?: string;
 }
 
 const DRY_RUN_KEY = "ditto_inf_<minted-at-launch>";
@@ -356,7 +363,16 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
 
   let cwd = process.cwd();
   let worktreePath: string | undefined;
-  if (record) ({ cwd, worktree: worktreePath } = await resolveResumeCwd(record));
+  if (options.cwd) {
+    // An explicit directory wins over the saved session's; rebind the record
+    // so later plain `--resume` runs follow the session to its new home.
+    cwd = path.resolve(options.cwd);
+    if (!(await isDirectory(cwd))) throw new Error(`cwd ${cwd} does not exist`);
+    if (record) {
+      record.cwd = cwd;
+      delete record.worktree;
+    }
+  } else if (record) ({ cwd, worktree: worktreePath } = await resolveResumeCwd(record));
   if (options.worktree !== undefined && options.worktree !== false) {
     const name = typeof options.worktree === "string" ? options.worktree : defaultWorktreeName(harness);
     if (options.dryRun) {

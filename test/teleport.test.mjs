@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import zlib from "node:zlib";
 
 import { discoverRepos } from "../dist/teleport/discover.js";
 import { dirtyPaths } from "../dist/teleport/worktree.js";
@@ -14,6 +15,8 @@ import { isExcluded, globMatch, cwdSlug } from "../dist/teleport/types.js";
 import { pushCapsule } from "../dist/teleport/push.js";
 import { pullCapsule } from "../dist/teleport/pull.js";
 import { unpushedRepos } from "../dist/teleport/offload.js";
+import { extractWorktree } from "../dist/teleport/worktree.js";
+import { writeSession } from "../dist/agents/sessions.js";
 
 const fixtureDir = fileURLToPath(new URL("./fixtures/", import.meta.url));
 
@@ -738,6 +741,87 @@ test("teleport --cloud --json emits one document with push and cloudSession", as
     stub.close();
   }
 });
+
+test("same-machine restore + --resume runs the harness in the restored cwd, not the source", async () => {
+  const stub = await startTeleportStub();
+  const cfg = tmp("teleport-cfg-");
+  const home = tmp("teleport-home-");
+  try {
+    const src = makeRepo();
+    // A Claude transcript for this session under the SOURCE cwd slug, plus the
+    // CLI's own session record pointing at the source directory.
+    const sid = "11111111-2222-4333-8444-555555555555";
+    const projDir = path.join(home, ".claude", "projects", cwdSlug(src));
+    mkdirSync(projDir, { recursive: true });
+    writeFileSync(path.join(projDir, `${sid}.jsonl`), `{"type":"user","cwd":"${src}"}\n`);
+    process.env.DITTO_CONFIG_DIR = cfg;
+    await writeSession({
+      id: sid,
+      harness: "claude",
+      endpointId: "11111111-1111-4111-8111-111111111111",
+      endpointSlug: "endpoint-1",
+      harnessSessionId: sid,
+      cwd: src,
+      createdAt: new Date().toISOString(),
+      lastLaunchedAt: new Date().toISOString(),
+    });
+    delete process.env.DITTO_CONFIG_DIR;
+
+    const env = { HOME: home };
+    let r = await cliEnv(stub, cfg, env, ["teleport", "push", src, "--name", "resumecwd", "--harness", "claude", "--session", sid]);
+    assert.equal(r.status, 0, r.stderr);
+    const dest = path.join(tmp("teleport-dest-"), "resumecwd");
+    r = await cliEnv(stub, cfg, env, ["teleport", "pull", "resumecwd", dest, "--restore-harness", "--resume", "--dry-run", "--json"]);
+    assert.equal(r.status, 0, r.stderr);
+    // Two documents: the pull result (one line), then the pretty-printed launch
+    // plan. The plan starts at the last line-leading "{"; its cwd must be the restored tree.
+    const out = r.stdout.trimEnd();
+    const planStart = out.lastIndexOf("\n{");
+    const plan = JSON.parse(planStart >= 0 ? out.slice(planStart + 1) : out);
+    assert.equal(plan.cwd, dest, `plan cwd should be the restored root, got ${plan.cwd} (source is ${src})`);
+    assert.ok(plan.args.includes("--resume") && plan.args.includes(sid), "resumes the restored session");
+    // The restored transcript exists under the destination slug.
+    assert.ok(readFileSync(path.join(home, ".claude", "projects", cwdSlug(dest), `${sid}.jsonl`), "utf8").length > 0);
+  } finally {
+    stub.close();
+  }
+});
+
+test("zstd worktree without the zstd binary: Node fallback or a clear message", () => {
+  const dir = tmp("teleport-zstd-");
+  writeFileSync(path.join(dir, "hello.txt"), "hi\n");
+  const tarFile = path.join(dir, "wt.tar");
+  const r = spawnSync("tar", ["-c", "-f", tarFile, "-C", dir, "hello.txt"], { encoding: "utf8" });
+  assert.equal(r.status, 0, r.stderr);
+  const zstdBuf = zlib.zstdCompressSync ? zlib.zstdCompressSync(readFileSync(tarFile)) : null;
+  if (!zstdBuf) return; // this Node cannot make a zstd fixture; the CLI path is covered by the message test below
+  const zst = path.join(dir, "wt.tar.zst");
+  writeFileSync(zst, zstdBuf);
+  // Fallback: no binary, Node inflates it.
+  const out1 = tmp("teleport-zstd-out-");
+  extractWorktree(zst, out1, "zstd", { zstdAvailable: false, allowNodeFallback: true });
+  assert.equal(readFileSync(path.join(out1, "hello.txt"), "utf8"), "hi\n");
+  // No binary and no fallback: a message that names the binary.
+  const out2 = tmp("teleport-zstd-out-");
+  assert.throws(
+    () => extractWorktree(zst, out2, "zstd", { zstdAvailable: false, allowNodeFallback: false }),
+    /'zstd' binary is not installed.*brew install zstd/s,
+  );
+});
+
+/** Like cli() but with extra environment (e.g. HOME) for the child. */
+function cliEnv(stub, cfg, extraEnv, args) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [cliPath, ...args], {
+      env: { ...process.env, DITTO_API_BASE: stub.base, DITTO_API_KEY: "ditto_mcp_test", DITTO_CONFIG_DIR: cfg, ...extraEnv },
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (c) => (stdout += c));
+    child.stderr.on("data", (c) => (stderr += c));
+    child.on("close", (status) => resolve({ status, stdout, stderr }));
+  });
+}
 
 test("teleport pull and --cloud refuse a capsule with no generations", async () => {
   const stub = await startTeleportStub();
