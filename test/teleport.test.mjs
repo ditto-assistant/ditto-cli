@@ -13,6 +13,7 @@ import { dirtyPaths } from "../dist/teleport/worktree.js";
 import { isExcluded, globMatch, cwdSlug } from "../dist/teleport/types.js";
 import { pushCapsule } from "../dist/teleport/push.js";
 import { pullCapsule } from "../dist/teleport/pull.js";
+import { unpushedRepos } from "../dist/teleport/offload.js";
 
 const fixtureDir = fileURLToPath(new URL("./fixtures/", import.meta.url));
 
@@ -601,6 +602,138 @@ test("pull restores per-branch upstreams tracking different remotes", async () =
     assert.equal(git(["rev-parse", "--abbrev-ref", "feature@{u}"], dest).trim(), "fork/topic");
     assert.equal(git(["config", "branch.feature.remote"], dest).trim(), "fork");
     assert.equal(git(["remote", "get-url", "fork"], dest).trim(), originB);
+  } finally {
+    stub.close();
+  }
+});
+
+/** A repo whose branch is `ahead` commits past a real bare origin, with `behind` commits only on origin. */
+function makeTrackedRepo({ ahead = 0, behind = 0 } = {}) {
+  const origin = tmp("teleport-origin-");
+  git(["init", "--bare", "-q", origin], os.tmpdir());
+  const src = tmp("teleport-src-");
+  git(["init", "-q", "-b", "main"], src);
+  git(["config", "user.email", "t@example.test"], src);
+  git(["config", "user.name", "Teleport Test"], src);
+  writeFileSync(path.join(src, "a.txt"), "base\n");
+  git(["add", "."], src);
+  git(["commit", "-q", "-m", "base"], src);
+  git(["remote", "add", "origin", origin], src);
+  git(["push", "-q", "-u", "origin", "main"], src);
+  for (let i = 0; i < ahead; i++) {
+    writeFileSync(path.join(src, `ahead-${i}.txt`), `ahead ${i}\n`);
+    git(["add", "."], src);
+    git(["commit", "-q", "-m", `ahead ${i}`], src);
+  }
+  if (behind > 0) {
+    // Land commits on origin from a second clone, then fetch so origin/main moves without merging.
+    const other = tmp("teleport-other-");
+    git(["clone", "-q", origin, other], os.tmpdir());
+    git(["config", "user.email", "o@example.test"], other);
+    git(["config", "user.name", "Other"], other);
+    for (let i = 0; i < behind; i++) {
+      writeFileSync(path.join(other, `behind-${i}.txt`), `behind ${i}\n`);
+      git(["add", "."], other);
+      git(["commit", "-q", "-m", `behind ${i}`], other);
+    }
+    git(["push", "-q", "origin", "main"], other);
+    git(["fetch", "-q", "origin"], src);
+  }
+  return { src, origin };
+}
+
+test("restore keeps the real upstream tip: 1 ahead stays 1 ahead and offload sees it", async () => {
+  const stub = await startTeleportStub();
+  const cfg = tmp("teleport-cfg-");
+  try {
+    const { src } = makeTrackedRepo({ ahead: 1 });
+    assert.equal(git(["rev-list", "--count", "@{u}..HEAD"], src).trim(), "1");
+    let r = await cli(stub, cfg, ["teleport", "push", src, "--name", "ahead"]);
+    assert.equal(r.status, 0, r.stderr);
+    const manifest = [...stub.capsules.values()].find((c) => c.name === "ahead").generations.get(1).manifest;
+    const originTip = git(["rev-parse", "refs/remotes/origin/main"], src).trim();
+    assert.deepEqual(manifest.repos[0].upstreamTips, { "origin/main": originTip }, "manifest carries the real tracking sha");
+
+    const dest = path.join(tmp("teleport-dest-"), "ahead");
+    r = await cli(stub, cfg, ["teleport", "pull", "ahead", dest]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(git(["rev-parse", "refs/remotes/origin/main"], dest).trim(), originTip, "tracking ref is the origin sha, not the local tip");
+    assert.equal(git(["rev-list", "--count", "@{u}..HEAD"], dest).trim(), "1", "still 1 ahead after restore");
+    const before = await unpushedRepos(src);
+    const after = await unpushedRepos(dest);
+    assert.equal(before.length, 1);
+    assert.equal(after.length, 1);
+    assert.equal(after[0].ahead, 1);
+  } finally {
+    stub.close();
+  }
+});
+
+test("restore keeps a diverged upstream (origin has commits the local branch lacks)", async () => {
+  const stub = await startTeleportStub();
+  const cfg = tmp("teleport-cfg-");
+  try {
+    const { src } = makeTrackedRepo({ ahead: 1, behind: 1 });
+    assert.equal(git(["rev-list", "--left-right", "--count", "@{u}...HEAD"], src).trim(), "1\t1");
+    let r = await cli(stub, cfg, ["teleport", "push", src, "--name", "diverged"]);
+    assert.equal(r.status, 0, r.stderr);
+    const dest = path.join(tmp("teleport-dest-"), "diverged");
+    r = await cli(stub, cfg, ["teleport", "pull", "diverged", dest]);
+    assert.equal(r.status, 0, r.stderr);
+    const originTip = git(["rev-parse", "refs/remotes/origin/main"], src).trim();
+    assert.equal(git(["rev-parse", "refs/remotes/origin/main"], dest).trim(), originTip);
+    // The origin-only commit's objects came along in the bundle.
+    assert.ok(git(["cat-file", "-e", `${originTip}^{commit}`], dest) !== undefined);
+    assert.equal(git(["rev-list", "--left-right", "--count", "@{u}...HEAD"], dest).trim(), "1\t1", "1 behind / 1 ahead preserved");
+  } finally {
+    stub.close();
+  }
+});
+
+test("older capsules without upstreamTips restore no tracking ref and offload refuses", async () => {
+  const stub = await startTeleportStub();
+  const cfg = tmp("teleport-cfg-");
+  try {
+    const { src } = makeTrackedRepo({ ahead: 1 });
+    let r = await cli(stub, cfg, ["teleport", "push", src, "--name", "legacy"]);
+    assert.equal(r.status, 0, r.stderr);
+    // Simulate a capsule written by a CLI that predates upstreamTips.
+    const cap = [...stub.capsules.values()].find((c) => c.name === "legacy");
+    const gen = cap.generations.get(1);
+    for (const repo of gen.manifest.repos) delete repo.upstreamTips;
+    const dest = path.join(tmp("teleport-dest-"), "legacy");
+    r = await cli(stub, cfg, ["teleport", "pull", "legacy", dest]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(git(["config", "branch.main.remote"], dest).trim(), "origin", "upstream configured");
+    assert.equal(spawnSync("git", ["rev-parse", "--verify", "refs/remotes/origin/main"], { cwd: dest }).status !== 0, true, "no fabricated tracking ref");
+    const unpushed = await unpushedRepos(dest);
+    assert.equal(unpushed.length, 1);
+    assert.match(unpushed[0].reason, /tracking state unknown; fetch first or pass --allow-unpushed/);
+    r = await cli(stub, cfg, ["offload", dest, "--yes"]);
+    assert.notEqual(r.status, 0, "offload must refuse when tracking state is unknown");
+    assert.match(r.stderr, /tracking state unknown/);
+  } finally {
+    stub.close();
+  }
+});
+
+test("teleport --cloud --json emits one document with push and cloudSession", async () => {
+  const stub = await startTeleportStub();
+  const cfg = tmp("teleport-cfg-");
+  try {
+    const src = makeRepo();
+    const r = await cli(stub, cfg, ["teleport", src, "--name", "onejson", "--cloud", "--endpoint", "endpoint-1", "--json"]);
+    assert.equal(r.status, 0, r.stderr);
+    const doc = JSON.parse(r.stdout); // throws if two documents were printed
+    assert.equal(doc.push.name, "onejson");
+    assert.equal(typeof doc.push.uploadedBytes, "number");
+    assert.equal(typeof doc.push.logicalBytes, "number");
+    assert.equal(typeof doc.push.savingsRatio, "number");
+    assert.equal(doc.cloudSession.jobId, "job-1");
+    const plain = await cli(stub, cfg, ["teleport", "push", src, "--name", "onejson", "--json"]);
+    const pushDoc = JSON.parse(plain.stdout);
+    assert.equal(pushDoc.name, "onejson");
+    assert.equal(pushDoc.uploadedBytes + pushDoc.reusedBytes, pushDoc.logicalBytes);
   } finally {
     stub.close();
   }

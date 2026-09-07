@@ -525,8 +525,14 @@ endpoint id, slug or name; with a single endpoint it is chosen automatically.
 Under the hood a push negotiates which content-addressed chunks the server
 lacks, uploads only those via presigned URLs, then `commit`s the manifest (the
 server answers `201 Created` with the new generation and its mirror state).
-Every branch's upstream (`branchUpstreams`) travels in the manifest, so a pull
-recreates remotes and tracking refs without a network fetch. `--cloud` opens
+Every branch's upstream (`branchUpstreams`) and the real remote-tracking shas
+(`upstreamTips`) travel in the manifest, so a pull recreates remotes and
+tracking refs without a network fetch and `offload` sees exactly the unpushed
+commits the source machine saw. A push reports what actually moved, e.g.
+`Pushed generation 2: 1.2 KiB uploaded (2.0 MiB logical, 99.9% reused), 3 chunks
+(1 uploaded, 2 reused)`; `--json` adds `uploadedBytes`, `logicalBytes`,
+`reusedBytes` and `savingsRatio`, and `teleport --cloud --json` prints a single
+`{ push, cloudSession }` document. `--cloud` opens
 the thread URL the backend returns for its linked app (falling back to the
 production app link on older backends).
 

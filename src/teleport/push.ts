@@ -46,6 +46,14 @@ export interface PushOutput {
   chunkCount: number;
   uploaded: number;
   reused: number;
+  /** Bytes actually sent to storage this push. */
+  uploadedBytes: number;
+  /** Bytes the generation references in total (every chunk, counted once per reference). */
+  logicalBytes: number;
+  /** logicalBytes − uploadedBytes: what dedup against earlier pushes saved. */
+  reusedBytes: number;
+  /** reusedBytes / logicalBytes, 0 when nothing was referenced. */
+  savingsRatio: number;
 }
 
 /** Maps a chunk sha256 to the local file + window it came from, for upload. */
@@ -90,7 +98,12 @@ export async function pushCapsule(input: PushInput, forceFull: Set<string> = new
       const useBasis = !forceFull.has(rel) && !!prev && prev.packs.length > 0 && prev.packs.length < MAX_PACK_CHAIN;
       const basis = useBasis ? basisFromPrevious(prev) : [];
       const bundleFile = path.join(tmp, `bundle-${safe(rel)}.bundle`);
-      const bundle = await createBundle(repoDir, bundleFile, basis);
+      const bundle = await createBundle(
+        repoDir,
+        bundleFile,
+        basis,
+        Object.keys(state.upstreamTips).map((u) => `refs/remotes/${u}`),
+      );
       const packs: RepoPack[] = [];
       if (useBasis && (bundle === null || bundle.kind === "thin")) {
         // Carry the basis chain by reference: the server already holds these
@@ -133,6 +146,13 @@ export async function pushCapsule(input: PushInput, forceFull: Set<string> = new
         if (remoteNames.has(up.split("/")[0])) upstreams[b] = up;
       }
       if (Object.keys(upstreams).length) repo.branchUpstreams = upstreams;
+      // Remote-tracking tips for every upstream the manifest names.
+      const tips: Record<string, string> = {};
+      for (const up of new Set([...(state.head.upstream ? [state.head.upstream] : []), ...Object.values(upstreams)])) {
+        const tip = state.upstreamTips[up];
+        if (tip && remoteNames.has(up.split("/")[0])) tips[up] = tip;
+      }
+      if (Object.keys(tips).length) repo.upstreamTips = tips;
       if (state.stashes.length) repo.stashes = state.stashes;
       if (input.ignoredIncludes.length) repo.ignoredIncludes = input.ignoredIncludes;
       repos.push(repo);
@@ -181,6 +201,7 @@ export async function pushCapsule(input: PushInput, forceFull: Set<string> = new
     for (const c of allChunks) distinct.set(c.sha256, c);
     const wanted = [...distinct.values()];
     let uploaded = 0;
+    let uploadedBytes = 0;
     for (let i = 0; i < wanted.length; i += NEGOTIATE_BATCH) {
       const batch = wanted.slice(i, i + NEGOTIATE_BATCH);
       const neg = await tapi.negotiate(
@@ -200,6 +221,7 @@ export async function pushCapsule(input: PushInput, forceFull: Set<string> = new
       }
       await uploadMissing(neg.missing, sources);
       uploaded += neg.missing.length;
+      for (const m of neg.missing) uploadedBytes += m.size ?? distinct.get(m.sha256)?.size ?? 0;
     }
 
     const committed = await tapi.commit(input.capsuleId, {
@@ -207,6 +229,8 @@ export async function pushCapsule(input: PushInput, forceFull: Set<string> = new
       manifestSha256,
       committedBy: input.committedBy ?? detectCommitter(),
     });
+    const logicalBytes = allChunks.reduce((n, c) => n + c.size, 0);
+    const reusedBytes = Math.max(0, logicalBytes - uploadedBytes);
     return {
       // The server's generation record is authoritative for the number.
       generation: committed.generation?.generation ?? generation,
@@ -215,6 +239,10 @@ export async function pushCapsule(input: PushInput, forceFull: Set<string> = new
       chunkCount: distinct.size,
       uploaded,
       reused: distinct.size - uploaded,
+      uploadedBytes,
+      logicalBytes,
+      reusedBytes,
+      savingsRatio: logicalBytes > 0 ? reusedBytes / logicalBytes : 0,
     };
   } finally {
     await rm(tmp, { recursive: true, force: true });

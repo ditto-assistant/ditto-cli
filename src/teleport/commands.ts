@@ -92,6 +92,23 @@ interface PushOptions extends OutputOptions {
 }
 
 export async function cmdTeleportPush(pathArg: string | undefined, options: PushOptions): Promise<void> {
+  const summary = await runPush(pathArg, options);
+  if (!summary) return; // dry run already printed its plan
+  if (json(options)) {
+    out(JSON.stringify(summary, null, 2));
+    return;
+  }
+  printPushSummary(summary);
+}
+
+/** The JSON shape of a push: capsule identity plus the PushOutput fields. */
+export type PushSummary = { capsuleId: string; name: string } & Awaited<ReturnType<typeof pushCapsule>>;
+
+/**
+ * Discovers, pushes and caches the manifest. Prints the dry-run plan itself
+ * (and returns null); otherwise returns the summary for the caller to print.
+ */
+async function runPush(pathArg: string | undefined, options: PushOptions): Promise<PushSummary | null> {
   const root = path.resolve(pathArg ?? process.cwd());
   const discovery = await discoverRepos(root);
   const harnessKind = harnessKindOf(options.harness);
@@ -99,7 +116,7 @@ export async function cmdTeleportPush(pathArg: string | undefined, options: Push
 
   if (options.dryRun) {
     out(JSON.stringify({ root, rootKind: discovery.kind, repos: discovery.repos, harness, mirror: options.mirror ?? "all" }, null, 2));
-    return;
+    return null;
   }
 
   const { capsule, previous } = await resolveCapsule(root, { name: options.name, create: true, harness });
@@ -121,16 +138,17 @@ export async function cmdTeleportPush(pathArg: string | undefined, options: Push
   // Cache the committed manifest for the next thin push.
   const resolved = await tapi.resolveGeneration(capsule.id, result.generation);
   await writeCachedManifest(configDir(), capsule.id, resolved.manifest);
+  return { capsuleId: capsule.id, name: capsule.name, ...result };
+}
 
-  if (json(options)) {
-    out(JSON.stringify({ capsuleId: capsule.id, name: capsule.name, ...result }, null, 2));
-    return;
-  }
+function printPushSummary(s: PushSummary): void {
+  const pct = `${(s.savingsRatio * 100).toFixed(s.savingsRatio > 0.999 ? 2 : 1)}% reused`;
   out(
-    `Pushed generation ${result.generation}: ${formatBytes(result.bytesTotal)} in ${result.chunkCount} chunks ` +
-      `(${result.uploaded} uploaded, ${result.reused} reused).`,
+    `Pushed generation ${s.generation}: ${formatBytes(s.uploadedBytes)} uploaded ` +
+      `(${formatBytes(s.logicalBytes)} logical, ${pct}), ${s.chunkCount} chunks ` +
+      `(${s.uploaded} uploaded, ${s.reused} reused).`,
   );
-  out(`Pull elsewhere with: heyditto teleport pull ${capsule.name} <path>`);
+  out(`Pull elsewhere with: heyditto teleport pull ${s.name} <path>`);
 }
 
 function parsePolicy(raw: string): { mode: "all" | "some"; targets?: string[] } {
@@ -245,12 +263,17 @@ export async function cmdTeleport(pathArg: string | undefined, options: Teleport
   // Prefer a coding session whose worktree/cwd matches this root, so the harness travels too.
   const sessions = await listSessions();
   const match = sessions.find((s) => s.cwd === root || s.worktree === root);
-  await cmdTeleportPush(root, {
+  const push = await runPush(root, {
     ...options,
     session: match?.harnessSessionId ?? options.session,
     harness: match?.harness ?? options.harness,
   });
-  if (!options.cloud) return;
+  if (!push) return; // dry run
+  if (!options.cloud) {
+    if (json(options)) return out(JSON.stringify(push, null, 2));
+    return printPushSummary(push);
+  }
+  if (!json(options)) printPushSummary(push);
 
   const name = options.name?.trim() || path.basename(root);
   requireGenerations(await tapi.getCapsule(name));
@@ -273,7 +296,8 @@ export async function cmdTeleport(pathArg: string | undefined, options: Teleport
     }
     throw e;
   }
-  if (json(options)) return out(JSON.stringify(session, null, 2));
+  // One JSON document for scripts: the push result and the session together.
+  if (json(options)) return out(JSON.stringify({ push, cloudSession: session }, null, 2));
   out(`Cloud session started: job ${session.jobId} (${session.harness}, generation ${session.generation}).`);
   // Newer backends return the absolute thread URL for their linked app base;
   // older ones only return ids, so compose the production link as a fallback.
