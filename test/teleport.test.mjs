@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import zlib from "node:zlib";
 
 import { discoverRepos } from "../dist/teleport/discover.js";
-import { dirtyPaths } from "../dist/teleport/worktree.js";
+import { dirtyPaths, captureWorktree, pickCompression } from "../dist/teleport/worktree.js";
 import { isExcluded, globMatch, cwdSlug } from "../dist/teleport/types.js";
 import { pushCapsule } from "../dist/teleport/push.js";
 import { pullCapsule } from "../dist/teleport/pull.js";
@@ -316,8 +316,18 @@ test("isExcluded / globMatch / cwdSlug", () => {
   assert.equal(isExcluded(".env.local"), true);
   assert.equal(isExcluded("src/index.ts"), false);
   assert.equal(isExcluded("node_modules/foo/x.js"), true);
+  assert.equal(isExcluded("._README.md"), true, "AppleDouble sidecars never travel");
+  assert.equal(isExcluded("sub/._x"), true);
+  assert.equal(isExcluded(".DS_Store"), true);
+  assert.equal(isExcluded("sub/.DS_Store"), true);
   assert.equal(globMatch("*.key", "server.key"), true);
   assert.equal(globMatch("*.key", "server.ts"), false);
+  // Claude Code's rule: every non-alphanumeric character becomes "-", verified
+  // against a real transcript dir for `/private/tmp/tp slug_test.v1-é`.
+  assert.equal(cwdSlug("/private/tmp/tp slug_test.v1-é"), "-private-tmp-tp-slug-test-v1--");
+  assert.equal(cwdSlug("/opt/workspace_base/capsule"), "-opt-workspace-base-capsule");
+  assert.equal(cwdSlug("/Users/p/code/my.project"), "-Users-p-code-my-project");
+  assert.equal(cwdSlug("C:\\work\\repo"), "C--work-repo");
   assert.equal(cwdSlug("/Users/x/code:proj"), "-Users-x-code-proj");
 });
 
@@ -742,6 +752,27 @@ test("teleport --cloud --json emits one document with push and cloudSession", as
   }
 });
 
+test("worktree archive carries no AppleDouble or Finder metadata entries", async () => {
+  const dir = makeRepo();
+  writeFileSync(path.join(dir, "._README.md"), "\x00\x05\x16\x07appledouble");
+  writeFileSync(path.join(dir, ".DS_Store"), "finder");
+  mkdirSync(path.join(dir, "sub"));
+  writeFileSync(path.join(dir, "sub", "._notes.txt"), "sidecar");
+  writeFileSync(path.join(dir, "sub", "notes.txt"), "real untracked file\n");
+  const dirty = dirtyPaths(dir);
+  assert.ok(dirty.includes("sub/notes.txt"));
+  assert.ok(!dirty.some((p) => path.basename(p).startsWith("._") || path.basename(p) === ".DS_Store"), dirty.join(","));
+  const out = path.join(tmp("teleport-wt-"), "wt.tar");
+  const capture = await captureWorktree(dir, dirty, out, pickCompression());
+  assert.ok(capture, "capture produced an archive");
+  const flag = capture.compression === "zstd" ? "--zstd" : "--gzip";
+  const listing = spawnSync("tar", ["-t", flag, "-f", capture.file], { encoding: "utf8" });
+  assert.equal(listing.status, 0, listing.stderr);
+  const entries = listing.stdout.split("\n").filter(Boolean);
+  assert.ok(entries.includes("sub/notes.txt"));
+  assert.ok(!entries.some((e) => path.basename(e).startsWith("._") || e.endsWith(".DS_Store")), entries.join(","));
+});
+
 test("same-machine restore + --resume runs the harness in the restored cwd, not the source", async () => {
   const stub = await startTeleportStub();
   const cfg = tmp("teleport-cfg-");
@@ -751,7 +782,7 @@ test("same-machine restore + --resume runs the harness in the restored cwd, not 
     // A Claude transcript for this session under the SOURCE cwd slug, plus the
     // CLI's own session record pointing at the source directory.
     const sid = "11111111-2222-4333-8444-555555555555";
-    const projDir = path.join(home, ".claude", "projects", cwdSlug(src));
+    const projDir = path.join(home, ".claude", "projects", cwdSlug(realpathSync(src)));
     mkdirSync(projDir, { recursive: true });
     writeFileSync(path.join(projDir, `${sid}.jsonl`), `{"type":"user","cwd":"${src}"}\n`);
     process.env.DITTO_CONFIG_DIR = cfg;
@@ -781,7 +812,7 @@ test("same-machine restore + --resume runs the harness in the restored cwd, not 
     assert.equal(plan.cwd, dest, `plan cwd should be the restored root, got ${plan.cwd} (source is ${src})`);
     assert.ok(plan.args.includes("--resume") && plan.args.includes(sid), "resumes the restored session");
     // The restored transcript exists under the destination slug.
-    assert.ok(readFileSync(path.join(home, ".claude", "projects", cwdSlug(dest), `${sid}.jsonl`), "utf8").length > 0);
+    assert.ok(readFileSync(path.join(home, ".claude", "projects", cwdSlug(realpathSync(dest)), `${sid}.jsonl`), "utf8").length > 0);
   } finally {
     stub.close();
   }

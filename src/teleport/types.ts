@@ -98,6 +98,10 @@ export interface Manifest {
 export const DEFAULT_EXCLUDES: readonly string[] = [
   ".env",
   ".env.*",
+  // macOS metadata: AppleDouble sidecars and Finder state would otherwise land
+  // as untracked files on a Linux restore.
+  "._*",
+  ".DS_Store",
   "*.pem",
   "*.key",
   "*.p12",
@@ -121,8 +125,15 @@ export const DEFAULT_EXCLUDES: readonly string[] = [
 ];
 
 /** Claude Code keys its project dir on the absolute cwd with `/` and `:` replaced by `-`. */
+/**
+ * Claude Code's project directory name for a working directory: every character
+ * outside [A-Za-z0-9] becomes "-" (underscores, dots, spaces and non-ASCII
+ * included; runs of dashes are kept). Verified empirically against Claude Code
+ * 2.1.x: `/private/tmp/tp slug_test.v1-é` → `-private-tmp-tp-slug-test-v1--`.
+ * Callers pass the canonical (realpath) directory, which is what Claude hashes.
+ */
 export function cwdSlug(cwd: string): string {
-  return cwd.replace(/[:\\/]/g, "-");
+  return Array.from(cwd, (ch) => (/[A-Za-z0-9]/.test(ch) ? ch : "-")).join("");
 }
 
 export function machineInfo(cliVersion: string): Manifest["machine"] {
