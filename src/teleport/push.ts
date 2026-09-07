@@ -1,0 +1,314 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { packageVersion } from "../config.js";
+import * as tapi from "./api.js";
+import { basisFromPrevious, createBundle, readRepoState } from "./bundle.js";
+import { chunkFile, dedupedBytes, readChunk, sha256 } from "./chunks.js";
+import { discoverRepos } from "./discover.js";
+import { captureHarness, locateHarness } from "./harness.js";
+import { captureWorktree, dirtyPaths, pickCompression } from "./worktree.js";
+import {
+  type ChunkRef,
+  type HarnessKind,
+  type HarnessState,
+  type Manifest,
+  type RepoManifest,
+  type RepoPack,
+  DEFAULT_EXCLUDES,
+  MANIFEST_VERSION,
+  machineInfo,
+} from "./types.js";
+
+const PUT_CONCURRENCY = 4;
+const NEGOTIATE_BATCH = 200;
+/** Thin packs chained past this length are compacted into a fresh full bundle. */
+const MAX_PACK_CHAIN = 8;
+
+export interface PushInput {
+  root: string;
+  capsuleId: string;
+  parentGeneration: number | null;
+  /** Previous generation's manifest, for thin bundles. */
+  previousManifest?: Manifest;
+  harness: { kind: HarnessKind; sessionId?: string; cwd?: string };
+  ignoredIncludes: string[];
+  rootName: string;
+  rootKind: "repo" | "folder";
+  /** Who is committing: the CLI on a user's machine, or the Ditto Code runner. */
+  committedBy?: tapi.CommittedBy;
+}
+
+export interface PushOutput {
+  generation: number;
+  bytesTotal: number;
+  dedupedBytes: number;
+  chunkCount: number;
+  uploaded: number;
+  reused: number;
+  /** Bytes actually sent to storage this push. */
+  uploadedBytes: number;
+  /** Bytes the generation references in total (every chunk, counted once per reference). */
+  logicalBytes: number;
+  /** logicalBytes − uploadedBytes: what dedup against earlier pushes saved. */
+  reusedBytes: number;
+  /** reusedBytes / logicalBytes, 0 when nothing was referenced. */
+  savingsRatio: number;
+}
+
+/** Maps a chunk sha256 to the local file + window it came from, for upload. */
+interface ChunkSource {
+  file: string;
+  index: number;
+  size: number;
+}
+
+/**
+ * Builds a generation, negotiates which chunks are missing, uploads them via
+ * presigned PUTs, then commits the manifest. The manifest is content-addressed
+ * too, so a re-push with no changes uploads nothing.
+ *
+ * Every generation's manifest carries each repo's complete pack chain (the
+ * basis packs by reference plus this generation's thin pack), so a pull of any
+ * generation rebuilds full history from that one manifest. When the server no
+ * longer holds a referenced basis chunk, the affected repos are re-bundled in
+ * full and the push retried once.
+ */
+export async function pushCapsule(input: PushInput, forceFull: Set<string> = new Set()): Promise<PushOutput> {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "teleport-push-"));
+  const compression = pickCompression();
+  const generation = (input.parentGeneration ?? 0) + 1;
+  const sources = new Map<string, ChunkSource>();
+  /** Chunks referenced from a previous generation (no local bytes) → their repo. */
+  const carried = new Map<string, string>();
+  const allChunks: ChunkRef[] = [];
+  try {
+    const discovery = await discoverRepos(input.root);
+    const prevByRel = new Map<string, RepoManifest>();
+    for (const r of input.previousManifest?.repos ?? []) prevByRel.set(r.relPath, r);
+
+    const repos: RepoManifest[] = [];
+    for (const rel of discovery.repos) {
+      const repoDir = rel === "." ? discovery.root : path.join(discovery.root, rel);
+      const state = readRepoState(repoDir);
+      const prev = prevByRel.get(rel);
+      // Thin against the previous generation unless forced, unless there is no
+      // usable basis, or unless the chain is long enough that a restore would
+      // crawl; those cases compact into a fresh full bundle.
+      const useBasis = !forceFull.has(rel) && !!prev && prev.packs.length > 0 && prev.packs.length < MAX_PACK_CHAIN;
+      const basis = useBasis ? basisFromPrevious(prev) : [];
+      const bundleFile = path.join(tmp, `bundle-${safe(rel)}.bundle`);
+      const bundle = await createBundle(
+        repoDir,
+        bundleFile,
+        basis,
+        Object.keys(state.upstreamTips).map((u) => `refs/remotes/${u}`),
+      );
+      const packs: RepoPack[] = [];
+      if (useBasis && (bundle === null || bundle.kind === "thin")) {
+        // Carry the basis chain by reference: the server already holds these
+        // chunks and dedups them, and a pull needs them to rebuild history.
+        for (const pack of prev!.packs) {
+          packs.push(pack);
+          for (const c of pack.chunks) {
+            allChunks.push(c);
+            if (!sources.has(c.sha256)) carried.set(c.sha256, rel);
+          }
+        }
+      }
+      const packChunks = bundle ? await addFileChunks(bundle.file, sources, allChunks) : [];
+      for (const c of packChunks) carried.delete(c.sha256);
+      const dirty = dirtyPaths(repoDir, input.ignoredIncludes);
+      const wtFile = path.join(tmp, `worktree-${safe(rel)}.tar`);
+      const capture = await captureWorktree(repoDir, dirty, wtFile, compression);
+      const wtChunks = capture ? await addFileChunks(capture.file, sources, allChunks) : [];
+      if (bundle) {
+        const pack: RepoPack = { kind: bundle.kind, chunks: packChunks };
+        if (bundle.kind === "thin" && input.parentGeneration) pack.basisGeneration = input.parentGeneration;
+        packs.push(pack);
+      }
+      const repo: RepoManifest = {
+        head: state.head,
+        relPath: rel,
+        remotes: state.remotes,
+        packs,
+        worktree: capture
+          ? { chunks: wtChunks, entries: capture.entries, bytes: bundleBytes(wtChunks) }
+          : { chunks: [], entries: 0, bytes: 0 },
+      };
+      if (state.branches.length) repo.branches = state.branches;
+      if (state.tags.length) repo.tags = state.tags;
+      // Per-branch upstreams, restricted to remotes the manifest carries so a
+      // restore can always recreate the tracking ref.
+      const remoteNames = new Set(state.remotes.map((r) => r.name));
+      const upstreams: Record<string, string> = {};
+      for (const [b, up] of Object.entries(state.branchUpstreams)) {
+        if (remoteNames.has(up.split("/")[0])) upstreams[b] = up;
+      }
+      if (Object.keys(upstreams).length) repo.branchUpstreams = upstreams;
+      // Remote-tracking tips for every upstream the manifest names.
+      const tips: Record<string, string> = {};
+      for (const up of new Set([...(state.head.upstream ? [state.head.upstream] : []), ...Object.values(upstreams)])) {
+        const tip = state.upstreamTips[up];
+        if (tip && remoteNames.has(up.split("/")[0])) tips[up] = tip;
+      }
+      if (Object.keys(tips).length) repo.upstreamTips = tips;
+      if (state.stashes.length) repo.stashes = state.stashes;
+      if (input.ignoredIncludes.length) repo.ignoredIncludes = input.ignoredIncludes;
+      repos.push(repo);
+    }
+
+    // Harness transcript.
+    const harness: HarnessState = { kind: input.harness.kind, chunks: [] };
+    if (input.harness.sessionId) harness.sessionId = input.harness.sessionId;
+    if (input.harness.cwd) harness.cwd = input.harness.cwd;
+    if (input.harness.kind !== "none" && input.harness.sessionId && input.harness.cwd) {
+      const loc = await locateHarness(input.harness.kind, input.harness.sessionId, input.harness.cwd);
+      if (loc) {
+        const hFile = path.join(tmp, "harness.tar");
+        const cap = await captureHarness(loc, hFile, compression);
+        if (cap) harness.chunks = await addFileChunks(cap.file, sources, allChunks);
+      }
+    }
+
+    const bytesTotal = allChunks.reduce((n, c) => n + c.size, 0);
+    const manifest: Manifest = {
+      v: MANIFEST_VERSION,
+      capsuleId: input.capsuleId,
+      generation,
+      parentGeneration: input.parentGeneration ?? 0,
+      createdAt: new Date().toISOString(),
+      machine: machineInfo(packageVersion),
+      root: { kind: input.rootKind, name: input.rootName },
+      repos,
+      excludes: [...DEFAULT_EXCLUDES],
+      harness,
+      totals: { chunks: allChunks.length, bytes: bytesTotal, dedupedBytes: dedupedBytes(allChunks) },
+    };
+
+    // The manifest is itself a chunk: write it, hash it, and negotiate it with
+    // the rest so commit can reference it by sha256.
+    const manifestBytes = Buffer.from(JSON.stringify(manifest));
+    const manifestSha256 = sha256(manifestBytes);
+    const manifestFile = path.join(tmp, "manifest.json");
+    await writeFile(manifestFile, manifestBytes);
+    const manifestRef: ChunkRef = { sha256: manifestSha256, size: manifestBytes.length };
+    allChunks.push(manifestRef);
+    if (!sources.has(manifestSha256)) sources.set(manifestSha256, { file: manifestFile, index: 0, size: manifestBytes.length });
+
+    // Distinct chunks, negotiate in batches of ≤ 200.
+    const distinct = new Map<string, ChunkRef>();
+    for (const c of allChunks) distinct.set(c.sha256, c);
+    const wanted = [...distinct.values()];
+    let uploaded = 0;
+    let uploadedBytes = 0;
+    for (let i = 0; i < wanted.length; i += NEGOTIATE_BATCH) {
+      const batch = wanted.slice(i, i + NEGOTIATE_BATCH);
+      const neg = await tapi.negotiate(
+        input.capsuleId,
+        batch.map((c) => ({ sha256: c.sha256, size: c.size })),
+      );
+      // A basis chunk the server no longer has cannot be re-sent by reference:
+      // rebuild those repos with a full bundle and push again (once).
+      const lost = neg.missing.filter((m) => !sources.has(m.sha256) && carried.has(m.sha256));
+      if (lost.length > 0) {
+        const repos = new Set(lost.map((m) => carried.get(m.sha256)!));
+        if ([...repos].every((r) => forceFull.has(r))) {
+          throw new Error(`server is missing basis chunks for ${[...repos].join(", ")} even after a full re-bundle`);
+        }
+        await rm(tmp, { recursive: true, force: true });
+        return pushCapsule(input, new Set([...forceFull, ...repos]));
+      }
+      await uploadMissing(neg.missing, sources);
+      uploaded += neg.missing.length;
+      for (const m of neg.missing) uploadedBytes += m.size ?? distinct.get(m.sha256)?.size ?? 0;
+    }
+
+    const committed = await tapi.commit(input.capsuleId, {
+      manifest,
+      manifestSha256,
+      committedBy: input.committedBy ?? detectCommitter(),
+    });
+    const logicalBytes = allChunks.reduce((n, c) => n + c.size, 0);
+    const reusedBytes = Math.max(0, logicalBytes - uploadedBytes);
+    return {
+      // The server's generation record is authoritative for the number.
+      generation: committed.generation?.generation ?? generation,
+      bytesTotal,
+      dedupedBytes: manifest.totals.dedupedBytes ?? 0,
+      chunkCount: distinct.size,
+      uploaded,
+      reused: distinct.size - uploaded,
+      uploadedBytes,
+      logicalBytes,
+      reusedBytes,
+      savingsRatio: logicalBytes > 0 ? reusedBytes / logicalBytes : 0,
+    };
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+}
+
+async function addFileChunks(
+  file: string,
+  sources: Map<string, ChunkSource>,
+  all: ChunkRef[],
+): Promise<ChunkRef[]> {
+  const refs = await chunkFile(file);
+  refs.forEach((r, index) => {
+    all.push(r);
+    if (!sources.has(r.sha256)) sources.set(r.sha256, { file, index, size: r.size });
+  });
+  return refs;
+}
+
+async function uploadMissing(
+  missing: tapi.NegotiateResponse["missing"],
+  sources: Map<string, ChunkSource>,
+): Promise<void> {
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(PUT_CONCURRENCY, missing.length) }, async () => {
+    for (;;) {
+      const i = cursor++;
+      if (i >= missing.length) return;
+      const item = missing[i];
+      const src = sources.get(item.sha256);
+      if (!src) throw new Error(`server asked for an unknown chunk ${item.sha256}`);
+      const body = await readChunk(src.file, src.index);
+      await putWithRetry(item.putUrl, body);
+    }
+  });
+  await Promise.all(workers);
+}
+
+async function putWithRetry(url: string, body: Buffer, attempts = 4): Promise<void> {
+  let delay = 400;
+  for (let attempt = 1; ; attempt++) {
+    const res = await fetch(url, { method: "PUT", body });
+    if (res.ok) return;
+    if (attempt >= attempts || (res.status < 500 && res.status !== 429)) {
+      throw new Error(`chunk upload failed: HTTP ${res.status}`);
+    }
+    await sleep(delay);
+    delay *= 2;
+  }
+}
+
+/** The Ditto Code runner authenticates with a ditto_agent_ token and pins the harness session via env. */
+export function detectCommitter(): tapi.CommittedBy {
+  const key = process.env.DITTO_API_KEY ?? "";
+  if (key.startsWith("ditto_agent_") || process.env.TELEPORT_HARNESS_SESSION_ID) return "runner";
+  return "cli";
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function bundleBytes(chunks: ChunkRef[]): number {
+  return chunks.reduce((n, c) => n + c.size, 0);
+}
+
+function safe(rel: string): string {
+  return rel.replace(/[^A-Za-z0-9._-]/g, "_") || "root";
+}

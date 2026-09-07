@@ -59,4 +59,15 @@ local-status:
 local-search +query:
   just search http://localhost:3400 {{query}}
 
+# Teleport: dry-run a capsule push (discovers repos, uploads nothing).
+teleport-plan api=api path=".": build
+  DITTO_API_BASE="{{api}}" node dist/cli.js teleport push {{path}} --dry-run
+
+# List capsules / configured storage buckets.
+teleport-list api=api: build
+  DITTO_API_BASE="{{api}}" node dist/cli.js teleport list
+
+storage-list api=api: build
+  DITTO_API_BASE="{{api}}" node dist/cli.js storage list
+
 verify: check build test pack
