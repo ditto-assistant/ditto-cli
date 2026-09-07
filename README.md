@@ -442,6 +442,10 @@ endpoint id, slug or name; with a single endpoint it is chosen automatically.
 Under the hood a push negotiates which content-addressed chunks the server
 lacks, uploads only those via presigned URLs, then `commit`s the manifest (the
 server answers `201 Created` with the new generation and its mirror state).
+Every branch's upstream (`branchUpstreams`) travels in the manifest, so a pull
+recreates remotes and tracking refs without a network fetch. `--cloud` opens
+the thread URL the backend returns for its linked app (falling back to the
+production app link on older backends).
 
 `push` bundles each repo (thin against the previous generation when possible),
 tars the dirty and untracked files, and captures the harness transcript for the

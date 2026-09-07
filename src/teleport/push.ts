@@ -125,6 +125,14 @@ export async function pushCapsule(input: PushInput, forceFull: Set<string> = new
       };
       if (state.branches.length) repo.branches = state.branches;
       if (state.tags.length) repo.tags = state.tags;
+      // Per-branch upstreams, restricted to remotes the manifest carries so a
+      // restore can always recreate the tracking ref.
+      const remoteNames = new Set(state.remotes.map((r) => r.name));
+      const upstreams: Record<string, string> = {};
+      for (const [b, up] of Object.entries(state.branchUpstreams)) {
+        if (remoteNames.has(up.split("/")[0])) upstreams[b] = up;
+      }
+      if (Object.keys(upstreams).length) repo.branchUpstreams = upstreams;
       if (state.stashes.length) repo.stashes = state.stashes;
       if (input.ignoredIncludes.length) repo.ignoredIncludes = input.ignoredIncludes;
       repos.push(repo);
