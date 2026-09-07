@@ -9,6 +9,8 @@ export interface RepoState {
   branches: string[];
   tags: string[];
   stashes: string[];
+  /** Branch → "<remote>/<branch>" for branches that track a remote. */
+  branchUpstreams: Record<string, string>;
 }
 
 /** Reads remotes, HEAD, branches, tags and stashes of a repository. */
@@ -26,13 +28,20 @@ export function readRepoState(repoDir: string): RepoState {
   const upstream = upstreamRes?.ok ? upstreamRes.stdout.trim() : undefined;
   const branches: string[] = [];
   const tags: string[] = [];
-  const refsOut = git(["for-each-ref", "--format=%(refname)", "refs/heads", "refs/tags"], repoDir);
+  /** Branch → "<remote>/<branch>" for every local branch that tracks a remote. */
+  const branchUpstreams: Record<string, string> = {};
+  const refsOut = git(["for-each-ref", "--format=%(refname)%09%(upstream:short)", "refs/heads", "refs/tags"], repoDir);
   if (refsOut.ok) {
     for (const line of refsOut.stdout.split("\n")) {
-      const ref = line.trim();
+      const [refRaw, upstreamRaw = ""] = line.split("\t");
+      const ref = refRaw.trim();
       if (!ref) continue;
-      if (ref.startsWith("refs/heads/")) branches.push(ref.slice("refs/heads/".length));
-      else if (ref.startsWith("refs/tags/")) tags.push(ref.slice("refs/tags/".length));
+      if (ref.startsWith("refs/heads/")) {
+        const name = ref.slice("refs/heads/".length);
+        branches.push(name);
+        const up = upstreamRaw.trim();
+        if (up) branchUpstreams[name] = up;
+      } else if (ref.startsWith("refs/tags/")) tags.push(ref.slice("refs/tags/".length));
     }
   }
   const stashRes = git(["stash", "list", "--format=%H"], repoDir);
@@ -40,7 +49,7 @@ export function readRepoState(repoDir: string): RepoState {
   const head: RepoHead = { sha };
   if (branch) head.branch = branch;
   if (upstream) head.upstream = upstream;
-  return { remotes, head, branches, tags, stashes };
+  return { remotes, head, branches, tags, stashes, branchUpstreams };
 }
 
 export interface BundleResult {

@@ -110,6 +110,12 @@ async function restoreRepo(
   } else if (repo.head.sha) {
     gitOrThrow(["checkout", "-f", repo.head.sha], repoDest);
   }
+  // Every other branch that tracked a remote gets its tracking ref back too.
+  for (const [branch, upstream] of Object.entries(repo.branchUpstreams ?? {})) {
+    if (branch === repo.head.branch && repo.head.upstream) continue;
+    if (!git(["rev-parse", "--verify", `refs/heads/${branch}`], repoDest).ok) continue;
+    restoreUpstream(repoDest, repo, branch, upstream);
+  }
   // Dirty worktree over the checkout.
   if (repo.worktree?.chunks?.length) {
     const tar = path.join(tmp, `worktree-${sanitize(repo.relPath)}.tar`);

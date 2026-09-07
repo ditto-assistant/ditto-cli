@@ -60,6 +60,8 @@ export interface RepoManifest {
   /** Local branch names carried by the bundle. */
   branches?: string[];
   tags?: string[];
+  /** Branch name → "<remote>/<branch>" for branches tracking one of `remotes`; omitted when empty. */
+  branchUpstreams?: Record<string, string>;
   stashes?: string[];
   packs: RepoPack[];
   ignoredIncludes?: string[];
