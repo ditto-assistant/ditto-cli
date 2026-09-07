@@ -99,6 +99,7 @@ function startTeleportStub() {
     { id: "22222222-2222-4222-8222-222222222222", slug: "work", name: "Work Endpoint", model: "openai/gpt-5.6-luna" },
   ];
   let stubEndpoints = [...defaultEndpoints];
+  let cloudStatus = 0;
   const capsules = new Map(); // id -> { generations: Map<gen, manifest> }
   const buckets = new Map(); // id -> bucket
   const calls = [];
@@ -216,11 +217,12 @@ function startTeleportStub() {
         }
         if (sub === "/cloud-session" && req.method === "POST") {
           const body = jsonBody();
+          if (cloudStatus) return send(cloudStatus, { error: cloudStatus === 404 ? "inference endpoint not found" : "cloud runner unavailable" });
           if (!body.prompt) return send(400, { error: "prompt required" });
           // The real backend parses endpointId as a UUID; a slug is a 400.
           if (body.endpointId && !/^[0-9a-f-]{36}$/i.test(body.endpointId)) return send(400, { error: "create an inference endpoint" });
           calls.push({ method: "CLOUD", path: p, endpointId: body.endpointId ?? null });
-          return send(202, { jobId: "job-1", sessionId: "sess-1", agentId: "agent-1", threadId: "thread-1", endpointId: body.endpointId ?? "ep-1", harness: body.harness ?? "claude-code", harnessSessionId: "hs-1", generation: cap.headGeneration });
+          return send(202, { jobId: "job-1", sessionId: "sess-1", agentId: "agent-1", threadId: "thread-1", threadUrl: "https://pr-9-app.example.test/chat/thread-1", endpointId: body.endpointId ?? "ep-1", harness: body.harness ?? "claude-code", harnessSessionId: "hs-1", generation: cap.headGeneration });
         }
       }
       // Inference endpoints, for --endpoint resolution.
@@ -280,6 +282,9 @@ function startTeleportStub() {
         defaultEndpoints,
         setEndpoints: (list) => {
           stubEndpoints = [...list];
+        },
+        setCloudStatus: (code) => {
+          cloudStatus = code;
         },
         close: () => { server.closeAllConnections(); server.close(); },
       });
@@ -532,6 +537,70 @@ test("--cloud resolves --endpoint slug/name to the endpoint id, defaults to the 
     assert.equal(r.status, 0, r.stderr);
     cloud = stub.calls.filter((c) => c.method === "CLOUD");
     assert.equal(cloud.at(-1).endpointId, "11111111-1111-4111-8111-111111111111");
+  } finally {
+    stub.close();
+  }
+});
+
+test("--cloud prints the backend's threadUrl and surfaces 404/503 hints", async () => {
+  const stub = await startTeleportStub();
+  const cfg = tmp("teleport-cfg-");
+  try {
+    const src = makeRepo();
+    let r = await cli(stub, cfg, ["teleport", src, "--name", "cloudy", "--cloud", "--endpoint", "endpoint-1"]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /Open it: https:\/\/pr-9-app\.example\.test\/chat\/thread-1/);
+    stub.setCloudStatus(404);
+    r = await cli(stub, cfg, ["teleport", src, "--name", "cloudy", "--cloud", "--endpoint", "endpoint-1"]);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /inference endpoint not found/);
+    stub.setCloudStatus(503);
+    r = await cli(stub, cfg, ["teleport", src, "--name", "cloudy", "--cloud", "--endpoint", "endpoint-1"]);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /cloud runner unavailable; try again shortly/);
+  } finally {
+    stub.close();
+  }
+});
+
+test("pull restores per-branch upstreams tracking different remotes", async () => {
+  const stub = await startTeleportStub();
+  const cfg = tmp("teleport-cfg-");
+  try {
+    const originA = tmp("teleport-origin-a-");
+    const originB = tmp("teleport-origin-b-");
+    git(["init", "--bare", "-q", originA], os.tmpdir());
+    git(["init", "--bare", "-q", originB], os.tmpdir());
+    const src = tmp("teleport-src-");
+    git(["init", "-q", "-b", "main"], src);
+    git(["config", "user.email", "t@example.test"], src);
+    git(["config", "user.name", "Teleport Test"], src);
+    writeFileSync(path.join(src, "a.txt"), "one\n");
+    git(["add", "."], src);
+    git(["commit", "-m", "init"], src);
+    git(["remote", "add", "origin", originA], src);
+    git(["remote", "add", "fork", originB], src);
+    git(["push", "-q", "-u", "origin", "main"], src);
+    git(["checkout", "-q", "-b", "feature"], src);
+    writeFileSync(path.join(src, "b.txt"), "two\n");
+    git(["add", "."], src);
+    git(["commit", "-m", "feature"], src);
+    // feature tracks a differently named branch on the second remote.
+    git(["push", "-q", "-u", "fork", "feature:topic"], src);
+    git(["checkout", "-q", "main"], src);
+
+    let r = await cli(stub, cfg, ["teleport", "push", src, "--name", "multi"]);
+    assert.equal(r.status, 0, r.stderr);
+    const manifest = [...stub.capsules.values()].find((c) => c.name === "multi").generations.get(1).manifest;
+    assert.deepEqual(manifest.repos[0].branchUpstreams, { main: "origin/main", feature: "fork/topic" });
+
+    const dest = path.join(tmp("teleport-dest-"), "multi");
+    r = await cli(stub, cfg, ["teleport", "pull", "multi", dest]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(git(["rev-parse", "--abbrev-ref", "@{u}"], dest).trim(), "origin/main");
+    assert.equal(git(["rev-parse", "--abbrev-ref", "feature@{u}"], dest).trim(), "fork/topic");
+    assert.equal(git(["config", "branch.feature.remote"], dest).trim(), "fork");
+    assert.equal(git(["remote", "get-url", "fork"], dest).trim(), originB);
   } finally {
     stub.close();
   }

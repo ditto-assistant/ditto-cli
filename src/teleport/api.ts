@@ -90,6 +90,8 @@ export interface CloudSessionResponse {
   harness: string;
   harnessSessionId: string;
   generation: number;
+  /** Absolute thread URL on the backend's linked app base (newer backends). */
+  threadUrl?: string;
 }
 
 export type CommittedBy = "cli" | "runner";
