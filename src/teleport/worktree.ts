@@ -1,7 +1,8 @@
 import { spawnSync } from "node:child_process";
-import { closeSync, createReadStream, openSync, readSync } from "node:fs";
+import { closeSync, createReadStream, openSync, readFileSync, readSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import path from "node:path";
+import zlib from "node:zlib";
 import { binaryAvailable, git } from "./git.js";
 import { type Compression, DEFAULT_EXCLUDES, isExcluded } from "./types.js";
 
@@ -90,9 +91,48 @@ export function detectCompression(file: string): Compression {
 }
 
 /** Extracts a worktree tar into `destDir`; compression is detected from the file when not given. */
-export function extractWorktree(file: string, destDir: string, compression: Compression = detectCompression(file)): void {
+export interface ExtractOptions {
+  /** Override zstd binary detection (tests). */
+  zstdAvailable?: boolean;
+  /** Allow decompressing with Node's zlib when the zstd binary is missing (default true). */
+  allowNodeFallback?: boolean;
+}
+
+export function extractWorktree(
+  file: string,
+  destDir: string,
+  compression: Compression = detectCompression(file),
+  opts: ExtractOptions = {},
+): void {
+  if (compression === "zstd") {
+    const haveBinary = opts.zstdAvailable ?? binaryAvailable("zstd");
+    if (!haveBinary) {
+      const zstdDecompressSync = (zlib as unknown as { zstdDecompressSync?: (b: Buffer) => Buffer }).zstdDecompressSync;
+      if ((opts.allowNodeFallback ?? true) && typeof zstdDecompressSync === "function") {
+        // No zstd binary here, but this Node can inflate zstd itself.
+        const plain = `${file}.tar`;
+        writeFileSync(plain, zstdDecompressSync(readFileSync(file)));
+        try {
+          extractPlainTar(plain, destDir);
+        } finally {
+          rmSync(plain, { force: true });
+        }
+        return;
+      }
+      throw new Error(
+        "this capsule's worktree is zstd-compressed but the 'zstd' binary is not installed on this machine " +
+          "(install it: `brew install zstd` on macOS, `apt install zstd` on Debian/Ubuntu) and this Node version " +
+          "cannot decompress zstd itself (needs zlib.zstdDecompressSync).",
+      );
+    }
+  }
   const flag = compression === "zstd" ? "--zstd" : "--gzip";
   const res = spawnSync("tar", ["-x", flag, "-f", file, "-C", destDir], { maxBuffer: 64 * 1024 * 1024 });
+  if (res.status !== 0) throw new Error(`tar extract failed: ${res.stderr?.toString().trim()}`);
+}
+
+function extractPlainTar(file: string, destDir: string): void {
+  const res = spawnSync("tar", ["-x", "-f", file, "-C", destDir], { maxBuffer: 64 * 1024 * 1024 });
   if (res.status !== 0) throw new Error(`tar extract failed: ${res.stderr?.toString().trim()}`);
 }
 

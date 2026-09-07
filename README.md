@@ -534,7 +534,12 @@ commits the source machine saw. A push reports what actually moved, e.g.
 `reusedBytes` and `savingsRatio`, and `teleport --cloud --json` prints a single
 `{ push, cloudSession }` document. `--cloud` opens
 the thread URL the backend returns for its linked app (falling back to the
-production app link on older backends).
+production app link on older backends). `pull --resume` always resumes the
+harness inside the restored tree (add `--dry-run` to see the launch plan), so
+the next prompt lands in the restored transcript even when the original
+directory still exists on the same machine. Worktrees compressed with `zstd`
+are decompressed by Node itself when the `zstd` binary is missing; on a Node
+without zstd support the pull fails with a message naming the binary to install.
 
 `push` bundles each repo (thin against the previous generation when possible),
 tars the dirty and untracked files, and captures the harness transcript for the
