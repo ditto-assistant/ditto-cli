@@ -140,9 +140,18 @@ function restoreUpstream(repoDest: string, repo: RepoManifest, branch: string, u
   }
   const remoteBranch = upstream.slice(remote.name.length + 1);
   if (!remoteBranch) throw new Error(`cannot restore upstream ${upstream}: no branch component`);
-  const tip = gitOrThrow(["rev-parse", "--verify", `refs/heads/${branch}`], repoDest).trim();
-  gitOrThrow(["update-ref", `refs/remotes/${remote.name}/${remoteBranch}`, tip], repoDest);
-  gitOrThrow(["branch", `--set-upstream-to=${upstream}`, branch], repoDest);
+  const tip = repo.upstreamTips?.[upstream];
+  if (tip) {
+    // The real remote-tracking sha captured at push time; its objects rode in
+    // the bundle, so ahead/behind is exactly what the source machine saw.
+    gitOrThrow(["update-ref", `refs/remotes/${remote.name}/${remoteBranch}`, tip], repoDest);
+    gitOrThrow(["branch", `--set-upstream-to=${upstream}`, branch], repoDest);
+    return;
+  }
+  // Older capsules carry no tip: configure the upstream but never fabricate the
+  // tracking ref — offload treats "configured, ref missing" as unknown.
+  gitOrThrow(["config", `branch.${branch}.remote`, remote.name], repoDest);
+  gitOrThrow(["config", `branch.${branch}.merge`, `refs/heads/${remoteBranch}`], repoDest);
 }
 
 async function concatChunks(

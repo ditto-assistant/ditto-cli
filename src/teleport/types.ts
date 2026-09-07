@@ -62,6 +62,8 @@ export interface RepoManifest {
   tags?: string[];
   /** Branch name → "<remote>/<branch>" for branches tracking one of `remotes`; omitted when empty. */
   branchUpstreams?: Record<string, string>;
+  /** "<remote>/<branch>" → the remote-tracking ref's 40-hex sha at push time, for every upstream above. */
+  upstreamTips?: Record<string, string>;
   stashes?: string[];
   packs: RepoPack[];
   ignoredIncludes?: string[];

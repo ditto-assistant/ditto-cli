@@ -11,6 +11,8 @@ export interface RepoState {
   stashes: string[];
   /** Branch → "<remote>/<branch>" for branches that track a remote. */
   branchUpstreams: Record<string, string>;
+  /** "<remote>/<branch>" → remote-tracking ref sha, for every upstream referenced above or by HEAD. */
+  upstreamTips: Record<string, string>;
 }
 
 /** Reads remotes, HEAD, branches, tags and stashes of a repository. */
@@ -49,7 +51,14 @@ export function readRepoState(repoDir: string): RepoState {
   const head: RepoHead = { sha };
   if (branch) head.branch = branch;
   if (upstream) head.upstream = upstream;
-  return { remotes, head, branches, tags, stashes, branchUpstreams };
+  // Real remote-tracking tips, so a restore never has to guess where the
+  // remote was (guessing would hide unpushed commits from offload).
+  const upstreamTips: Record<string, string> = {};
+  for (const up of new Set([...(upstream ? [upstream] : []), ...Object.values(branchUpstreams)])) {
+    const tipRes = git(["rev-parse", "--verify", `refs/remotes/${up}`], repoDir);
+    if (tipRes.ok) upstreamTips[up] = tipRes.stdout.trim();
+  }
+  return { remotes, head, branches, tags, stashes, branchUpstreams, upstreamTips };
 }
 
 export interface BundleResult {
@@ -64,11 +73,20 @@ export interface BundleResult {
  * generation); otherwise a full bundle is produced. An empty repository (no
  * commits) yields no bundle.
  */
-export async function createBundle(repoDir: string, outFile: string, basisShas: string[] = []): Promise<BundleResult | null> {
+export async function createBundle(
+  repoDir: string,
+  outFile: string,
+  basisShas: string[] = [],
+  extraRefs: string[] = [],
+): Promise<BundleResult | null> {
   if (!git(["rev-parse", "--verify", "HEAD"], repoDir).ok) return null;
   const known = basisShas.filter((sha) => git(["cat-file", "-e", `${sha}^{commit}`], repoDir).ok);
   const thin = basisShas.length > 0 && known.length === basisShas.length;
-  const args = ["bundle", "create", outFile, "--branches", "--tags", "HEAD"];
+  // Remote-tracking refs ride along so upstream tips restore with their objects
+  // even when the branch has diverged from them.
+  const refs = extraRefs.filter((r) => git(["rev-parse", "--verify", r], repoDir).ok);
+  const fullArgs = ["bundle", "create", outFile, "--branches", "--tags", "HEAD", ...refs];
+  const args = [...fullArgs];
   if (thin) for (const sha of known) args.push(`^${sha}`);
   const res = git(args, repoDir);
   if (!res.ok) {
@@ -77,7 +95,7 @@ export async function createBundle(repoDir: string, outFile: string, basisShas: 
     }
     if (thin) {
       // basis mismatch of some kind: fall back to a full bundle rather than fail the push
-      gitOrThrow(["bundle", "create", outFile, "--branches", "--tags", "HEAD"], repoDir);
+      gitOrThrow(fullArgs, repoDir);
       return { file: outFile, kind: "full", bytes: (await stat(outFile)).size };
     }
     throw new Error(`git bundle create failed in ${repoDir}: ${res.stderr.trim()}`);

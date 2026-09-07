@@ -32,7 +32,15 @@ export async function unpushedRepos(root: string): Promise<UnpushedRepo[]> {
     }
     if (!upstream?.ok) {
       const hasCommits = git(["rev-parse", "--verify", "HEAD"], dir).ok;
-      if (hasCommits) out.push({ relPath: rel, branch, ahead: 0, reason: "branch has no upstream" });
+      const configured = git(["config", `branch.${branch}.merge`], dir).ok;
+      if (hasCommits && configured) {
+        // Upstream is configured but its tracking ref is absent (a capsule
+        // restored without upstream tips, or a never-fetched remote): we
+        // cannot tell what is pushed, so refuse rather than guess.
+        out.push({ relPath: rel, branch, ahead: -1, reason: "tracking state unknown; fetch first or pass --allow-unpushed" });
+      } else if (hasCommits) {
+        out.push({ relPath: rel, branch, ahead: 0, reason: "branch has no upstream" });
+      }
       continue;
     }
     const ahead = git(["rev-list", "--count", "@{u}..HEAD"], dir);
