@@ -51,7 +51,7 @@ const PENDING = {
 const MINTED_PLAINTEXT = "ditto_inf_PLAINTEXT_MUST_NEVER_PRINT_zz99";
 
 /** Stub of the Ditto API covering the device flow and endpoint management. */
-function startStub({ endpoints = [ALPHA, BETA], tokenPollsUntilOk = 2 } = {}) {
+function startStub({ endpoints = [ALPHA, BETA], tokenPollsUntilOk = 2, baseUrl = "https://api.example.test/v1" } = {}) {
   const calls = [];
   let polls = 0;
   const server = http.createServer((req, res) => {
@@ -88,7 +88,7 @@ function startStub({ endpoints = [ALPHA, BETA], tokenPollsUntilOk = 2 } = {}) {
       const authed = req.headers.authorization === "Bearer ditto_mcp_test" || req.headers.authorization === "Bearer ditto_mcp_fromdevice";
       if (req.url.startsWith("/api/v5/inference/endpoints") && !authed) return json(401, { message: "unauthorized" });
       if (req.url === "/api/v5/inference/endpoints" && req.method === "GET") {
-        return json(200, { baseUrl: "https://api.example.test/v1", endpoints, limit: 5, used: endpoints.length });
+        return json(200, { ...(baseUrl === null ? {} : { baseUrl }), endpoints, limit: 5, used: endpoints.length });
       }
       if (req.url === "/api/v5/inference/endpoints" && req.method === "POST") {
         const input = JSON.parse(body || "{}");
@@ -283,6 +283,32 @@ test("endpoints list --output json and bare endpoints --set-default still work",
     const openDefault = await runAsync(["endpoints", "open", "--print"], env);
     assert.equal(openDefault.status, 0, openDefault.stderr);
     assert.equal(openDefault.stdout.trim(), "https://developer.heyditto.ai/endpoints/22222222-2222-2222-2222-222222222222");
+  } finally {
+    stub.close();
+  }
+});
+
+test("endpoints list falls back to the inference host when the server omits baseUrl", async () => {
+  const stub = await startStub({ baseUrl: null });
+  const configDir = mkdtempSync(path.join(os.tmpdir(), "heyditto-funnel-cfg-"));
+  writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ apiKey: "ditto_mcp_test" }));
+  const env = { DITTO_API_BASE: stub.base, DITTO_CONFIG_DIR: configDir };
+  try {
+    // A custom control plane (DITTO_API_BASE, i.e. local/staging) proxies inference itself.
+    const local = await runAsync(["endpoints", "list", "--output", "json"], env);
+    assert.equal(local.status, 0, local.stderr);
+    assert.equal(JSON.parse(local.stdout).baseUrl, `${stub.base}/v1`);
+
+    // DITTO_INFERENCE_BASE wins over that, trailing slash trimmed.
+    const explicit = await runAsync(["endpoints", "list", "--output", "json"], { ...env, DITTO_INFERENCE_BASE: "https://inference.example.test/" });
+    assert.equal(explicit.status, 0, explicit.stderr);
+    assert.equal(JSON.parse(explicit.stdout).baseUrl, "https://inference.example.test/v1");
+
+    // The server-reported gateway still takes precedence over any env fallback.
+    const reported = await runAsync(["config"], { ...env, DITTO_INFERENCE_BASE: "https://inference.example.test" });
+    assert.equal(reported.status, 0, reported.stderr);
+    assert.equal(JSON.parse(reported.stdout).notes.inferenceBase, "https://inference.example.test");
+    assert.equal(JSON.parse(reported.stdout).notes.apiBase, stub.base);
   } finally {
     stub.close();
   }
