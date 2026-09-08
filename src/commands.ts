@@ -23,14 +23,15 @@ import { openInBrowser } from "./browser.js";
 import { endpointURL } from "./config.js";
 import { activationLink, formatActivation } from "./endpoint-format.js";
 import {
-  type SecretTarget,
-  describeTarget,
-  preflightGh,
-  resolveRepoFromCwd,
-  setGitHubSecret,
-  validateRepo,
-  validateSecretName,
-} from "./gh-secret.js";
+  STORE_IDS,
+  type SecretStore,
+  type StoreId,
+  type StoreTarget,
+  VERCEL_TARGETS,
+  deliver,
+  probeStores,
+  selectStore,
+} from "./secret-stores/index.js";
 import {
   SESSION_ENV,
   SESSION_ID_HEADER,
@@ -50,6 +51,14 @@ interface EndpointsOptions {
 
 function pad(s: string, n: number): string {
   return s.length >= n ? s : s + " ".repeat(n - s.length);
+}
+
+/** Left-aligned columns sized to their widest cell; the last column is not padded. */
+function printTable(header: string[], rows: string[][]): void {
+  const widths = header.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i].length)));
+  const line = (r: string[]) => r.map((c, i) => (i === r.length - 1 ? c : pad(c, widths[i]))).join("  ");
+  process.stdout.write(`${line(header)}\n`);
+  for (const r of rows) process.stdout.write(`${line(r)}\n`);
 }
 
 function spendColumn(e: InferenceEndpoint): string {
@@ -356,10 +365,7 @@ export async function cmdEndpointKeys(ref: string, options: { output?: string })
     k.lastUsedAt ? `used ${k.lastUsedAt.slice(0, 16).replace("T", " ")}` : "",
   ]);
   const header = ["ID", "KEY", "NAME", "STATE", "LAST USED"];
-  const widths = header.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i].length)));
-  const line = (r: string[]) => r.map((c, i) => (i === r.length - 1 ? c : pad(c, widths[i]))).join("  ");
-  process.stdout.write(`${line(header)}\n`);
-  for (const r of rows) process.stdout.write(`${line(r)}\n`);
+  printTable(header, rows);
 }
 
 export async function cmdEndpointKeysRevoke(ref: string, keyId: string, options: { yes?: boolean; output?: string }): Promise<void> {
@@ -375,15 +381,59 @@ export async function cmdEndpointKeysRevoke(ref: string, keyId: string, options:
 
 interface KeysCreateOptions {
   output?: string;
+  /** Canonical destination selector; every store also has a shorthand flag. */
+  store?: string;
+  secret?: string;
   ghSecret?: string;
+  gitlabVar?: string;
+  awsSecret?: string;
+  gcpSecret?: string;
+  azSecret?: string;
+  opItem?: string;
+  vaultSecret?: string;
+  dopplerSecret?: string;
+  cfSecret?: string;
+  vercelEnv?: string;
+  k8sSecret?: string;
+  flySecret?: string;
   repo?: string;
   env?: string;
   org?: string;
+  region?: string;
+  project?: string;
+  keyVault?: string;
+  opVault?: string;
+  mount?: string;
+  field?: string;
+  dopplerConfig?: string;
+  worker?: string;
+  vercelTarget?: string;
+  namespace?: string;
+  k8sKey?: string;
+  app?: string;
   name?: string;
   expires?: string;
   budget?: string;
   spendPeriod?: string;
   yes?: boolean;
+}
+
+/** Shorthand flag values keyed by the store they select. */
+function shorthandsOf(options: KeysCreateOptions): Partial<Record<StoreId, string>> {
+  return {
+    github: options.ghSecret,
+    gitlab: options.gitlabVar,
+    aws: options.awsSecret,
+    gcloud: options.gcpSecret,
+    azure: options.azSecret,
+    "1password": options.opItem,
+    vault: options.vaultSecret,
+    doppler: options.dopplerSecret,
+    cloudflare: options.cfSecret,
+    vercel: options.vercelEnv,
+    kubernetes: options.k8sSecret,
+    fly: options.flySecret,
+  };
 }
 
 function parseKeyBudget(raw: string | undefined): number | undefined {
@@ -399,52 +449,39 @@ function parseKeyExpiry(raw: string | undefined): KeyExpiry {
   throw new Error(`--expires must be one of: ${KEY_EXPIRIES.join(", ")}`);
 }
 
-/** Resolves where the secret goes from --repo / --env / --org (repo falls back to the cwd, like gh). */
-function resolveSecretTarget(options: KeysCreateOptions): SecretTarget {
-  const org = options.org?.trim();
-  const env = options.env?.trim();
-  if (org) {
-    if (options.repo || env) throw new Error("--org cannot be combined with --repo or --env (organization secrets are not scoped to one repository)");
-    if (!/^[A-Za-z0-9_.-]+$/.test(org)) throw new Error(`--org must be an organization login, got "${options.org}"`);
-    return { kind: "org", org };
-  }
-  const repo = options.repo ? validateRepo(options.repo) : resolveRepoFromCwd();
-  if (env) return { kind: "env", repo, env };
-  return { kind: "repo", repo };
-}
-
 /**
- * Mints a key on an endpoint and hands the plaintext straight to `gh secret
- * set` over stdin. The key is never printed, logged or stored locally; on a
- * failed `gh` call it is revoked again so nothing usable is left behind.
+ * Mints a key on an endpoint and hands the plaintext straight to the platform
+ * CLI over stdin (`gh secret set`, `gcloud secrets create --data-file=-`, …).
+ * The key is never printed, logged or stored locally; when the platform CLI
+ * fails it is revoked again so nothing usable is left behind.
  */
 export async function cmdEndpointKeysCreate(ref: string, options: KeysCreateOptions): Promise<void> {
-  if (!options.ghSecret) throw new Error("--gh-secret <NAME> is required: this command only mints keys straight into a GitHub Actions secret");
-  const secretName = validateSecretName(options.ghSecret);
+  const { store, name: secretName } = selectStore({ ...options, shorthands: shorthandsOf(options) });
   const budget = parseKeyBudget(options.budget);
   const expiresIn = parseKeyExpiry(options.expires);
   if (options.spendPeriod !== undefined && budget === undefined) throw new Error("--spend-period only applies together with --budget");
   const spendPeriod = budget !== undefined ? (options.spendPeriod ?? "monthly") : undefined;
 
-  // Everything that can fail cheaply happens before any write: gh present and
-  // signed in, target repo known, endpoint exists, operator confirmed.
-  preflightGh();
-  const target = resolveSecretTarget(options);
+  // Everything that can fail cheaply happens before any write: the platform
+  // CLI is present and signed in, its target is known, the endpoint exists,
+  // and the operator confirmed.
+  store.preflight();
+  const target = store.resolveTarget(options);
   const { endpoint, catalog } = await getEndpoint(ref);
-  const keyName =
-    options.name?.trim() || (target.kind === "org" ? `gh-secret:${secretName}` : `gh:${target.repo}:${secretName}`);
-  const plan = `Will mint key "${keyName}" on ${endpoint.slug} (expires ${expiresIn}${budget !== undefined ? `, budget ${budget.toLocaleString()} tokens ${spendPeriod}` : ""}) and set secret ${secretName} on ${describeTarget(target)}.`;
-  await confirmTyped({ action: `mint a key on ${endpoint.slug} and set secret ${secretName}`, expected: secretName, label: "the secret name", yes: options.yes, preview: plan });
+  const keyName = options.name?.trim() || defaultKeyName(store, target, secretName);
+  const plan = `Will mint key "${keyName}" on ${endpoint.slug} (expires ${expiresIn}${budget !== undefined ? `, budget ${budget.toLocaleString()} tokens ${spendPeriod}` : ""}) and store ${secretName} in ${target.describe}.`;
+  await confirmTyped({ action: `mint a key on ${endpoint.slug} and store ${secretName} in ${store.label}`, expected: secretName, label: `the ${store.nameLabel.toLowerCase()}`, yes: options.yes, preview: plan });
 
   const minted = await createKey(endpoint.id, {
     name: keyName,
     expiresIn,
     ...(budget !== undefined ? { spendLimitTokens: budget, spendPeriod } : {}),
   });
-  // Split the plaintext off immediately; only `plaintext` may reach gh's stdin.
+  // Split the plaintext off immediately; only `plaintext` may reach the
+  // platform CLI's stdin.
   const { key: plaintext, ...key } = minted;
   try {
-    setGitHubSecret(secretName, target, plaintext ?? "");
+    deliver(store, secretName, store.deliveries(secretName, target), plaintext ?? "");
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
     try {
@@ -460,7 +497,7 @@ export async function cmdEndpointKeysCreate(ref: string, options: KeysCreateOpti
 
   const anthropicBaseUrl = apiRootOf(catalog.baseUrl);
   const openaiBaseUrl = catalog.baseUrl;
-  const snippet = `\${{ secrets.${secretName} }}`;
+  const gateway = { anthropicBaseUrl, openaiBaseUrl };
   if (isJSON(options)) {
     process.stdout.write(
       `${JSON.stringify(
@@ -475,7 +512,13 @@ export async function cmdEndpointKeysCreate(ref: string, options: KeysCreateOpti
             spendLimitTokens: key.spendLimitTokens ?? budget ?? null,
             spendPeriod: key.spendPeriod ?? spendPeriod ?? null,
           },
-          secret: { name: secretName, ...target, snippet },
+          store: store.id,
+          secret: {
+            name: secretName,
+            ...target.fields,
+            describe: target.describe,
+            ...(store.snippet ? { snippet: store.snippet(secretName, target) } : {}),
+          },
           gateway: { baseUrl: catalog.baseUrl, anthropicBaseUrl, openaiBaseUrl },
         },
         null,
@@ -487,17 +530,47 @@ export async function cmdEndpointKeysCreate(ref: string, options: KeysCreateOpti
   process.stdout.write(
     [
       `Minted key …${key.keyHint} (${key.name ?? keyName}) on ${endpoint.slug}: expires ${expiresIn}${budget !== undefined ? `, budget ${budget.toLocaleString()} tokens ${spendPeriod}` : ", no spend cap"}.`,
-      `Stored it as GitHub Actions secret ${secretName} on ${describeTarget(target)}. The key was not printed and is not kept locally.`,
+      `Stored ${secretName} in ${target.describe} via ${store.bin}. The key was not printed and is not kept locally.`,
       "",
-      "Use it in a workflow step:",
-      "  env:",
-      `    ANTHROPIC_AUTH_TOKEN: ${snippet}`,
-      `    ANTHROPIC_BASE_URL: ${anthropicBaseUrl}`,
-      `  # OpenAI-compatible clients: OPENAI_API_KEY: ${snippet} with OPENAI_BASE_URL: ${openaiBaseUrl}`,
+      ...store.usage(secretName, target, gateway),
       "",
       `Revoke later with: heyditto endpoints keys revoke ${endpoint.slug} ${key.id}`,
     ].join("\n") + "\n",
   );
+}
+
+/** Key label in the Ditto app: which store, which target, which name. */
+function defaultKeyName(store: SecretStore, target: StoreTarget, secretName: string): string {
+  if (store.keyName) return store.keyName(secretName, target);
+  const scope = Object.entries(target.fields)
+    .filter(([key, value]) => key !== "kind" && value)
+    .map(([, value]) => value)
+    .join("/");
+  return `${store.id}:${scope ? `${scope}:` : ""}${secretName}`;
+}
+
+/** Lists every destination and whether this machine can delegate to it. */
+export async function cmdEndpointKeyStores(options: { output?: string }): Promise<void> {
+  const probes = probeStores();
+  if (isJSON(options)) {
+    process.stdout.write(`${JSON.stringify(probes, null, 2)}\n`);
+    return;
+  }
+  const header = ["STORE", "DESTINATION", "CLI", "STATUS", "FLAGS"];
+  const rows = probes.map((p) => [
+    p.id,
+    p.label,
+    p.resolvedBin,
+    p.installed ? "installed" : "not installed",
+    [`${p.shorthand} <${p.nameLabel}>`, ...p.flags].join(" "),
+  ]);
+  printTable(header, rows);
+  const missing = probes.filter((p) => !p.installed);
+  if (missing.length > 0) {
+    process.stdout.write(
+      `\nNot installed: ${missing.map((p) => p.bin).join(", ")}. Install the one you need, or store the key by hand from the console.\n`,
+    );
+  }
 }
 
 /** Registers the `endpoints` group; bare `heyditto endpoints [flags]` still lists. */
@@ -516,7 +589,7 @@ export function registerEndpointCommands(
       `
 Endpoint controls spend your Ditto credits, so delete, key revocation and
 spend-limit increases ask you to type the slug back (or pass --yes).
-'keys create --gh-secret' mints a key straight into a GitHub Actions secret
+'keys create' mints a key straight into a secret manager via its own CLI
 through the gh CLI; the plaintext never reaches your terminal.`,
     );
   addExamples(
@@ -603,13 +676,38 @@ through the gh CLI; the plaintext never reaches your terminal.`,
   addExamples(
     keys
       .command("create")
-      .description("mint a key and store it straight into a GitHub Actions secret via gh (the key is never printed)")
+      .description("mint a key and store it straight into a secret manager through its own CLI (the key is never printed)")
       .argument("<endpoint>", "endpoint slug or id")
-      .requiredOption("--gh-secret <NAME>", "Actions secret name to set with the gh CLI")
-      .option("--repo <owner/repo>", "repository for the secret (default: the repo of the current directory, as gh resolves it)")
-      .option("--env <environment>", "set a deployment-environment secret on the repo instead of a repository secret")
-      .option("--org <org>", "set an organization secret instead (cannot be combined with --repo/--env)")
-      .option("--name <label>", "key name shown in the Ditto app (default: gh:<owner>/<repo>:<NAME>)")
+      .addOption(new Option("--store <destination>", "where the key goes").choices([...STORE_IDS]))
+      .option("--secret <NAME>", "name of the secret, variable, item or path to store (with --store)")
+      .option("--gh-secret <NAME>", "shorthand for --store github --secret NAME")
+      .option("--gitlab-var <NAME>", "shorthand for --store gitlab --secret NAME")
+      .option("--aws-secret <NAME>", "shorthand for --store aws --secret NAME")
+      .option("--gcp-secret <NAME>", "shorthand for --store gcloud --secret NAME")
+      .option("--az-secret <NAME>", "shorthand for --store azure --secret NAME")
+      .option("--op-item <TITLE>", "shorthand for --store 1password --secret TITLE")
+      .option("--vault-secret <PATH>", "shorthand for --store vault --secret PATH")
+      .option("--doppler-secret <NAME>", "shorthand for --store doppler --secret NAME")
+      .option("--cf-secret <NAME>", "shorthand for --store cloudflare --secret NAME")
+      .option("--vercel-env <NAME>", "shorthand for --store vercel --secret NAME")
+      .option("--k8s-secret <NAME>", "shorthand for --store kubernetes --secret NAME")
+      .option("--fly-secret <NAME>", "shorthand for --store fly --secret NAME")
+      .option("--repo <owner/repo>", "github: repository for the secret (default: the repo of the current directory)")
+      .option("--env <environment>", "github: deployment environment; gitlab: variable environment scope")
+      .option("--org <org>", "github: organization secret; gitlab: group variable (cannot be combined with --repo/--env)")
+      .option("--region <region>", "aws: region for the secret (default: the configured region)")
+      .option("--project <project>", "gitlab, gcloud, doppler: project (default: the CLI's configured project)")
+      .option("--key-vault <name>", "azure: Key Vault the secret goes into (required)")
+      .option("--op-vault <name>", "1password: vault for the item (default: Private)")
+      .option("--mount <mount>", "vault: kv mount (default: secret)")
+      .option("--field <field>", "vault: field at the path (default: token)")
+      .option("--doppler-config <config>", "doppler: config within the project, e.g. prod")
+      .option("--worker <name>", "cloudflare: Worker name (default: the local wrangler config)")
+      .addOption(new Option("--vercel-target <target>", "vercel: environment").choices([...VERCEL_TARGETS]))
+      .option("--namespace <namespace>", "kubernetes: namespace (default: default)")
+      .option("--k8s-key <key>", "kubernetes: key within the secret (default: key)")
+      .option("--app <app>", "fly: app name (default: the local fly.toml)")
+      .option("--name <label>", "key name shown in the Ditto app (default: <store>:<target>:<NAME>)")
       .addOption(new Option("--expires <duration>", "server-side key expiry").choices([...KEY_EXPIRIES]).default("1y"))
       .option("--budget <tokens>", "spend cap for the key, in Ditto tokens")
       .addOption(new Option("--spend-period <period>", "window the key's spend cap resets on (with --budget; default monthly)").choices(["daily", "weekly", "monthly", "yearly", "never"]))
@@ -618,9 +716,20 @@ through the gh CLI; the plaintext never reaches your terminal.`,
       .action(cmdEndpointKeysCreate),
     `  heyditto endpoints keys create my-endpoint --gh-secret DITTO_KEY                  # repo of the current directory
   heyditto endpoints keys create my-endpoint --gh-secret DITTO_KEY --repo acme/app --budget 5000000
-  heyditto endpoints keys create my-endpoint --gh-secret DITTO_KEY --repo acme/app --env production --yes
-  heyditto endpoints keys create my-endpoint --gh-secret DITTO_KEY --org acme --expires 6mo --output json`,
+  heyditto endpoints keys create my-endpoint --gh-secret DITTO_KEY --org acme --expires 6mo --output json
+  heyditto endpoints keys create my-endpoint --store aws --secret DITTO_KEY --region us-east-1
+  heyditto endpoints keys create my-endpoint --gcp-secret DITTO_KEY --project my-gcp-project
+  heyditto endpoints keys create my-endpoint --az-secret DITTO_KEY --key-vault my-vault
+  heyditto endpoints keys create my-endpoint --op-item "Ditto inference" --op-vault Engineering
+  heyditto endpoints keys create my-endpoint --vault-secret ditto/inference --mount secret --field token
+  heyditto endpoints keys create my-endpoint --gitlab-var DITTO_KEY --project acme/app
+  heyditto endpoints keys create my-endpoint --k8s-secret ditto-inference --namespace prod`,
   );
+  keys
+    .command("stores")
+    .description("list the secret managers keys can be minted into, and whether their CLI is installed here")
+    .addOption(outputOption())
+    .action(cmdEndpointKeyStores);
   keys
     .command("revoke")
     .description("revoke one key")
@@ -893,8 +1002,5 @@ export async function cmdAgents(options: SessionOutputOptions): Promise<void> {
     connectionsColumn(a),
   ]);
   const header = ["ID", "KIND", "NAME", "THREADS", "LAST ACTIVITY", "CONNECTIONS"];
-  const widths = header.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i].length)));
-  const line = (r: string[]) => r.map((c, i) => (i === r.length - 1 ? c : pad(c, widths[i]))).join("  ");
-  process.stdout.write(`${line(header)}\n`);
-  for (const r of rows) process.stdout.write(`${line(r)}\n`);
+  printTable(header, rows);
 }

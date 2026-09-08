@@ -41,6 +41,10 @@ endpoints api=api: build
 agents api=api: build
   DITTO_API_BASE="{{api}}" node dist/cli.js agents
 
+# Which secret managers this machine can mint keys into (no network).
+stores: build
+  node dist/cli.js endpoints keys stores
+
 # Explicit MCP session bookkeeping (local; no network).
 session *args: build
   node dist/cli.js session {{args}}

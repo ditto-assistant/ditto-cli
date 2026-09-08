@@ -232,6 +232,9 @@ test("endpoints group help works without auth", () => {
   assert.equal(keysCreate.status, 0, keysCreate.stderr);
   assert.match(keysCreate.stdout, /Usage: heyditto endpoints keys create/);
   assert.match(keysCreate.stdout, /--gh-secret <NAME>/);
+  assert.match(keysCreate.stdout, /--store <destination>/);
+  assert.match(keysCreate.stdout, /--aws-secret <NAME>/);
+  assert.match(keysCreate.stdout, /--op-item <TITLE>/);
   assert.match(keysCreate.stdout, /--repo <owner\/repo>/);
   assert.match(keysCreate.stdout, /--env <environment>/);
   assert.match(keysCreate.stdout, /--org <org>/);
@@ -460,7 +463,7 @@ test("endpoints keys create --gh-secret refuses without --yes on a non-TTY befor
   try {
     const refused = await runAsync(["endpoints", "keys", "create", "alpha", "--gh-secret", "DITTO_KEY", "--repo", "o/r"], gh.env({ DITTO_API_BASE: stub.base, DITTO_API_KEY: "ditto_mcp_test" }));
     assert.equal(refused.status, 1);
-    assert.match(refused.stderr, /refusing to mint a key on alpha and set secret DITTO_KEY without confirmation/);
+    assert.match(refused.stderr, /refusing to mint a key on alpha and store DITTO_KEY in GitHub Actions without confirmation/);
     assert.equal(keyPosts(stub).length, 0, "must not mint without confirmation");
     assert.equal(gh.secretArgv(), undefined, "must not touch gh secret set");
     assert.doesNotMatch(refused.stdout + refused.stderr, /PLAINTEXT/);
@@ -485,7 +488,7 @@ test("endpoints keys create --gh-secret mints, pipes the key to gh over stdin on
     assert.equal(gh.secretStdin(), MINTED_PLAINTEXT);
     assert.doesNotMatch(text.stdout + text.stderr, /PLAINTEXT/, "plaintext must never be printed");
     assert.match(text.stdout, /Minted key …zz99 \(gh:o\/r:DITTO_KEY\) on alpha: expires 1y/);
-    assert.match(text.stdout, /secret DITTO_KEY on o\/r \(repository secret\)/);
+    assert.match(text.stdout, /Stored DITTO_KEY in o\/r \(repository secret\) via gh/);
     assert.match(text.stdout, /\$\{\{ secrets\.DITTO_KEY \}\}/);
     assert.match(text.stdout, /ANTHROPIC_BASE_URL: https:\/\/api\.example\.test\n/);
     assert.match(text.stdout, /OPENAI_BASE_URL: https:\/\/api\.example\.test\/v1/);
@@ -510,7 +513,15 @@ test("endpoints keys create --gh-secret mints, pipes the key to gh over stdin on
     assert.equal(out.key.expiresIn, "6mo");
     assert.equal(out.key.spendLimitTokens, 5000000);
     assert.equal(out.key.spendPeriod, "monthly");
-    assert.deepEqual(out.secret, { name: "CI_DITTO", kind: "env", repo: "cwd-owner/cwd-repo", env: "production", snippet: "${{ secrets.CI_DITTO }}" });
+    assert.deepEqual(out.secret, {
+      name: "CI_DITTO",
+      kind: "env",
+      repo: "cwd-owner/cwd-repo",
+      env: "production",
+      describe: "cwd-owner/cwd-repo, environment production",
+      snippet: "${{ secrets.CI_DITTO }}",
+    });
+    assert.equal(out.store, "github");
     assert.equal(out.endpoint.slug, "alpha");
     assert.equal(out.gateway.openaiBaseUrl, "https://api.example.test/v1");
     assert.equal(out.gateway.anthropicBaseUrl, "https://api.example.test");
@@ -545,7 +556,7 @@ test("endpoints keys create revokes the minted key when gh secret set fails", as
     assert.equal(failed.status, 1);
     assert.equal(keyPosts(stub).length, 1);
     assert.equal(gh.secretStdin(), MINTED_PLAINTEXT);
-    assert.match(failed.stderr, /gh secret set DITTO_KEY failed: HTTP 403/);
+    assert.match(failed.stderr, /gh could not store DITTO_KEY — gh secret set: HTTP 403/);
     assert.match(failed.stderr, /was revoked again/);
     assert.ok(stub.calls.some((c) => c.method === "DELETE" && c.url === `/api/v5/inference/endpoints/${ALPHA.id}/keys/key-2`), "must revoke the minted key");
     assert.doesNotMatch(failed.stdout + failed.stderr, /PLAINTEXT/);
@@ -561,7 +572,7 @@ test("endpoints keys create fails before minting when gh is missing or signed ou
     const emptyPath = mkdtempSync(path.join(os.tmpdir(), "heyditto-no-gh-"));
     const missing = await runAsync(["endpoints", "keys", "create", "alpha", "--gh-secret", "DITTO_KEY", "--repo", "o/r", "--yes"], { DITTO_API_BASE: stub.base, DITTO_API_KEY: "ditto_mcp_test", PATH: emptyPath });
     assert.equal(missing.status, 1);
-    assert.match(missing.stderr, /needs the GitHub CLI \(gh\) on PATH/);
+    assert.match(missing.stderr, /storing a key in GitHub Actions needs gh on PATH/);
     assert.match(missing.stderr, /cli\.github\.com/);
 
     const signedOut = await runAsync(["endpoints", "keys", "create", "alpha", "--gh-secret", "DITTO_KEY", "--repo", "o/r", "--yes"], gh.env({ DITTO_API_BASE: stub.base, DITTO_API_KEY: "ditto_mcp_test", FAKE_GH_NO_AUTH: "1" }));

@@ -406,9 +406,10 @@ heyditto endpoints set <endpoint> --model … --system-prompt … --spend-limit 
                                    --record on|off --memory-depth <n>
 heyditto endpoints delete <endpoint> [--yes]
 heyditto endpoints keys <endpoint>         list keys
-heyditto endpoints keys create <endpoint> --gh-secret <NAME> [--repo owner/repo] [--env <env>] [--org <org>]
+heyditto endpoints keys create <endpoint> --store <destination> --secret <NAME> [scoping flags]
                                    [--name <label>] [--expires <1h…never>] [--budget <tokens>]
                                    [--spend-period <p>] [--yes]
+heyditto endpoints keys stores              which destinations this machine can write to
 heyditto endpoints keys revoke <endpoint> <keyId> [--yes]
 ```
 
@@ -416,30 +417,57 @@ Endpoints spend your Ditto credits, so deleting one, revoking a key or raising a
 spend limit asks you to type the slug back; pass `--yes` in scripts. `--output
 json` is available everywhere and includes the gateway base URL.
 
-#### Put a key in GitHub Actions
+#### Put a key straight into a secret manager
 
-`keys create --gh-secret` mints a long-lived key on an endpoint and stores it as
-a GitHub Actions secret through the [`gh` CLI](https://cli.github.com) — **the
-key is never shown**. The plaintext goes to `gh secret set` over stdin, so it
-does not appear in argv, `ps`, shell history, logs or the CLI's own output, and
-the CLI does not keep a copy. If `gh` fails to store it, the freshly minted key
-is revoked again.
+`keys create` mints a long-lived key on an endpoint and stores it in a secret
+manager by delegating to that platform's own CLI — **the key is never shown**.
+The plaintext goes to the platform CLI over stdin (or through `/dev/stdin` for
+the two CLIs that read a file), so it does not appear in argv, `ps`, shell
+history, logs or the CLI's own output, and nothing is kept locally. If the
+platform CLI fails, the freshly minted key is revoked again.
+
+| Destination | Shorthand | Scoping flags | CLI it delegates to |
+| --- | --- | --- | --- |
+| GitHub Actions | `--gh-secret NAME` | `--repo` `--env` `--org` | `gh secret set` |
+| GitLab CI/CD | `--gitlab-var NAME` | `--project` `--org` `--env` | `glab variable set --masked` |
+| AWS Secrets Manager | `--aws-secret NAME` | `--region` | `aws secretsmanager create-secret` (then `put-secret-value`) |
+| Google Secret Manager | `--gcp-secret NAME` | `--project` | `gcloud secrets create` (then `versions add`) |
+| Azure Key Vault | `--az-secret NAME` | `--key-vault` (required) | `az keyvault secret set --file` |
+| 1Password | `--op-item TITLE` | `--op-vault` | `op item create` (JSON template on stdin) |
+| HashiCorp Vault | `--vault-secret PATH` | `--mount` `--field` | `vault kv patch` (then `kv put`) |
+| Doppler | `--doppler-secret NAME` | `--project` `--doppler-config` | `doppler secrets set` |
+| Cloudflare Workers | `--cf-secret NAME` | `--worker` | `wrangler secret put` |
+| Vercel | `--vercel-env NAME` | `--vercel-target` | `vercel env add --sensitive` |
+| Kubernetes | `--k8s-secret NAME` | `--namespace` `--k8s-key` | `kubectl patch secret` (then `apply`) |
+| Fly.io | `--fly-secret NAME` | `--app` | `fly secrets import` |
+
+Every shorthand is sugar for `--store <id> --secret <NAME>`; use whichever
+reads better. `heyditto endpoints keys stores` lists the destinations with the
+CLI each one needs and whether it is installed here (`--output json` for
+scripts).
 
 ```bash
 cd my-repo
 heyditto endpoints keys create my-endpoint --gh-secret DITTO_KEY               # repo from the current directory (like gh)
 heyditto endpoints keys create my-endpoint --gh-secret DITTO_KEY --repo acme/app --budget 5000000
-heyditto endpoints keys create my-endpoint --gh-secret DITTO_KEY --repo acme/app --env production --yes
 heyditto endpoints keys create my-endpoint --gh-secret DITTO_KEY --org acme --expires 6mo --output json
+heyditto endpoints keys create my-endpoint --store aws --secret DITTO_KEY --region us-east-1
+heyditto endpoints keys create my-endpoint --gcp-secret ditto-key --project my-gcp-project
+heyditto endpoints keys create my-endpoint --az-secret ditto-key --key-vault my-vault
+heyditto endpoints keys create my-endpoint --op-item "Ditto inference" --op-vault Engineering
+heyditto endpoints keys create my-endpoint --vault-secret ditto/inference --mount secret --field token
+heyditto endpoints keys create my-endpoint --k8s-secret ditto-inference --namespace prod
 ```
 
-Requirements: `gh` on `PATH` and signed in (`gh auth status`) — both are checked
-before anything is minted. Without a terminal the command needs `--yes`;
-interactively it shows what it will do and asks you to type the secret name.
-Defaults: key name `gh:<owner>/<repo>:<NAME>`, expiry `1y`; `--budget` caps the
-key's spend (`--spend-period` defaults to `monthly`). The output shows the key's
-last four characters, expiry, budget, where the secret was set, and a workflow
-snippet:
+Requirements: the platform CLI on `PATH` and signed in — both are checked
+*before* anything is minted, so a missing CLI costs you nothing. Without a
+terminal the command needs `--yes`; interactively it shows what it will do and
+asks you to type the secret name back. Defaults: expiry `1y`, key label
+`<store>:<target>:<NAME>` (GitHub keeps its original `gh:<owner>/<repo>:<NAME>`);
+`--budget` caps the key's spend (`--spend-period` defaults to `monthly`). A
+scoping flag that belongs to another destination is an error rather than being
+ignored. The output shows the key's last four characters, expiry, budget, where
+it was stored, and how to consume it — for GitHub Actions:
 
 ```yaml
 env:
