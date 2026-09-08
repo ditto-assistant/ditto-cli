@@ -40,7 +40,8 @@
   "bugs": "https://github.com/ditto-assistant/ditto-app/issues/1212",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "commander": "^15.0.0"
+    "commander": "^15.0.0",
+    "smol-toml": "^1.8.0"
   },
   "devDependencies": {
     "@semantic-release/commit-analyzer": "^13.0.1",
