@@ -203,6 +203,8 @@ export interface RepoPlan {
   excludedFiles: number;
   estimatePartial: boolean;
   dittoConfig?: DittoConfigSummary;
+  /** Repo-relative files the effective `.ditto/` configuration was read from (manifest provenance). */
+  dittoConfigSources?: string[];
   configWarnings: string[];
 }
 
@@ -247,10 +249,14 @@ export async function planCapture(rootInput: string, opts: PlanOptions = {}): Pr
     }
     let eff: EffectiveConfig | undefined;
     let dittoConfig: DittoConfigSummary | undefined;
+    let dittoConfigSources: string[] | undefined;
     const configWarnings: string[] = [];
     try {
       eff = await loadDittoConfig(repoDir, { workspaceDir: discovery.kind === "folder" ? discovery.root : undefined });
       dittoConfig = summarize(eff);
+      dittoConfigSources = [...new Set(Object.values(eff.sources).map((s) => s.path).filter((p): p is string => !!p))]
+        .map((p) => toRel(repoDir, p))
+        .sort();
       configWarnings.push(...eff.warnings);
       for (const ex of eff.config.teleport.exclude ?? []) rules.push({ pattern: ex, source: "config", reason: ".ditto/config.toml teleport.exclude", bytes: 0, files: 0 });
     } catch (err) {
@@ -290,6 +296,7 @@ export async function planCapture(rootInput: string, opts: PlanOptions = {}): Pr
       excludedFiles: est.excludedFiles,
       estimatePartial: est.partial,
       dittoConfig,
+      dittoConfigSources,
       configWarnings,
     });
   }
