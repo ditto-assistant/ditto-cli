@@ -11,6 +11,8 @@ import { pullCapsule, readCachedManifest, writeCachedManifest } from "../telepor
 import { deleteLocalRoot, unpushedRepos, waitForOffloadReady } from "../teleport/offload.js";
 import * as storage from "../teleport/storage.js";
 import { discoverRepos } from "../teleport/discover.js";
+import { offloadBlockers, planCapture } from "../teleport/workspace.js";
+import { formatCapturePlan } from "../dittoconfig/commands.js";
 import { formatBytes, type HarnessKind, type Manifest } from "../teleport/types.js";
 
 function out(line: string): void {
@@ -338,6 +340,18 @@ export async function resolveEndpoint(option: string | undefined): Promise<Infer
 export async function cmdOffload(pathArg: string | undefined, options: { yes?: boolean; allowUnpushed?: boolean; name?: string }): Promise<void> {
   const root = path.resolve(pathArg ?? process.cwd());
   const risky = await unpushedRepos(root);
+  // Anything beneath the deletion root that a capture would not preserve blocks
+  // the offload outright: unselected projects, documents, unknown files,
+  // symlinks leaving the workspace, or an incomplete scan.
+  const plan = await planCapture(root);
+  const blockers = await offloadBlockers(plan);
+  if (blockers.length > 0) {
+    err("Refusing to offload: these paths would be lost because no capture preserves them:");
+    for (const b of blockers) err(`  ${b.path} (${b.reason})`);
+    err("Move them out of the folder, add them to a project, or offload a single project instead.");
+    process.exitCode = 1;
+    return;
+  }
   if (risky.length > 0 && !options.allowUnpushed) {
     err("Refusing to offload: these repos hold work no remote has:");
     for (const r of risky) err(`  ${r.relPath} (${r.reason})`);
@@ -510,6 +524,20 @@ export function registerTeleportCommands(program: Command, addExamples: (c: Comm
   withOutput(teleport.command("verify <capsule>").description("re-verify a capsule's mirrors").action(cmdTeleportVerify));
   withOutput(teleport.command("generations <capsule>").description("list a capsule's generations").action(cmdTeleportGenerations));
   withOutput(teleport.command("targets").description("mirror targets, quota and capsule limit for your plan").action(cmdTeleportTargets));
+  withOutput(
+    teleport
+      .command("plan [path]")
+      .description("show what a push would capture: discovered projects, per-language exclusions with byte estimates, .ditto overrides and conflicts; uploads nothing")
+      .option("--depth <n>", "how deep to look for projects under a folder (default 4)")
+      .action(async (pathArg: string | undefined, options: { depth?: string; output?: string; json?: boolean }) => {
+        const plan = await planCapture(pathArg ?? process.cwd(), { maxDepth: options.depth ? Number(options.depth) : undefined });
+        if (options.json || options.output === "json") {
+          out(JSON.stringify(plan, null, 2));
+          return;
+        }
+        for (const line of formatCapturePlan(plan)) out(line);
+      }),
+  );
   withOutput(teleport.command("rm <capsule>").description("delete a capsule and its generations").option("--yes", "skip the confirmation").action(cmdTeleportRm));
 
   addExamples(

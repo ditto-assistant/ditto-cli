@@ -94,7 +94,13 @@ export interface Manifest {
   totals: { chunks: number; bytes: number; dedupedBytes?: number };
 }
 
-/** Paths that never travel in a capsule: secrets, caches and build output. */
+/**
+ * Paths that never travel in a capsule: secrets and dependency/tool caches.
+ * Build outputs (`target/`, `dist/`, `build/`) are NOT here on purpose: a
+ * directory's name is no proof its contents are regenerable, so those come from
+ * the per-project catalog (see catalog.ts) scoped to the project that owns them.
+ * Git-ignored build output is skipped by capture regardless.
+ */
 export const DEFAULT_EXCLUDES: readonly string[] = [
   ".env",
   ".env.*",
@@ -114,9 +120,6 @@ export const DEFAULT_EXCLUDES: readonly string[] = [
   ".venv/",
   "venv/",
   "__pycache__/",
-  "target/",
-  "dist/",
-  "build/",
   ".next/",
   ".turbo/",
   ".cache/",
@@ -140,13 +143,23 @@ export function machineInfo(cliVersion: string): Manifest["machine"] {
   return { hostname: os.hostname(), os: process.platform, arch: process.arch, cliVersion };
 }
 
-/** True when a repo-relative path matches one of the exclude globs. */
+/**
+ * True when a repo-relative path matches one of the exclude globs. A trailing
+ * "/" marks a directory pattern; when the pattern also contains "/" it is
+ * anchored to that repo-relative path (e.g. "apps/web/node_modules/" excludes
+ * only that directory), otherwise the directory name matches at any depth.
+ */
 export function isExcluded(relPath: string, excludes: readonly string[] = DEFAULT_EXCLUDES): boolean {
   const segments = relPath.split("/");
   const base = segments[segments.length - 1];
   for (const pattern of excludes) {
     if (pattern.endsWith("/")) {
       const dir = pattern.slice(0, -1);
+      if (dir.includes("/")) {
+        const parts = dir.split("/");
+        if (segments.length > parts.length && parts.every((p, i) => p === segments[i])) return true;
+        continue;
+      }
       if (segments.slice(0, -1).includes(dir)) return true;
       continue;
     }

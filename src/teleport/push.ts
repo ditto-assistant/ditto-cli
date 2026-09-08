@@ -6,6 +6,7 @@ import * as tapi from "./api.js";
 import { basisFromPrevious, createBundle, readRepoState } from "./bundle.js";
 import { chunkFile, dedupedBytes, readChunk, sha256 } from "./chunks.js";
 import { discoverRepos } from "./discover.js";
+import { planCapture } from "./workspace.js";
 import { captureHarness, locateHarness } from "./harness.js";
 import { captureWorktree, dirtyPaths, pickCompression } from "./worktree.js";
 import {
@@ -84,12 +85,17 @@ export async function pushCapsule(input: PushInput, forceFull: Set<string> = new
   const allChunks: ChunkRef[] = [];
   try {
     const discovery = await discoverRepos(input.root);
+    // Language-aware plan: per-repo exclusions (built-in + catalog scoped to each
+    // detected project + .ditto overrides) and the effective .ditto identity. A
+    // plan failure never blocks a push; the built-in rules still apply.
+    const plan = await planCapture(discovery.root).catch(() => undefined);
     const prevByRel = new Map<string, RepoManifest>();
     for (const r of input.previousManifest?.repos ?? []) prevByRel.set(r.relPath, r);
 
     const repos: RepoManifest[] = [];
     for (const rel of discovery.repos) {
       const repoDir = rel === "." ? discovery.root : path.join(discovery.root, rel);
+      const repoPlan = plan?.repos.find((r) => r.relPath === rel);
       const state = readRepoState(repoDir);
       const prev = prevByRel.get(rel);
       // Thin against the previous generation unless forced, unless there is no
@@ -118,7 +124,7 @@ export async function pushCapsule(input: PushInput, forceFull: Set<string> = new
       }
       const packChunks = bundle ? await addFileChunks(bundle.file, sources, allChunks) : [];
       for (const c of packChunks) carried.delete(c.sha256);
-      const dirty = dirtyPaths(repoDir, input.ignoredIncludes);
+      const dirty = dirtyPaths(repoDir, input.ignoredIncludes, repoPlan?.excludes ?? DEFAULT_EXCLUDES);
       const wtFile = path.join(tmp, `worktree-${safe(rel)}.tar`);
       const capture = await captureWorktree(repoDir, dirty, wtFile, compression);
       const wtChunks = capture ? await addFileChunks(capture.file, sources, allChunks) : [];
@@ -131,6 +137,10 @@ export async function pushCapsule(input: PushInput, forceFull: Set<string> = new
         head: state.head,
         relPath: rel,
         remotes: state.remotes,
+        // NOTE: the plan's per-repo excludes, project types and .ditto summary are
+        // not written into the manifest yet: the backend Repo schema (teleport
+        // stack, pkg/services/teleport/manifest.go) must gain those fields first,
+        // or commit would reject the manifest. Until then they shape capture only.
         packs,
         worktree: capture
           ? { chunks: wtChunks, entries: capture.entries, bytes: bundleBytes(wtChunks) }
