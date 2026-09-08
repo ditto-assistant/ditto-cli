@@ -629,3 +629,29 @@ Releases are automated via [semantic-release](https://github.com/semantic-releas
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## Repository configuration (`.ditto/`)
+
+`.ditto/` is the versioned, discoverable contract a repository gives Ditto — endpoint
+bindings, Teleport policy, environment and task settings — validated by the same
+schema in the CLI, backend, web and desktop (vendored as `src/dittoconfig/schema.json`).
+
+```sh
+heyditto repo init               # scaffold .ditto/config.toml + .ditto/mise.toml from detected projects
+heyditto repo validate           # exit 1 on any problem, naming the file and key
+heyditto repo show               # effective document with the layer each table came from
+heyditto teleport plan [path]      # what a push would capture, per project, with byte estimates
+```
+
+Layers: workspace `.ditto/` (a parent folder of many repos) < repository `.ditto/` <
+ignored `.ditto/local.toml` < flags. Secrets are never literals: use `secret://`
+references. Paths are repository-relative and cannot escape it.
+
+`teleport plan` discovers repositories, worktrees and nested projects under a folder
+(the folder itself need not be a repository), detects project types from a catalog
+adapted from [Kondo](https://github.com/tbillington/kondo) (MIT; detection and exclusion
+knowledge only, never its cleanup), and applies regenerable-artifact exclusions per
+project and path: a directory named `build` is only excluded under a project whose type
+says so. Tracked artifact directories are flagged rather than claimed excluded.
+`heyditto offload` refuses to delete a folder when unrelated files, unknown projects or
+escaping symlinks beneath it would be lost.

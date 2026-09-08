@@ -18,7 +18,7 @@ export interface WorktreeCapture {
  * paths and anything git ignores (unless force-included). This is the dirty
  * state a plain clone would not reproduce.
  */
-export function dirtyPaths(repoDir: string, ignoredIncludes: string[] = []): string[] {
+export function dirtyPaths(repoDir: string, ignoredIncludes: string[] = [], excludes: readonly string[] = DEFAULT_EXCLUDES): string[] {
   const modified = git(["diff", "--name-only", "HEAD"], repoDir);
   const untracked = git(["ls-files", "--others", "--exclude-standard"], repoDir);
   const set = new Set<string>();
@@ -26,7 +26,7 @@ export function dirtyPaths(repoDir: string, ignoredIncludes: string[] = []): str
     if (!out.ok) continue;
     for (const raw of out.stdout.split("\n")) {
       const p = raw.trim();
-      if (p && !isExcluded(p)) set.add(p);
+      if (p && !isExcluded(p, excludes)) set.add(p);
     }
   }
   // A repo with no commits yet: capture everything git would track.
@@ -34,14 +34,14 @@ export function dirtyPaths(repoDir: string, ignoredIncludes: string[] = []): str
     const all = git(["ls-files", "--others", "--exclude-standard", "--cached"], repoDir);
     if (all.ok) for (const raw of all.stdout.split("\n")) {
       const p = raw.trim();
-      if (p && !isExcluded(p)) set.add(p);
+      if (p && !isExcluded(p, excludes)) set.add(p);
     }
   }
   for (const pattern of ignoredIncludes) {
     const forced = git(["ls-files", "--others", "--ignored", "--exclude-standard", "--", pattern], repoDir);
     if (forced.ok) for (const raw of forced.stdout.split("\n")) {
       const p = raw.trim();
-      if (p && !isExcluded(p, DEFAULT_EXCLUDES.filter((e) => !matchesForce(pattern, e)))) set.add(p);
+      if (p && !isExcluded(p, excludes.filter((e) => !matchesForce(pattern, e)))) set.add(p);
     }
   }
   return [...set].sort();
