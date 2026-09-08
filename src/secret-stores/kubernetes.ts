@@ -31,7 +31,13 @@ export const kubernetes: SecretStore = {
   installHint: INSTALL_HINT,
   versionArgs: ["version", "--client=true"],
   options: ["namespace", "k8sKey"],
-  validateName: (name) => resourceName("Kubernetes secret", name.toLowerCase(), "."),
+  validateName: (name) => {
+    const trimmed = name.trim();
+    if (trimmed !== trimmed.toLowerCase()) {
+      throw new Error(`"${name}" is not a valid Kubernetes secret name (lowercase letters, digits, dashes and dots only)`);
+    }
+    return resourceName("Kubernetes secret", trimmed, ".");
+  },
   preflight: () =>
     preflight({
       bin: "kubectl",

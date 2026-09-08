@@ -48,10 +48,18 @@ export function trimmedStderr(res: RunResult): string {
   return (res.stderr || res.stdout).trim().split("\n").slice(-3).join(" ").slice(0, 300);
 }
 
-/** True when `bin` is on PATH (used by `endpoints keys stores`). */
+const presence = new Map<string, boolean>();
+
+/**
+ * True when `bin` is on PATH. Memoized: `endpoints keys stores` asks about a
+ * dozen CLIs, and resolving alternate names asks again.
+ */
 export function installed(bin: string, versionArgs: readonly string[] = ["--version"]): boolean {
-  const res = run(bin, [...versionArgs]);
-  return !res.missing;
+  const cached = presence.get(bin);
+  if (cached !== undefined) return cached;
+  const found = !run(bin, [...versionArgs]).missing;
+  presence.set(bin, found);
+  return found;
 }
 
 const resolvedBins = new Map<string, string>();
@@ -60,11 +68,11 @@ const resolvedBins = new Map<string, string>();
  * Some CLIs ship under more than one name (`fly` and `flyctl`). Picks the
  * first that answers, remembering it so one command spawns the probe once.
  */
-export function resolveBin(store: { bin: string; altBins?: readonly string[] }): string {
+export function resolveBin(store: { bin: string; altBins?: readonly string[]; versionArgs?: readonly string[] }): string {
   const cached = resolvedBins.get(store.bin);
   if (cached) return cached;
   const candidates = [store.bin, ...(store.altBins ?? [])];
-  const found = candidates.find((bin) => installed(bin)) ?? store.bin;
+  const found = candidates.find((bin) => installed(bin, store.versionArgs)) ?? store.bin;
   resolvedBins.set(store.bin, found);
   return found;
 }

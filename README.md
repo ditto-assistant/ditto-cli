@@ -421,8 +421,8 @@ json` is available everywhere and includes the gateway base URL.
 
 `keys create` mints a long-lived key on an endpoint and stores it in a secret
 manager by delegating to that platform's own CLI — **the key is never shown**.
-The plaintext goes to the platform CLI over stdin (or through `/dev/stdin` for
-the two CLIs that read a file), so it does not appear in argv, `ps`, shell
+The plaintext goes to the platform CLI over stdin (or through `/dev/stdin`, for
+the CLIs that read a file instead), so it does not appear in argv, `ps`, shell
 history, logs or the CLI's own output, and nothing is kept locally. If the
 platform CLI fails, the freshly minted key is revoked again.
 

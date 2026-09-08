@@ -127,7 +127,7 @@ export function probeStores(): StoreProbe[] {
       label: store.label,
       bin: store.bin,
       resolvedBin: bin,
-      installed: installed(bin, [...(store.versionArgs ?? ["--version"])]),
+      installed: installed(bin, store.versionArgs),
       shorthand: store.shorthand,
       nameLabel: store.nameLabel,
       flags: store.options.map((key) => OPTION_FLAGS[key]),
