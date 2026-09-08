@@ -137,10 +137,23 @@ export async function pushCapsule(input: PushInput, forceFull: Set<string> = new
         head: state.head,
         relPath: rel,
         remotes: state.remotes,
-        // NOTE: the plan's per-repo excludes, project types and .ditto summary are
-        // not written into the manifest yet: the backend Repo schema (teleport
-        // stack, pkg/services/teleport/manifest.go) must gain those fields first,
-        // or commit would reject the manifest. Until then they shape capture only.
+        // Provenance (R1/R5): the exclude rules the capture applied, the detectors
+        // that fired, and the identity of the .ditto/ configuration in effect.
+        ...(repoPlan
+          ? {
+              excludes: repoPlan.excludes.slice(0, 256),
+              ...(repoPlan.projects.length ? { projectTypes: [...new Set(repoPlan.projects.flatMap((p) => p.types))].slice(0, 256) } : {}),
+              ...(repoPlan.dittoConfig
+                ? {
+                    dittoConfig: {
+                      version: repoPlan.dittoConfig.version,
+                      digest: repoPlan.dittoConfig.digest,
+                      ...(repoPlan.dittoConfigSources?.length ? { sources: repoPlan.dittoConfigSources.slice(0, 256) } : {}),
+                    },
+                  }
+                : {}),
+            }
+          : {}),
         packs,
         worktree: capture
           ? { chunks: wtChunks, entries: capture.entries, bytes: bundleBytes(wtChunks) }

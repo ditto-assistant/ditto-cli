@@ -67,8 +67,21 @@ export interface RepoManifest {
   stashes?: string[];
   packs: RepoPack[];
   ignoredIncludes?: string[];
+  /** Effective exclude rules the capture applied (built-in + per-project catalog + .ditto), ≤256. */
+  excludes?: string[];
+  /** Detector names (catalog ids) that matched the repo and its nested projects, ≤256. */
+  projectTypes?: string[];
+  /** Identity of the `.ditto/` configuration in effect, when one was loaded. */
+  dittoConfig?: RepoDittoConfig;
   /** Modified + untracked files; empty chunks when the tree was clean. */
   worktree: RepoWorktree;
+}
+
+/** Mirrors backend RepoDittoConfig: schema version, sha256 of the effective document, source files. */
+export interface RepoDittoConfig {
+  digest: string;
+  sources?: string[];
+  version: number;
 }
 
 export interface HarnessState {
