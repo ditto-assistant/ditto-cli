@@ -66,9 +66,11 @@ export async function captureWorktree(
   await mkdir(path.dirname(outFile), { recursive: true });
   const flag = compression === "zstd" ? "--zstd" : "--gzip";
   // -T - reads the file list from stdin (NUL-safe), so odd filenames survive.
+  // COPYFILE_DISABLE keeps macOS tar from emitting ._* AppleDouble entries.
   const res = spawnSync("tar", ["-c", flag, "-f", outFile, "-C", repoDir, "--null", "-T", "-"], {
     input: `${paths.join("\0")}\0`,
     maxBuffer: 64 * 1024 * 1024,
+    env: { ...process.env, COPYFILE_DISABLE: "1" },
   });
   if (res.status !== 0) {
     await rm(outFile, { force: true });

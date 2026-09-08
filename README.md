@@ -537,7 +537,11 @@ the thread URL the backend returns for its linked app (falling back to the
 production app link on older backends). `pull --resume` always resumes the
 harness inside the restored tree (add `--dry-run` to see the launch plan), so
 the next prompt lands in the restored transcript even when the original
-directory still exists on the same machine. Worktrees compressed with `zstd`
+directory still exists on the same machine. Restored Claude transcripts are
+filed under Claude Code's own project slug for the destination path (every
+non-alphanumeric character becomes `-`), so `claude --resume` finds them in
+paths with underscores or dots such as `/opt/workspace_base/capsule`. macOS
+AppleDouble `._*` files and `.DS_Store` never enter the worktree archive. Worktrees compressed with `zstd`
 are decompressed by Node itself when the `zstd` binary is missing; on a Node
 without zstd support the pull fails with a message naming the binary to install.
 

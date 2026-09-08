@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { access, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -23,9 +24,21 @@ function codexHome(): string {
   return process.env.CODEX_HOME?.trim() || path.join(os.homedir(), ".codex");
 }
 
+/**
+ * The directory as Claude Code sees it: canonical (symlinks resolved, e.g.
+ * macOS /tmp → /private/tmp) when it exists, else just absolute.
+ */
+export function canonicalCwd(cwd: string): string {
+  try {
+    return realpathSync(cwd);
+  } catch {
+    return path.resolve(cwd);
+  }
+}
+
 /** Locates Claude Code transcript files for a session recorded under `cwd`. */
 export async function locateClaude(sessionId: string, cwd: string): Promise<HarnessLocation | null> {
-  const projectDir = path.join(claudeHome(), "projects", cwdSlug(cwd));
+  const projectDir = path.join(claudeHome(), "projects", cwdSlug(canonicalCwd(cwd)));
   const jsonl = path.join(projectDir, `${sessionId}.jsonl`);
   if (!(await exists(jsonl))) return null;
   const files = [jsonl];
@@ -98,13 +111,16 @@ export async function restoreClaudeTranscript(
   const flag = compression === "zstd" ? "--zstd" : "--gzip";
   const res = spawnSync("tar", ["-x", flag, "-f", tarFile, "-C", home], { maxBuffer: 64 * 1024 * 1024 });
   if (res.status !== 0) throw new Error(`tar extract failed: ${res.stderr?.toString().trim()}`);
-  if (path.resolve(originalCwd) === path.resolve(targetCwd)) return;
-  const fromDir = path.join(claudeHome(), "projects", cwdSlug(originalCwd));
-  const toDir = path.join(claudeHome(), "projects", cwdSlug(targetCwd));
+  const fromCwd = canonicalCwd(originalCwd);
+  const toCwd = canonicalCwd(targetCwd);
+  if (fromCwd === toCwd) return;
+  const fromDir = path.join(claudeHome(), "projects", cwdSlug(fromCwd));
+  const toDir = path.join(claudeHome(), "projects", cwdSlug(toCwd));
   await mkdir(toDir, { recursive: true });
   const fromJsonl = path.join(fromDir, `${sessionId}.jsonl`);
   if (await exists(fromJsonl)) {
-    const rewritten = (await readFile(fromJsonl, "utf8")).split(originalCwd).join(targetCwd);
+    // Rewrite both the recorded and the canonical spelling of the source path.
+    const rewritten = (await readFile(fromJsonl, "utf8")).split(fromCwd).join(toCwd).split(originalCwd).join(toCwd);
     await writeFile(path.join(toDir, `${sessionId}.jsonl`), rewritten);
   }
   const fromSub = path.join(fromDir, sessionId);
