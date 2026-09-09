@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import { Command, Option } from "commander";
 import { launchHarness, pickEndpoint } from "./agents/launch.js";
@@ -213,8 +214,37 @@ export async function cmdEndpointShow(ref: string, options: { output?: string })
     `web:           ${endpointURL(endpoint.id)}`,
   ];
   if (endpoint.systemPrompt) lines.push(`system prompt: ${endpoint.systemPrompt.length > 120 ? `${endpoint.systemPrompt.slice(0, 117)}…` : endpoint.systemPrompt}`);
+  lines.push(...codingAgentLines(endpoint));
   process.stdout.write(`${lines.join("\n")}\n`);
   await noteActivation([endpoint]);
+}
+
+/**
+ * Renders the endpoint's coding-agent settings. Only the harnesses that were
+ * configured are shown, so an untouched endpoint stays quiet — but once a
+ * prompt is customised it is always reported, because an agent silently
+ * running on someone's edited prompt is exactly the surprise worth avoiding.
+ */
+function codingAgentLines(endpoint: InferenceEndpoint): string[] {
+  const options = endpoint.providerOptions ?? {};
+  const lines: string[] = [];
+  if (options.codex_models === true) {
+    const extras: string[] = [];
+    if (options.codex_catalog === true) {
+      const limit = typeof options.codex_catalog_limit === "number" ? options.codex_catalog_limit : 40;
+      extras.push(`catalog ${limit}`);
+    }
+    lines.push(`codex picker:  on${extras.length ? `  (${extras.join(", ")})` : ""}`);
+  }
+  for (const harness of ["codex", "claude"] as const) {
+    const prompt = options[`${harness}_system_prompt`];
+    const auto = options[`${harness}_prompt_autoupdate`];
+    const bits: string[] = [];
+    if (typeof prompt === "string") bits.push(prompt === "" ? "none (no system prompt)" : `custom (${prompt.length} chars)`);
+    if (auto === false) bits.push("auto-update off");
+    if (bits.length) lines.push(`${harness} prompt:  ${bits.join(", ")}`);
+  }
+  return lines;
 }
 
 export async function cmdEndpointUse(ref: string, options: { output?: string }): Promise<void> {
@@ -268,7 +298,35 @@ interface EndpointSetOptions {
   recall?: string;
   record?: string;
   memoryDepth?: string;
+  codexModels?: string;
+  codexCatalog?: string;
+  codexCatalogLimit?: string;
+  codexPrompt?: string;
+  codexPromptAutoupdate?: string;
+  claudePrompt?: string;
+  claudePromptAutoupdate?: string;
   yes?: boolean;
+}
+
+/**
+ * Reads a prompt flag. `@path` loads a file, so a full agent prompt never has
+ * to survive shell quoting; `reset` clears the endpoint's own text and puts it
+ * back on the vendored baseline the harness ships with; an explicit empty
+ * string means "send no system prompt at all".
+ */
+async function promptValue(flag: string, raw: string | undefined): Promise<string | null | undefined> {
+  if (raw === undefined) return undefined;
+  const value = raw.trim();
+  if (value.toLowerCase() === "reset" || value.toLowerCase() === "baseline") return null;
+  if (value.startsWith("@")) {
+    const path = value.slice(1);
+    try {
+      return await readFile(path, "utf8");
+    } catch (err) {
+      throw new Error(`${flag}: could not read ${path}: ${(err as Error).message}`);
+    }
+  }
+  return raw;
 }
 
 function onOff(flag: string, raw: string | undefined): boolean | undefined {
@@ -306,9 +364,42 @@ export async function cmdEndpointSet(ref: string, options: EndpointSetOptions): 
     if (!Number.isInteger(n) || n < 0 || n > 25) throw new Error("--memory-depth must be an integer from 0 to 25");
     patch.memoryDepth = n;
   }
-  if (Object.keys(patch).length === 0) throw new Error("nothing to change; pass at least one --flag (see `heyditto endpoints set --help`)");
+  // Coding-agent settings live in providerOptions. They are merged onto what
+  // the endpoint already has, so setting one flag never silently drops the
+  // others; `reset` removes a key rather than writing an empty one, which is
+  // the difference between "use the harness's own prompt" and "no prompt".
+  const agent: Record<string, unknown> = {};
+  const codexModels = onOff("--codex-models", options.codexModels);
+  if (codexModels !== undefined) agent.codex_models = codexModels;
+  const codexCatalog = onOff("--codex-catalog", options.codexCatalog);
+  if (codexCatalog !== undefined) agent.codex_catalog = codexCatalog;
+  if (options.codexCatalogLimit !== undefined) {
+    const n = Number(options.codexCatalogLimit);
+    if (!Number.isInteger(n) || n < 0) throw new Error("--codex-catalog-limit must be a non-negative integer");
+    agent.codex_catalog_limit = n;
+  }
+  const codexPrompt = await promptValue("--codex-prompt", options.codexPrompt);
+  if (codexPrompt !== undefined) agent.codex_system_prompt = codexPrompt;
+  const codexAuto = onOff("--codex-prompt-autoupdate", options.codexPromptAutoupdate);
+  if (codexAuto !== undefined) agent.codex_prompt_autoupdate = codexAuto;
+  const claudePrompt = await promptValue("--claude-prompt", options.claudePrompt);
+  if (claudePrompt !== undefined) agent.claude_system_prompt = claudePrompt;
+  const claudeAuto = onOff("--claude-prompt-autoupdate", options.claudePromptAutoupdate);
+  if (claudeAuto !== undefined) agent.claude_prompt_autoupdate = claudeAuto;
+
+  if (Object.keys(patch).length === 0 && Object.keys(agent).length === 0) {
+    throw new Error("nothing to change; pass at least one --flag (see `heyditto endpoints set --help`)");
+  }
 
   const { endpoint } = await getEndpoint(ref);
+  if (Object.keys(agent).length > 0) {
+    const merged: Record<string, unknown> = { ...(endpoint.providerOptions ?? {}) };
+    for (const [key, value] of Object.entries(agent)) {
+      if (value === null) delete merged[key];
+      else merged[key] = value;
+    }
+    patch.providerOptions = merged;
+  }
   // Raising or removing a spend cap lets the endpoint spend more credits.
   const raisesSpend =
     patch.spendLimitTokens === null ||
@@ -648,6 +739,13 @@ through the gh CLI; the plaintext never reaches your terminal.`,
       .option("--name <name>", "display name")
       .option("--model <id>", "default model id")
       .option("--system-prompt <text>", "system prompt prepended to every request")
+      .option("--codex-models <on|off>", "list this endpoint's models in Codex's /model picker")
+      .option("--codex-catalog <on|off>", "also list the provider catalog (Claude, Gemini, …) in Codex")
+      .option("--codex-catalog-limit <n>", "how many catalog models to list in Codex (default 40)")
+      .option("--codex-prompt <text|@file|reset>", "Codex system prompt; reset restores the vendored baseline")
+      .option("--codex-prompt-autoupdate <on|off>", "track new Codex baselines (default on); off pins the current one")
+      .option("--claude-prompt <text|@file|reset>", "Claude Code system prompt; reset restores the vendored baseline")
+      .option("--claude-prompt-autoupdate <on|off>", "track new Claude Code baselines (default on)")
       .option("--spend-limit <tokens|none>", "spend cap in Ditto tokens, or none")
       .addOption(new Option("--spend-period <period>", "window the spend cap resets on").choices(["daily", "weekly", "monthly", "yearly", "never"]))
       .option("--record-trace <on|off>", "store raw request/response traces")
@@ -658,7 +756,10 @@ through the gh CLI; the plaintext never reaches your terminal.`,
       .addOption(outputOption())
       .action(cmdEndpointSet),
     `  heyditto endpoints set my-endpoint --model openai/gpt-5.6-luna --record-trace on
-  heyditto endpoints set my-endpoint --spend-limit 5000000 --spend-period monthly`,
+  heyditto endpoints set my-endpoint --spend-limit 5000000 --spend-period monthly
+  heyditto endpoints set my-endpoint --codex-models on --codex-catalog on
+  heyditto endpoints set my-endpoint --codex-prompt @prompt.md
+  heyditto endpoints set my-endpoint --codex-prompt reset --codex-prompt-autoupdate off`,
   );
   endpoints
     .command("delete")

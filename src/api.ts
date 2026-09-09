@@ -106,6 +106,8 @@ export interface InferenceEndpoint {
   recordAttachments?: boolean;
   recallEnabled?: boolean;
   recordEnabled?: boolean;
+  /** Free-form per-provider settings, including the coding-agent keys. */
+  providerOptions?: Record<string, unknown>;
   tools?: string[];
   modelMode?: string;
   billingMode?: string;
@@ -127,7 +129,29 @@ export interface EndpointInput {
   recallEnabled?: boolean;
   recordEnabled?: boolean;
   memoryDepth?: number;
+  providerOptions?: Record<string, unknown>;
 }
+
+/**
+ * providerOptions keys that configure a coding agent on this endpoint. The
+ * gateway reads them per harness: `codex_models` puts the endpoint's models in
+ * Codex's `/model` picker, and the prompt keys decide what system prompt the
+ * agent runs on. `<harness>_system_prompt` replaces the vendored baseline
+ * (the harness's own prompt); an empty string means "send no prompt".
+ * Auto-update is on by default so an endpoint tracks the harness's current
+ * prompt; turning it off pins the endpoint where it is.
+ */
+export const CODING_AGENT_OPTION_KEYS = [
+  "codex_models",
+  "codex_catalog",
+  "codex_catalog_limit",
+  "codex_system_prompt",
+  "codex_prompt_autoupdate",
+  "codex_prompt_version",
+  "claude_system_prompt",
+  "claude_prompt_autoupdate",
+  "claude_prompt_version",
+] as const;
 
 export function isEndpointPending(e: InferenceEndpoint): boolean {
   return e.status === "pending_plan" || (e.status !== undefined && e.status !== "active");
