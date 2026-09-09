@@ -240,7 +240,8 @@ function codingAgentLines(endpoint: InferenceEndpoint): string[] {
     const prompt = options[`${harness}_system_prompt`];
     const auto = options[`${harness}_prompt_autoupdate`];
     const bits: string[] = [];
-    if (typeof prompt === "string") bits.push(prompt === "" ? "none (no system prompt)" : `custom (${prompt.length} chars)`);
+    const mode = options[`${harness}_prompt_mode`] === "append" ? "append" : "replace";
+    if (typeof prompt === "string") bits.push(prompt === "" ? "none (no system prompt)" : `${mode} (${prompt.length} chars)`);
     if (auto === false) bits.push("auto-update off");
     if (bits.length) lines.push(`${harness} prompt:  ${bits.join(", ")}`);
   }
@@ -302,8 +303,10 @@ interface EndpointSetOptions {
   codexCatalog?: string;
   codexCatalogLimit?: string;
   codexPrompt?: string;
+  codexPromptMode?: string;
   codexPromptAutoupdate?: string;
   claudePrompt?: string;
+  claudePromptMode?: string;
   claudePromptAutoupdate?: string;
   yes?: boolean;
 }
@@ -314,6 +317,13 @@ interface EndpointSetOptions {
  * back on the vendored baseline the harness ships with; an explicit empty
  * string means "send no system prompt at all".
  */
+/** Validates a prompt mode; a typo must not silently mean "replace". */
+function promptMode(flag: string, raw: string): string {
+  const value = raw.trim().toLowerCase();
+  if (value !== "append" && value !== "replace") throw new Error(`${flag} must be append or replace`);
+  return value;
+}
+
 async function promptValue(flag: string, raw: string | undefined): Promise<string | null | undefined> {
   if (raw === undefined) return undefined;
   const value = raw.trim();
@@ -380,10 +390,12 @@ export async function cmdEndpointSet(ref: string, options: EndpointSetOptions): 
   }
   const codexPrompt = await promptValue("--codex-prompt", options.codexPrompt);
   if (codexPrompt !== undefined) agent.codex_system_prompt = codexPrompt;
+  if (options.codexPromptMode !== undefined) agent.codex_prompt_mode = promptMode("--codex-prompt-mode", options.codexPromptMode);
   const codexAuto = onOff("--codex-prompt-autoupdate", options.codexPromptAutoupdate);
   if (codexAuto !== undefined) agent.codex_prompt_autoupdate = codexAuto;
   const claudePrompt = await promptValue("--claude-prompt", options.claudePrompt);
   if (claudePrompt !== undefined) agent.claude_system_prompt = claudePrompt;
+  if (options.claudePromptMode !== undefined) agent.claude_prompt_mode = promptMode("--claude-prompt-mode", options.claudePromptMode);
   const claudeAuto = onOff("--claude-prompt-autoupdate", options.claudePromptAutoupdate);
   if (claudeAuto !== undefined) agent.claude_prompt_autoupdate = claudeAuto;
 
@@ -743,8 +755,10 @@ through the gh CLI; the plaintext never reaches your terminal.`,
       .option("--codex-catalog <on|off>", "also list the provider catalog (Claude, Gemini, …) in Codex")
       .option("--codex-catalog-limit <n>", "how many catalog models to list in Codex (default 40)")
       .option("--codex-prompt <text|@file|reset>", "Codex system prompt; reset restores the vendored baseline")
+      .option("--codex-prompt-mode <append|replace>", "add the prompt to Codex's own, or replace it (default replace)")
       .option("--codex-prompt-autoupdate <on|off>", "track new Codex baselines (default on); off pins the current one")
       .option("--claude-prompt <text|@file|reset>", "Claude Code system prompt; reset restores the vendored baseline")
+      .option("--claude-prompt-mode <append|replace>", "add the prompt to Claude Code's own, or replace it (default replace)")
       .option("--claude-prompt-autoupdate <on|off>", "track new Claude Code baselines (default on)")
       .option("--spend-limit <tokens|none>", "spend cap in Ditto tokens, or none")
       .addOption(new Option("--spend-period <period>", "window the spend cap resets on").choices(["daily", "weekly", "monthly", "yearly", "never"]))
