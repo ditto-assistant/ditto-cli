@@ -6,12 +6,15 @@ import { DEFAULT_LAUNCH_EXPIRY, HARNESSES, type Harness, KEY_EXPIRIES, type KeyE
 import {
   type ChatAgent,
   type EndpointInput,
+  type EndpointUsage,
   type InferenceEndpoint,
+  USAGE_WINDOWS,
   createEndpoint,
   createKey,
   deleteEndpoint,
   findEndpoint,
   getEndpoint,
+  getEndpointUsage,
   isEndpointPending,
   listChatAgents,
   listEndpoints,
@@ -329,6 +332,55 @@ export async function cmdEndpointSet(ref: string, options: EndpointSetOptions): 
   }
   process.stdout.write(`Updated ${updated.slug}: ${Object.keys(patch).join(", ")}.\n`);
   await noteActivation([updated]);
+}
+
+function count(n: number): string {
+  return n.toLocaleString("en-US");
+}
+
+function usd(n: number): string {
+  return `$${n.toFixed(n !== 0 && Math.abs(n) < 0.01 ? 4 : 2)}`;
+}
+
+function usageCapLine(usage: EndpointUsage): string {
+  const cap = usage.spend;
+  const period = cap.period && cap.period !== "never" ? ` ${cap.period}` : " lifetime";
+  if (cap.limitTokens == null) return `${count(cap.spentTokens)} (${usd(cap.spentUsd)}) spent, no cap${period}`;
+  const left = cap.remainingTokens ?? Math.max(cap.limitTokens - cap.spentTokens, 0);
+  return `${count(cap.spentTokens)} / ${count(cap.limitTokens)}${period} (${usd(cap.spentUsd)} of ${usd(cap.limitUsd ?? cap.limitTokens / usage.tokensPerUsd)}; ${count(left)} left)`;
+}
+
+export async function cmdEndpointUsage(ref: string, options: { window?: string; output?: string }): Promise<void> {
+  const { endpoint } = await getEndpoint(ref);
+  const usage = await getEndpointUsage(endpoint.id, options.window);
+  if (isJSON(options)) {
+    process.stdout.write(`${JSON.stringify({ endpoint: { id: endpoint.id, slug: endpoint.slug }, ...usage }, null, 2)}\n`);
+    return;
+  }
+  const t = usage.totals;
+  const lines = [
+    `${endpoint.slug}  ${usage.window}  (${usage.since.slice(0, 10)} → ${usage.until.slice(0, 10)}, UTC)`,
+    `requests:  ${count(t.requests)}${t.failedRequests ? `  (${count(t.failedRequests)} failed)` : ""}`,
+    `tokens:    ${count(t.inputTokens)} in, ${count(t.outputTokens)} out${t.cachedTokens ? `, ${count(t.cachedTokens)} cached` : ""}`,
+    `spend:     ${count(t.spendTokens)} Ditto tokens (${usd(t.spendUsd)})${t.estimatedRequests ? `  (${count(t.estimatedRequests)} requests estimated from provider cost)` : ""}`,
+    `cap:       ${usageCapLine(usage)}`,
+  ];
+  process.stdout.write(`${lines.join("\n")}\n`);
+  if (usage.days.length > 0) {
+    process.stdout.write("\nBy day\n");
+    printTable(
+      ["DAY", "REQUESTS", "IN", "OUT", "SPEND"],
+      usage.days.map((d) => [d.day, count(d.requests), count(d.inputTokens), count(d.outputTokens), `${count(d.spendTokens)} (${usd(d.spendUsd)})`]),
+    );
+  }
+  if (usage.models.length > 0) {
+    process.stdout.write("\nBy model\n");
+    printTable(
+      ["PROVIDER", "MODEL", "REQUESTS", "IN", "OUT", "SPEND"],
+      usage.models.map((m) => [m.provider, m.model, count(m.requests), count(m.inputTokens), count(m.outputTokens), `${count(m.spendTokens)} (${usd(m.spendUsd)})`]),
+    );
+  }
+  if (t.requests === 0) process.stdout.write(`No gateway requests in this window. Point a client at ${endpoint.slug} and check back.\n`);
 }
 
 export async function cmdEndpointDelete(ref: string, options: { yes?: boolean; output?: string }): Promise<void> {
@@ -659,6 +711,17 @@ through the gh CLI; the plaintext never reaches your terminal.`,
       .action(cmdEndpointSet),
     `  heyditto endpoints set my-endpoint --model openai/gpt-5.6-luna --record-trace on
   heyditto endpoints set my-endpoint --spend-limit 5000000 --spend-period monthly`,
+  );
+  addExamples(
+    endpoints
+      .command("usage")
+      .description("show an endpoint's requests, tokens and Ditto-token spend, per day and per model, plus its spend cap")
+      .argument("<endpoint>", "endpoint slug or id")
+      .addOption(new Option("--window <window>", "trailing 7d or 30d (default), or the UTC calendar month to date").choices([...USAGE_WINDOWS]))
+      .addOption(outputOption())
+      .action(cmdEndpointUsage),
+    `  heyditto endpoints usage my-endpoint
+  heyditto endpoints usage my-endpoint --window 7d --output json`,
   );
   endpoints
     .command("delete")

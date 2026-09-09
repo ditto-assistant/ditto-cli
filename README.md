@@ -404,6 +404,7 @@ heyditto endpoints open [endpoint]         open the editor in the Ditto app
 heyditto endpoints set <endpoint> --model … --system-prompt … --spend-limit <tokens|none>
                                    --spend-period … --record-trace on|off --recall on|off
                                    --record on|off --memory-depth <n>
+heyditto endpoints usage <endpoint> [--window 7d|30d|month]   requests, tokens, spend and cap
 heyditto endpoints delete <endpoint> [--yes]
 heyditto endpoints keys <endpoint>         list keys
 heyditto endpoints keys create <endpoint> --store <destination> --secret <NAME> [scoping flags]

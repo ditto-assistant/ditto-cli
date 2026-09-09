@@ -94,6 +94,28 @@ function startStub({ endpoints = [ALPHA, BETA], tokenPollsUntilOk = 2 } = {}) {
         const input = JSON.parse(body || "{}");
         return json(201, { ...BETA, id: "33333333-3333-3333-3333-333333333333", slug: input.slug ?? "endpoint-3", name: input.name ?? "Endpoint 3", model: input.model ?? "openai/gpt-5.6-luna" });
       }
+      const usage = req.url.match(/^\/api\/v5\/inference\/endpoints\/([^/]+)\/usage(?:\?window=([^&]+))?$/);
+      if (usage && req.method === "GET") {
+        const window = usage[2] ?? "30d";
+        if (!["7d", "30d", "month"].includes(window)) return json(400, { message: "window must be one of 7d, 30d, month" });
+        return json(200, {
+          endpointId: usage[1],
+          window,
+          since: "2026-09-02T13:04:05Z",
+          until: "2026-09-09T13:04:05Z",
+          tokensPerUsd: 1000000000,
+          totals: { requests: 1234, failedRequests: 2, inputTokens: 2500000, outputTokens: 310000, cachedTokens: 900000, spendTokens: 4500000000, spendUsd: 4.5, estimatedRequests: 1 },
+          days: [
+            { day: "2026-09-08", requests: 1000, failedRequests: 2, inputTokens: 2000000, outputTokens: 250000, cachedTokens: 700000, spendTokens: 3500000000, spendUsd: 3.5 },
+            { day: "2026-09-09", requests: 234, failedRequests: 0, inputTokens: 500000, outputTokens: 60000, cachedTokens: 200000, spendTokens: 1000000000, spendUsd: 1 },
+          ],
+          models: [
+            { provider: "gm", model: "claude-opus-5", requests: 1200, failedRequests: 2, inputTokens: 2400000, outputTokens: 300000, cachedTokens: 900000, spendTokens: 4400000000, spendUsd: 4.4 },
+            { provider: "openrouter", model: "openai/gpt-5.6-luna", requests: 34, failedRequests: 0, inputTokens: 100000, outputTokens: 10000, cachedTokens: 0, spendTokens: 100000000, spendUsd: 0.1 },
+          ],
+          spend: { limitTokens: 1000000, limitUsd: 0.001, period: "monthly", spentTokens: 25000, spentUsd: 0.000025, remainingTokens: 975000, remainingUsd: 0.000975, windowStart: "2026-09-01T00:00:00Z" },
+        });
+      }
       const m = req.url.match(/^\/api\/v5\/inference\/endpoints\/([^/]+)(\/keys(?:\/([^/]+))?)?$/);
       if (m && req.method === "PATCH") {
         const patch = JSON.parse(body);
@@ -228,6 +250,10 @@ test("endpoints group help works without auth", () => {
   for (const sub of ["list", "create", "show", "use", "pick", "open", "set", "delete", "keys"]) {
     assert.match(top.stdout, new RegExp(`^\\s+${sub}\\b`, "m"), `missing subcommand ${sub}`);
   }
+  const usage = run(["endpoints", "usage", "--help"]);
+  assert.equal(usage.status, 0);
+  assert.match(usage.stdout, /Usage: heyditto endpoints usage/);
+  assert.match(usage.stdout, /--window <window>/);
   const keysCreate = run(["endpoints", "keys", "create", "--help"]);
   assert.equal(keysCreate.status, 0, keysCreate.stderr);
   assert.match(keysCreate.stdout, /Usage: heyditto endpoints keys create/);
@@ -286,6 +312,48 @@ test("endpoints list --output json and bare endpoints --set-default still work",
     const openDefault = await runAsync(["endpoints", "open", "--print"], env);
     assert.equal(openDefault.status, 0, openDefault.stderr);
     assert.equal(openDefault.stdout.trim(), "https://developer.heyditto.ai/endpoints/22222222-2222-2222-2222-222222222222");
+  } finally {
+    stub.close();
+  }
+});
+
+test("endpoints usage reads the ledger for one endpoint and honours --window", async () => {
+  const stub = await startStub();
+  const configDir = mkdtempSync(path.join(os.tmpdir(), "heyditto-funnel-cfg-"));
+  writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ apiKey: "ditto_mcp_test" }));
+  const env = { DITTO_API_BASE: stub.base, DITTO_CONFIG_DIR: configDir };
+  try {
+    const human = await runAsync(["endpoints", "usage", "alpha", "--window", "7d"], env);
+    assert.equal(human.status, 0, human.stderr);
+    assert.match(human.stdout, /^alpha  7d  \(2026-09-02 → 2026-09-09, UTC\)/);
+    assert.match(human.stdout, /requests:\s+1,234\s+\(2 failed\)/);
+    assert.match(human.stdout, /tokens:\s+2,500,000 in, 310,000 out, 900,000 cached/);
+    assert.match(human.stdout, /spend:\s+4,500,000,000 Ditto tokens \(\$4\.50\)\s+\(1 requests estimated from provider cost\)/);
+    assert.match(human.stdout, /cap:\s+25,000 \/ 1,000,000 monthly \(\$0\.0000 of \$0\.0010; 975,000 left\)/);
+    assert.match(human.stdout, /By day\nDAY\s+REQUESTS\s+IN\s+OUT\s+SPEND\n2026-09-08\s+1,000\s+2,000,000\s+250,000\s+3,500,000,000 \(\$3\.50\)/);
+    assert.match(human.stdout, /By model\nPROVIDER\s+MODEL\s+REQUESTS\s+IN\s+OUT\s+SPEND\ngm\s+claude-opus-5\s+1,200/);
+    assert.match(human.stdout, /openrouter\s+openai\/gpt-5\.6-luna\s+34/);
+    const usageCalls = stub.calls.filter((c) => c.url.includes("/usage"));
+    assert.equal(usageCalls.length, 1);
+    assert.equal(usageCalls[0].url, `/api/v5/inference/endpoints/${ALPHA.id}/usage?window=7d`);
+
+    const json = await runAsync(["endpoints", "usage", ALPHA.id, "--output", "json"], env);
+    assert.equal(json.status, 0, json.stderr);
+    const parsed = JSON.parse(json.stdout);
+    assert.deepEqual(parsed.endpoint, { id: ALPHA.id, slug: "alpha" });
+    assert.equal(parsed.window, "30d");
+    assert.equal(parsed.totals.spendTokens, 4500000000);
+    assert.equal(parsed.days.length, 2);
+    assert.equal(parsed.spend.remainingTokens, 975000);
+    assert.equal(stub.calls.filter((c) => c.url.includes("/usage")).at(-1).url, `/api/v5/inference/endpoints/${ALPHA.id}/usage`);
+
+    const badWindow = await runAsync(["endpoints", "usage", "alpha", "--window", "90d"], env);
+    assert.notEqual(badWindow.status, 0);
+    assert.match(badWindow.stderr, /Allowed choices are 7d, 30d, month/);
+
+    const missing = await runAsync(["endpoints", "usage", "nope"], env);
+    assert.notEqual(missing.status, 0);
+    assert.match(missing.stderr, /no endpoint named "nope"/);
   } finally {
     stub.close();
   }

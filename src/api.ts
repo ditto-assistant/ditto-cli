@@ -228,6 +228,66 @@ export async function revokeKey(endpointId: string, keyId: string): Promise<void
   );
 }
 
+/** Usage windows accepted by GET /api/v5/inference/endpoints/{id}/usage. */
+export const USAGE_WINDOWS = ["7d", "30d", "month"] as const;
+export type UsageWindow = (typeof USAGE_WINDOWS)[number];
+
+export interface EndpointUsageLine {
+  requests: number;
+  failedRequests: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedTokens: number;
+  /** Ditto tokens the gateway billed (1 USD = tokensPerUsd). */
+  spendTokens: number;
+  spendUsd: number;
+}
+
+export interface EndpointUsageTotals extends EndpointUsageLine {
+  /** Rows recorded before the ledger carried the billed amount; estimated from provider cost. */
+  estimatedRequests?: number;
+}
+
+export interface EndpointUsageDay extends EndpointUsageLine {
+  /** UTC calendar day, YYYY-MM-DD. */
+  day: string;
+}
+
+export interface EndpointUsageModel extends EndpointUsageLine {
+  provider: string;
+  model: string;
+}
+
+/** The endpoint's live spend cap, independent of the requested window. */
+export interface EndpointUsageSpend {
+  limitTokens: number | null;
+  limitUsd: number | null;
+  period: string;
+  spentTokens: number;
+  spentUsd: number;
+  remainingTokens: number | null;
+  remainingUsd: number | null;
+  windowStart: string;
+}
+
+export interface EndpointUsage {
+  endpointId: string;
+  window: UsageWindow | string;
+  since: string;
+  until: string;
+  tokensPerUsd: number;
+  totals: EndpointUsageTotals;
+  days: EndpointUsageDay[];
+  models: EndpointUsageModel[];
+  spend: EndpointUsageSpend;
+}
+
+export async function getEndpointUsage(endpointId: string, window?: string): Promise<EndpointUsage> {
+  const query = window ? `?window=${encodeURIComponent(window)}` : "";
+  const res = await apiFetch<EndpointUsage>(`${endpointPath(endpointId)}/usage${query}`);
+  return { ...res, days: res.days ?? [], models: res.models ?? [] };
+}
+
 export interface InferenceSession {
   id: string;
   endpointId: string;
