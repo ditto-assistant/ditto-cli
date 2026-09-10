@@ -1274,7 +1274,14 @@ export function registerHarnessCommands(program: Command, addExamples: (c: Comma
       .option("-c, --continue", `continue the most recent ${harness} conversation in this directory`)
       .option("--yolo", `bypass all permission prompts (${harness === "claude" ? "--dangerously-skip-permissions" : "--dangerously-bypass-approvals-and-sandbox"})`)
       .option("--yellow", `auto-accept edits (${harness === "claude" ? "--permission-mode acceptEdits" : "-a on-request -s workspace-write"})`)
-      .option("-p, --prompt <text>", `headless run (${harness === "claude" ? "claude -p" : "codex exec"}); pair with --output-format etc.`)
+      // The machine-readable flag differs per harness: Claude Code takes
+      // --output-format, Codex takes --json. Naming the wrong one sends people
+      // to "error: unexpected argument", which is what this used to do for
+      // Codex.
+      .option(
+        "-p, --prompt <text>",
+        `headless run (${harness === "claude" ? "claude -p" : "codex exec"}); pair with ${harness === "claude" ? "--output-format json" : "--json"} for machine-readable output`,
+      )
       .option("-m, --model <id>", `model id (default: let the endpoint route ${harness === "codex" ? "Codex's" : "Claude's"} own model ids)`)
       .option("-w, --worktree [name]", "run inside <repo>/.worktrees/<name> (created on a branch of the same name)")
       .option("--name <label>", "key name shown in the Ditto app (default: cli:<harness>:<hostname>)")
@@ -1290,7 +1297,7 @@ export function registerHarnessCommands(program: Command, addExamples: (c: Comma
       `  heyditto ${harness}                       first run: sign in + pick an endpoint in the browser, then launch
   heyditto ${harness} --endpoint my-endpoint --budget 500000
   heyditto ${harness} --yellow --worktree feature-x
-  heyditto ${harness} -p "summarize this repo" --output-format json
+  heyditto ${harness} -p "summarize this repo" ${harness === "claude" ? "--output-format json" : "--json"}
   heyditto ${harness} --resume                 reopen the last session in its thread
   heyditto ${harness} -- --verbose             forward flags to ${harness}
   (see also: heyditto ${other})`,
