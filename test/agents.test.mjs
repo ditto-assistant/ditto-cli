@@ -355,3 +355,39 @@ test("helpers: separator, api root, worktree names", async () => {
   assert.equal(await ensureGitignore(root), false);
   assert.match(readFileSync(path.join(root, ".gitignore"), "utf8"), /^\.worktrees\/$/m);
 });
+
+// A headless run that also asks to resume means "reopen this thread and run
+// one turn in it", which codex spells `exec resume`. Emitting only `exec`
+// silently started a fresh conversation: the agent answered "I don't know" to
+// a question about its own earlier turn, and exited 0.
+test("planCodex combines a headless prompt with resume", () => {
+  const base = {
+    baseUrl: "https://inference.heyditto.ai/v1",
+    apiKey: "k",
+    sessionId: "s1",
+    passthrough: [],
+  };
+
+  const last = planCodex({ ...base, prompt: "recall", resumeLast: true });
+  assert.equal(last.args[0], "exec");
+  assert.equal(last.args[1], "resume", "resume must survive alongside a prompt");
+  assert.equal(last.args.at(-1), "recall", "the prompt is the trailing argument");
+  assert.ok(last.args.includes("--last"), "--last selects the most recent session");
+
+  const byId = planCodex({ ...base, prompt: "recall", resumeId: "01a07bf3-b403-73a2-8602-abd9fd0dd5db" });
+  assert.equal(byId.args[0], "exec");
+  assert.equal(byId.args[1], "resume");
+  // `exec resume [SESSION_ID] [PROMPT]` — the id comes before the prompt.
+  assert.deepEqual(byId.args.slice(-2), ["01a07bf3-b403-73a2-8602-abd9fd0dd5db", "recall"]);
+  assert.ok(!byId.args.includes("--last"), "an explicit id must not also pass --last");
+
+  // The un-combined forms are unchanged.
+  const promptOnly = planCodex({ ...base, prompt: "hi" });
+  assert.equal(promptOnly.args[0], "exec");
+  assert.ok(!promptOnly.args.includes("resume"));
+  assert.equal(promptOnly.args.at(-1), "hi");
+
+  const resumeOnly = planCodex({ ...base, resumeLast: true });
+  assert.equal(resumeOnly.args[0], "resume");
+  assert.ok(resumeOnly.args.includes("--last"));
+});
