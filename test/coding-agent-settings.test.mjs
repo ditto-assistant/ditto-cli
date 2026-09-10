@@ -173,7 +173,7 @@ test("endpoints show reports the coding-agent settings", async () => {
     const out = await run(stub.base, ["endpoints", "show", "alpha"]);
     assert.equal(out.status, 0, out.stderr);
     assert.match(out.stdout, /codex picker:\s+on\s+\(catalog 12\)/);
-    assert.match(out.stdout, /codex prompt:\s+custom \(3 chars\)/);
+    assert.match(out.stdout, /codex prompt:\s+replace \(3 chars\)/);
     assert.match(out.stdout, /claude prompt:\s+auto-update off/);
   } finally {
     stub.close();
@@ -197,6 +197,55 @@ test("a bad --codex-catalog-limit is rejected before anything is written", async
     const out = await run(stub.base, ["endpoints", "set", "alpha", "--codex-catalog-limit", "-3"]);
     assert.notEqual(out.status, 0);
     assert.equal(stub.calls.some((c) => c.method === "PATCH"), false);
+  } finally {
+    stub.close();
+  }
+});
+
+test("--codex-prompt-mode append is written alongside the prompt", async () => {
+  const stub = await startStub();
+  try {
+    const out = await run(stub.base, ["endpoints", "set", "alpha", "--codex-prompt", "HOUSE", "--codex-prompt-mode", "append"]);
+    assert.equal(out.status, 0, out.stderr);
+    assert.deepEqual(patchOf(stub).providerOptions, { codex_system_prompt: "HOUSE", codex_prompt_mode: "append" });
+  } finally {
+    stub.close();
+  }
+});
+
+test("prompt mode works for every harness", async () => {
+  const stub = await startStub();
+  try {
+    const out = await run(stub.base, ["endpoints", "set", "alpha", "--claude-prompt-mode", "replace", "--codex-prompt-mode", "append"]);
+    assert.equal(out.status, 0, out.stderr);
+    assert.deepEqual(patchOf(stub).providerOptions, { claude_prompt_mode: "replace", codex_prompt_mode: "append" });
+  } finally {
+    stub.close();
+  }
+});
+
+test("a mistyped prompt mode is rejected before anything is written", async () => {
+  const stub = await startStub();
+  try {
+    const out = await run(stub.base, ["endpoints", "set", "alpha", "--codex-prompt-mode", "prepend"]);
+    assert.notEqual(out.status, 0);
+    assert.match(out.stderr, /must be append or replace/);
+    assert.equal(stub.calls.some((c) => c.method === "PATCH"), false, "a typo must not silently mean replace");
+  } finally {
+    stub.close();
+  }
+});
+
+test("endpoints show reports which mode is in force", async () => {
+  const stub = await startStub({
+    ...ENDPOINT,
+    providerOptions: { codex_system_prompt: "abc", codex_prompt_mode: "append", claude_system_prompt: "xyz" },
+  });
+  try {
+    const out = await run(stub.base, ["endpoints", "show", "alpha"]);
+    assert.equal(out.status, 0, out.stderr);
+    assert.match(out.stdout, /codex prompt:\s+append \(3 chars\)/);
+    assert.match(out.stdout, /claude prompt:\s+replace \(3 chars\)/);
   } finally {
     stub.close();
   }
