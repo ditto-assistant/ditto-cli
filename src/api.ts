@@ -500,3 +500,49 @@ export async function sessionSystemPrompt(sessionId: string): Promise<{ systemPr
   );
   return { systemPrompt: res.systemPrompt ?? "", hash: res.hash ?? "" };
 }
+
+/** One saving strategy's contribution over the window. */
+export interface SavingsLine {
+  strategy: string;
+  requests?: number;
+  tokensSaved?: number;
+  usdSaved?: number;
+}
+
+/** What the gateway's routing and compaction saved on an endpoint. */
+export interface EndpointSavings {
+  windowDays?: number;
+  requests?: number;
+  tokensSaved?: number;
+  usdSaved?: number;
+  usdBilled?: number;
+  trackedSince?: string;
+  byStrategy?: SavingsLine[];
+}
+
+/** One model id a harness actually asked this endpoint for. */
+export interface ModelSeen {
+  requested: string;
+  resolvedModel?: string;
+  count?: number;
+  kinds?: Record<string, number>;
+  lastSeenAt?: string;
+}
+
+export async function endpointSavings(endpointId: string, windowDays?: number): Promise<EndpointSavings> {
+  const query = windowDays ? `?days=${windowDays}` : "";
+  return apiFetch<EndpointSavings>(`${endpointPath(endpointId)}/savings${query}`);
+}
+
+export async function endpointModelsSeen(endpointId: string): Promise<ModelSeen[]> {
+  const res = await apiFetch<{ models?: ModelSeen[] }>(`${endpointPath(endpointId)}/models-seen`);
+  return res.models ?? [];
+}
+
+/**
+ * Moves an endpoint between an organization and personal ownership. A null
+ * companyId moves it out; its keys follow either way.
+ */
+export async function moveEndpoint(endpointId: string, companyId: string | null): Promise<InferenceEndpoint> {
+  return apiFetch<InferenceEndpoint>(`${endpointPath(endpointId)}/move`, { method: "POST", body: { companyId } });
+}

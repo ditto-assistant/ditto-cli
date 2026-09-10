@@ -7,11 +7,16 @@ import { DEFAULT_LAUNCH_EXPIRY, HARNESSES, type Harness, KEY_EXPIRIES, type KeyE
 import {
   ENDPOINT_CHOICES,
   type EndpointSession,
+  type ModelSeen,
+  type SavingsLine,
   type EndpointTrace,
   type InferenceToolInfo,
   listInferenceTools,
+  endpointModelsSeen,
+  endpointSavings,
   listEndpointSessions,
   listTraces,
+  moveEndpoint,
   sessionSystemPrompt,
   type ChatAgent,
   type EndpointInput,
@@ -381,6 +386,78 @@ export async function cmdEndpointSystemPrompt(sessionId: string, options: { outp
   }
   process.stderr.write(`# session ${sessionId}  hash ${hash.slice(0, 12)}  ${systemPrompt.length} chars\n`);
   process.stdout.write(systemPrompt.endsWith("\n") ? systemPrompt : `${systemPrompt}\n`);
+}
+
+/** `endpoints savings` — what routing and compaction actually saved. */
+export async function cmdEndpointSavings(ref: string, options: { output?: string; days?: string }): Promise<void> {
+  const { endpoint } = await getEndpoint(ref);
+  const days = options.days === undefined ? undefined : intFlag("--days", options.days, 1, 365);
+  const savings = await endpointSavings(endpoint.id, days);
+  if (isJSON(options)) return writeJSON(savings);
+  const usd = (n: number | undefined) => `$${(n ?? 0).toFixed(2)}`;
+  process.stdout.write(
+    `${endpoint.slug} — last ${savings.windowDays ?? days ?? 30} days\n` +
+      `requests:      ${(savings.requests ?? 0).toLocaleString()}\n` +
+      `tokens saved:  ${(savings.tokensSaved ?? 0).toLocaleString()}\n` +
+      `usd saved:     ${usd(savings.usdSaved)}  (billed ${usd(savings.usdBilled)})\n`,
+  );
+  const lines = savings.byStrategy ?? [];
+  if (lines.length > 0) {
+    const rows = lines.map((l: SavingsLine) => [
+      l.strategy,
+      (l.requests ?? 0).toLocaleString(),
+      (l.tokensSaved ?? 0).toLocaleString(),
+      usd(l.usdSaved),
+    ]);
+    process.stdout.write(`\n${columns(["STRATEGY", "REQUESTS", "TOKENS SAVED", "USD SAVED"], rows)}\n`);
+  }
+}
+
+/**
+ * `endpoints models-seen` — the model ids harnesses actually asked for, and
+ * what each resolved to. This is how you find out that a harness is asking
+ * for a model you never configured, which is what aliases and model routes
+ * exist to redirect.
+ */
+export async function cmdEndpointModelsSeen(ref: string, options: { output?: string }): Promise<void> {
+  const { endpoint } = await getEndpoint(ref);
+  const models = await endpointModelsSeen(endpoint.id);
+  if (isJSON(options)) return writeJSON(models);
+  if (models.length === 0) {
+    process.stdout.write(`no model requests recorded on ${endpoint.slug}\n`);
+    return;
+  }
+  const rows = models.map((m: ModelSeen) => [
+    m.requested,
+    m.resolvedModel === m.requested ? "" : (m.resolvedModel ?? ""),
+    (m.count ?? 0).toLocaleString(),
+    Object.keys(m.kinds ?? {}).sort().join(","),
+    ago(m.lastSeenAt),
+  ]);
+  process.stdout.write(`${columns(["REQUESTED", "RESOLVED TO", "CALLS", "KINDS", "LAST SEEN"], rows)}\n`);
+  process.stderr.write(`\nredirect one with: heyditto endpoints set ${endpoint.slug} --model-route ${models[0].requested}=<provider-model>\n`);
+}
+
+/** `endpoints move` — hand an endpoint to an organization, or take it back. */
+export async function cmdEndpointMove(ref: string, options: { output?: string; company?: string; personal?: boolean; yes?: boolean }): Promise<void> {
+  if (!options.personal && !options.company) {
+    throw new Error("pass --company <id> to move it into an organization, or --personal to move it out");
+  }
+  if (options.personal && options.company) {
+    throw new Error("--company and --personal are opposites; pass one");
+  }
+  const { endpoint } = await getEndpoint(ref);
+  const target = options.personal ? null : (options.company ?? "").trim();
+  // Ownership decides who can read this endpoint's traces and who pays for
+  // it, so it is not a change to make on a mistyped slug.
+  await confirmElevated(
+    target === null ? "move to personal ownership" : `move into organization ${target}`,
+    endpoint.slug,
+    options.yes,
+  );
+  const moved = await moveEndpoint(endpoint.id, target);
+  if (isJSON(options)) return writeJSON(moved);
+  process.stdout.write(`Moved ${moved.slug} ${target === null ? "to personal ownership" : `into organization ${target}`}.\n`);
 }
 
 export async function cmdEndpointUse(ref: string, options: { output?: string }): Promise<void> {
@@ -946,6 +1023,28 @@ through the gh CLI; the plaintext never reaches your terminal.`,
     .argument("<endpoint>", "endpoint slug or id")
     .addOption(outputOption())
     .action(cmdEndpointShow);
+  endpoints
+    .command("savings")
+    .description("what routing and compaction saved on an endpoint")
+    .argument("<endpoint>", "endpoint slug or id")
+    .option("--days <n>", "window in days (default 30)")
+    .addOption(outputOption())
+    .action(cmdEndpointSavings);
+  endpoints
+    .command("models-seen")
+    .description("model ids harnesses asked for, and what each resolved to")
+    .argument("<endpoint>", "endpoint slug or id")
+    .addOption(outputOption())
+    .action(cmdEndpointModelsSeen);
+  endpoints
+    .command("move")
+    .description("move an endpoint into an organization, or back to personal")
+    .argument("<endpoint>", "endpoint slug or id")
+    .option("--company <id>", "organization to move it into")
+    .option("--personal", "move it out of its organization")
+    .option("--yes", "skip the confirmation")
+    .addOption(outputOption())
+    .action(cmdEndpointMove);
   endpoints
     .command("tools")
     .description("list the server-side tools an endpoint can offer (for --tools)")
