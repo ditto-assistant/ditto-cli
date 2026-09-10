@@ -111,6 +111,21 @@ export interface InferenceEndpoint {
   tools?: string[];
   modelMode?: string;
   billingMode?: string;
+  routingMode?: string;
+  streamGranularity?: string;
+  contextCompaction?: string;
+  resultCompression?: string;
+  toolCompression?: boolean;
+  precompactAtTokens?: number;
+  traceRetentionDays?: number;
+  batchEnabled?: boolean;
+  batchMaxRequests?: number;
+  /** Request archetype (chat, tool_round, aside, …) → provider model id. */
+  kindRoutes?: Record<string, string>;
+  /** Requested model id, exactly as a harness sends it → provider model id. */
+  modelRoutes?: Record<string, string>;
+  /** Friendly alias name → provider model id. */
+  aliases?: Record<string, string>;
   status?: EndpointStatus | string;
   activation?: EndpointActivation;
   createdAt?: string;
@@ -126,11 +141,59 @@ export interface EndpointInput {
   spendLimitTokens?: number | null;
   spendPeriod?: string;
   recordTrace?: boolean;
+  recordAttachments?: boolean;
   recallEnabled?: boolean;
   recordEnabled?: boolean;
   memoryDepth?: number;
+  maxToolRounds?: number;
+  modelMode?: string;
+  billingMode?: string;
+  routingMode?: string;
+  streamGranularity?: string;
+  contextCompaction?: string;
+  resultCompression?: string;
+  toolCompression?: boolean;
+  precompactAtTokens?: number;
+  traceRetentionDays?: number;
+  batchEnabled?: boolean;
+  batchMaxRequests?: number;
+  /**
+   * Route and alias maps are whole-map replacements on the server: whatever
+   * is sent becomes the stored map. The CLI therefore merges onto the
+   * endpoint's current map before sending (see cmdEndpointSet).
+   */
+  kindRoutes?: Record<string, string>;
+  modelRoutes?: Record<string, string>;
+  aliases?: Record<string, string>;
   providerOptions?: Record<string, unknown>;
 }
+
+/**
+ * Enums and bounds mirrored from the backend (pkg/services/inference), so the
+ * CLI can reject a typo locally instead of spending a round trip on a 400.
+ * Keep them in step with inference.Valid* — the server remains the authority.
+ */
+export const CONTEXT_COMPACTION_LEVELS = ["off", "light", "balanced", "aggressive"] as const;
+export const RESULT_COMPRESSION_LEVELS = ["off", "conservative", "grouped"] as const;
+export const ROUTING_MODES = ["cheap", "fast", "balanced"] as const;
+export const MODEL_MODES = ["default", "passthrough"] as const;
+export const BILLING_MODES = ["ditto", "byok", "both"] as const;
+export const STREAM_GRANULARITIES = ["final", "tool", "full"] as const;
+export const SPEND_PERIODS = ["daily", "weekly", "monthly", "yearly", "never"] as const;
+/** Archetypes an endpoint may pin to a model (inference.RoutableKinds). */
+export const ROUTABLE_KINDS = ["chat", "tool_round", "aside", "compaction", "structured_output", "probe"] as const;
+
+export const MAX_MEMORY_DEPTH = 25;
+export const MAX_TOOL_ROUNDS = 32;
+export const MAX_BATCH_MAX_REQUESTS = 50_000;
+export const MAX_MODEL_ROUTES = 64;
+export const MAX_MODEL_ROUTE_LEN = 200;
+export const MAX_ALIASES = 32;
+export const MAX_ALIAS_TARGET_LEN = 200;
+/** precompact_at_tokens is an int32 column; keep a request inside it. */
+export const MAX_PRECOMPACT_AT_TOKENS = 2_147_483_647;
+/** inference.traceRetentionMaxDays — the absolute ceiling, before plan clamping. */
+export const MAX_TRACE_RETENTION_DAYS = 3650;
 
 /**
  * providerOptions keys that configure a coding agent on this endpoint. The

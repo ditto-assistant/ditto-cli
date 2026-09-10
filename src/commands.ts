@@ -5,9 +5,25 @@ import { launchHarness, pickEndpoint } from "./agents/launch.js";
 import { listSessions, removeSession } from "./agents/sessions.js";
 import { DEFAULT_LAUNCH_EXPIRY, HARNESSES, type Harness, KEY_EXPIRIES, type KeyExpiry, apiRootOf } from "./agents/types.js";
 import {
+  BILLING_MODES,
+  CONTEXT_COMPACTION_LEVELS,
   type ChatAgent,
   type EndpointInput,
   type InferenceEndpoint,
+  MAX_ALIASES,
+  MAX_ALIAS_TARGET_LEN,
+  MAX_BATCH_MAX_REQUESTS,
+  MAX_MEMORY_DEPTH,
+  MAX_MODEL_ROUTES,
+  MAX_MODEL_ROUTE_LEN,
+  MAX_PRECOMPACT_AT_TOKENS,
+  MAX_TOOL_ROUNDS,
+  MAX_TRACE_RETENTION_DAYS,
+  MODEL_MODES,
+  RESULT_COMPRESSION_LEVELS,
+  ROUTABLE_KINDS,
+  ROUTING_MODES,
+  STREAM_GRANULARITIES,
   createEndpoint,
   createKey,
   deleteEndpoint,
@@ -208,7 +224,15 @@ export async function cmdEndpointShow(ref: string, options: { output?: string })
     `status:        ${endpoint.status ?? "active"}`,
     `spend:         ${spendColumn(endpoint)}`,
     `memory:        recall ${endpoint.recallEnabled === false ? "off" : "on"}, record ${endpoint.recordEnabled === false ? "off" : "on"}${endpoint.memoryDepth !== undefined ? `, depth ${endpoint.memoryDepth}` : ""}`,
-    `traces:        ${endpoint.recordTrace ? "on" : "off"}`,
+    `traces:        ${endpoint.recordTrace ? "on" : "off"}, attachments ${flagWord(endpoint.recordAttachments)}, kept ${retentionWord(endpoint.traceRetentionDays)}`,
+    `routing:       ${textWord(endpoint.routingMode)}, model mode ${textWord(endpoint.modelMode)}, billing ${textWord(endpoint.billingMode)}`,
+    `compaction:    context ${textWord(endpoint.contextCompaction)}, results ${textWord(endpoint.resultCompression)}, tools ${flagWord(endpoint.toolCompression)}, precompact ${precompactWord(endpoint.precompactAtTokens)}`,
+    `tool rounds:   ${endpoint.maxToolRounds ?? "unset"}`,
+    `stream:        ${textWord(endpoint.streamGranularity)}`,
+    `batches:       ${flagWord(endpoint.batchEnabled)}${endpoint.batchMaxRequests !== undefined ? `, max ${endpoint.batchMaxRequests || "unlimited"} per batch` : ""}`,
+    `kind routes:   ${mapWord(endpoint.kindRoutes)}`,
+    `model routes:  ${mapWord(endpoint.modelRoutes)}`,
+    `aliases:       ${mapWord(endpoint.aliases)}`,
     `tools:         ${(endpoint.tools ?? []).join(", ") || "(none)"}`,
     `gateway:       ${catalog.baseUrl}`,
     `web:           ${endpointURL(endpoint.id)}`,
@@ -217,6 +241,39 @@ export async function cmdEndpointShow(ref: string, options: { output?: string })
   lines.push(...codingAgentLines(endpoint));
   process.stdout.write(`${lines.join("\n")}\n`);
   await noteActivation([endpoint]);
+}
+
+/**
+ * Display helpers for `endpoints show`. A field the server did not send reads
+ * as "unset" rather than being guessed at a default, so the text view never
+ * claims a setting the endpoint may not actually have.
+ */
+function flagWord(v: boolean | undefined): string {
+  return v === undefined ? "unset" : v ? "on" : "off";
+}
+
+function textWord(v: string | undefined): string {
+  return v && v.trim() !== "" ? v : "unset";
+}
+
+function retentionWord(days: number | undefined): string {
+  if (days === undefined) return "unset";
+  return days === 0 ? "forever" : `${days} days`;
+}
+
+function precompactWord(tokens: number | undefined): string {
+  if (tokens === undefined) return "unset";
+  return tokens === 0 ? "off" : `${tokens.toLocaleString()} tokens`;
+}
+
+/** `a=x, b=y` in key order, so two runs of `show` diff cleanly. */
+function mapWord(map: Record<string, string> | undefined): string {
+  const entries = Object.entries(map ?? {});
+  if (entries.length === 0) return "(none)";
+  return entries
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([k, v]) => `${k}=${v}`)
+    .join(", ");
 }
 
 /**
@@ -295,9 +352,28 @@ interface EndpointSetOptions {
   spendLimit?: string;
   spendPeriod?: string;
   recordTrace?: string;
+  recordAttachments?: string;
   recall?: string;
   record?: string;
   memoryDepth?: string;
+  maxToolRounds?: string;
+  modelMode?: string;
+  billingMode?: string;
+  routing?: string;
+  streamGranularity?: string;
+  contextCompaction?: string;
+  resultCompression?: string;
+  toolCompression?: string;
+  precompactAt?: string;
+  traceRetention?: string;
+  batch?: string;
+  batchMaxRequests?: string;
+  kindRoute?: string[];
+  modelRoute?: string[];
+  alias?: string[];
+  clearKindRoutes?: boolean;
+  clearModelRoutes?: boolean;
+  clearAliases?: boolean;
   codexModels?: string;
   codexCatalog?: string;
   codexCatalogLimit?: string;
@@ -337,6 +413,98 @@ function onOff(flag: string, raw: string | undefined): boolean | undefined {
   throw new Error(`${flag} must be on or off`);
 }
 
+/** Reads a bounded integer flag; separators are tolerated (50_000, 50,000). */
+function intValue(flag: string, raw: string | undefined, min: number, max: number): number | undefined {
+  if (raw === undefined) return undefined;
+  const n = Number(raw.trim().replace(/[_,]/g, ""));
+  if (!Number.isInteger(n) || n < min || n > max) {
+    throw new Error(`${flag} must be an integer from ${min} to ${max}, got "${raw}"`);
+  }
+  return n;
+}
+
+/**
+ * commander collector for a repeatable option. The default lives on the
+ * parameter rather than on `.option(..., [])` so `--help` does not advertise
+ * a meaningless "(default: [])" for every route flag.
+ */
+function collect(value: string, previous: string[] = []): string[] {
+  return [...previous, value];
+}
+
+/**
+ * Parses repeated `key=value` flags into a map. Only the first `=` splits, so
+ * a target may contain one. An empty value ("--kind-route aside=") marks the
+ * key for removal from the merged map, which is how a single route is cleared
+ * without rewriting the rest.
+ */
+function pairMap(flag: string, raw: string[] | undefined): Record<string, string> | undefined {
+  if (raw === undefined || raw.length === 0) return undefined;
+  const out: Record<string, string> = {};
+  for (const entry of raw) {
+    const at = entry.indexOf("=");
+    const key = at < 0 ? "" : entry.slice(0, at).trim();
+    if (!key) throw new Error(`${flag} must be key=value, got "${entry}"`);
+    out[key] = entry.slice(at + 1).trim();
+  }
+  return out;
+}
+
+/**
+ * Applies parsed `key=value` entries onto the endpoint's current map. The
+ * server stores these maps whole, so a patch that sent only the new entries
+ * would silently drop every route the user did not repeat on the command
+ * line. `clear` replaces the map with an empty one instead.
+ */
+function mergeMap(
+  current: Record<string, string> | undefined,
+  entries: Record<string, string> | undefined,
+  clear: boolean | undefined,
+): Record<string, string> | undefined {
+  if (clear) return {};
+  if (entries === undefined) return undefined;
+  const merged: Record<string, string> = { ...(current ?? {}) };
+  for (const [key, value] of Object.entries(entries)) {
+    if (value === "") delete merged[key];
+    else merged[key] = value;
+  }
+  return merged;
+}
+
+/** Alias names follow the endpoint slug rule (inference.ValidSlug). */
+const ALIAS_NAME = /^[a-z0-9][a-z0-9-]{1,63}$/;
+
+/** Mirrors validateKindRoutes / validateModelRoutes / validateAliases. */
+function checkRoutes(flag: string, map: Record<string, string>, limit: number, targetLen: number): void {
+  const size = Object.keys(map).length;
+  if (size > limit) throw new Error(`${flag}: at most ${limit} entries are allowed (got ${size})`);
+  for (const [key, target] of Object.entries(map)) {
+    if (key.length > MAX_MODEL_ROUTE_LEN) throw new Error(`${flag}: key "${key}" is longer than ${MAX_MODEL_ROUTE_LEN} characters`);
+    if (target.length > targetLen) throw new Error(`${flag}: target for "${key}" is longer than ${targetLen} characters`);
+  }
+}
+
+function checkKindRoutes(map: Record<string, string>): void {
+  for (const kind of Object.keys(map)) {
+    if (!(ROUTABLE_KINDS as readonly string[]).includes(kind)) {
+      throw new Error(`--kind-route: "${kind}" is not a routable request kind. Use one of: ${ROUTABLE_KINDS.join(", ")}`);
+    }
+  }
+  checkRoutes("--kind-route", map, ROUTABLE_KINDS.length, MAX_MODEL_ROUTE_LEN);
+}
+
+function checkAliases(map: Record<string, string>, slug: string): void {
+  for (const name of Object.keys(map)) {
+    if (!ALIAS_NAME.test(name)) {
+      throw new Error(`--alias: "${name}" must be 2-64 lowercase letters, digits or dashes and start with a letter or digit`);
+    }
+    if (name === slug || name === "ditto" || name === "auto") {
+      throw new Error(`--alias: "${name}" is reserved (the endpoint slug, "ditto" and "auto" cannot be aliased)`);
+    }
+  }
+  checkRoutes("--alias", map, MAX_ALIASES, MAX_ALIAS_TARGET_LEN);
+}
+
 export async function cmdEndpointSet(ref: string, options: EndpointSetOptions): Promise<void> {
   const patch: EndpointInput = {};
   if (options.name !== undefined) patch.name = options.name.trim();
@@ -361,9 +529,43 @@ export async function cmdEndpointSet(ref: string, options: EndpointSetOptions): 
   if (record !== undefined) patch.recordEnabled = record;
   if (options.memoryDepth !== undefined) {
     const n = Number(options.memoryDepth);
-    if (!Number.isInteger(n) || n < 0 || n > 25) throw new Error("--memory-depth must be an integer from 0 to 25");
+    if (!Number.isInteger(n) || n < 0 || n > MAX_MEMORY_DEPTH) throw new Error(`--memory-depth must be an integer from 0 to ${MAX_MEMORY_DEPTH}`);
     patch.memoryDepth = n;
   }
+  const recordAttachments = onOff("--record-attachments", options.recordAttachments);
+  if (recordAttachments !== undefined) patch.recordAttachments = recordAttachments;
+  const toolCompression = onOff("--tool-compression", options.toolCompression);
+  if (toolCompression !== undefined) patch.toolCompression = toolCompression;
+  const batch = onOff("--batch", options.batch);
+  if (batch !== undefined) patch.batchEnabled = batch;
+  // Enum flags are already constrained by commander's .choices(); trim so a
+  // quoted value with stray whitespace still matches the server's enum.
+  if (options.modelMode !== undefined) patch.modelMode = options.modelMode.trim();
+  if (options.billingMode !== undefined) patch.billingMode = options.billingMode.trim();
+  if (options.routing !== undefined) patch.routingMode = options.routing.trim();
+  if (options.streamGranularity !== undefined) patch.streamGranularity = options.streamGranularity.trim();
+  if (options.contextCompaction !== undefined) patch.contextCompaction = options.contextCompaction.trim();
+  if (options.resultCompression !== undefined) patch.resultCompression = options.resultCompression.trim();
+  const maxToolRounds = intValue("--max-tool-rounds", options.maxToolRounds, 0, MAX_TOOL_ROUNDS);
+  if (maxToolRounds !== undefined) patch.maxToolRounds = maxToolRounds;
+  const precompactAt = intValue("--precompact-at", options.precompactAt, 0, MAX_PRECOMPACT_AT_TOKENS);
+  if (precompactAt !== undefined) patch.precompactAtTokens = precompactAt;
+  const traceRetention = intValue("--trace-retention", options.traceRetention, 0, MAX_TRACE_RETENTION_DAYS);
+  if (traceRetention !== undefined) patch.traceRetentionDays = traceRetention;
+  const batchMax = intValue("--batch-max-requests", options.batchMaxRequests, 0, MAX_BATCH_MAX_REQUESTS);
+  if (batchMax !== undefined) patch.batchMaxRequests = batchMax;
+  // Route and alias entries are parsed (not yet merged) before any network
+  // call, so a malformed pair fails without touching the endpoint.
+  const kindEntries = pairMap("--kind-route", options.kindRoute);
+  const routeEntries = pairMap("--model-route", options.modelRoute);
+  const aliasEntries = pairMap("--alias", options.alias);
+  const touchesMaps =
+    kindEntries !== undefined ||
+    routeEntries !== undefined ||
+    aliasEntries !== undefined ||
+    Boolean(options.clearKindRoutes) ||
+    Boolean(options.clearModelRoutes) ||
+    Boolean(options.clearAliases);
   // Coding-agent settings live in providerOptions. They are merged onto what
   // the endpoint already has, so setting one flag never silently drops the
   // others; `reset` removes a key rather than writing an empty one, which is
@@ -387,11 +589,28 @@ export async function cmdEndpointSet(ref: string, options: EndpointSetOptions): 
   const claudeAuto = onOff("--claude-prompt-autoupdate", options.claudePromptAutoupdate);
   if (claudeAuto !== undefined) agent.claude_prompt_autoupdate = claudeAuto;
 
-  if (Object.keys(patch).length === 0 && Object.keys(agent).length === 0) {
+  if (Object.keys(patch).length === 0 && Object.keys(agent).length === 0 && !touchesMaps) {
     throw new Error("nothing to change; pass at least one --flag (see `heyditto endpoints set --help`)");
   }
 
   const { endpoint } = await getEndpoint(ref);
+  // The server replaces these maps wholesale, so merge onto what the endpoint
+  // has now and validate the result the way the backend will.
+  const kindRoutes = mergeMap(endpoint.kindRoutes, kindEntries, options.clearKindRoutes);
+  if (kindRoutes !== undefined) {
+    checkKindRoutes(kindRoutes);
+    patch.kindRoutes = kindRoutes;
+  }
+  const modelRoutes = mergeMap(endpoint.modelRoutes, routeEntries, options.clearModelRoutes);
+  if (modelRoutes !== undefined) {
+    checkRoutes("--model-route", modelRoutes, MAX_MODEL_ROUTES, MAX_MODEL_ROUTE_LEN);
+    patch.modelRoutes = modelRoutes;
+  }
+  const aliases = mergeMap(endpoint.aliases, aliasEntries, options.clearAliases);
+  if (aliases !== undefined) {
+    checkAliases(aliases, endpoint.slug);
+    patch.aliases = aliases;
+  }
   if (Object.keys(agent).length > 0) {
     const merged: Record<string, unknown> = { ...(endpoint.providerOptions ?? {}) };
     for (const [key, value] of Object.entries(agent)) {
@@ -419,6 +638,13 @@ export async function cmdEndpointSet(ref: string, options: EndpointSetOptions): 
     return;
   }
   process.stdout.write(`Updated ${updated.slug}: ${Object.keys(patch).join(", ")}.\n`);
+  // Trace retention is clamped to the owner's plan ceiling server-side; say so
+  // rather than let the endpoint quietly keep a shorter window than asked for.
+  if (patch.traceRetentionDays !== undefined && updated.traceRetentionDays !== undefined && updated.traceRetentionDays !== patch.traceRetentionDays) {
+    process.stderr.write(
+      `! trace retention was set to ${updated.traceRetentionDays === 0 ? "permanent" : `${updated.traceRetentionDays} days`}, not ${patch.traceRetentionDays}: your plan caps it.\n`,
+    );
+  }
   await noteActivation([updated]);
 }
 
@@ -749,14 +975,37 @@ through the gh CLI; the plaintext never reaches your terminal.`,
       .option("--spend-limit <tokens|none>", "spend cap in Ditto tokens, or none")
       .addOption(new Option("--spend-period <period>", "window the spend cap resets on").choices(["daily", "weekly", "monthly", "yearly", "never"]))
       .option("--record-trace <on|off>", "store raw request/response traces")
+      .option("--record-attachments <on|off>", "store images sent on the user turn so the thread shows them")
+      .option("--trace-retention <days>", "days recorded traces are kept; 0 = forever (clamped to your plan)")
       .option("--recall <on|off>", "recall memories into requests")
       .option("--record <on|off>", "record new memories from requests")
-      .option("--memory-depth <n>", "memories recalled per request (0-25)")
+      .option("--memory-depth <n>", `memories recalled per request (0-${MAX_MEMORY_DEPTH})`)
+      .addOption(new Option("--context-compaction <level>", "how eagerly finished tool results are digested").choices([...CONTEXT_COMPACTION_LEVELS]))
+      .addOption(new Option("--result-compression <level>", "compress tool results at ingestion").choices([...RESULT_COMPRESSION_LEVELS]))
+      .option("--tool-compression <on|off>", "replace harness tool descriptions with stored condensed rewrites")
+      .option("--precompact-at <tokens>", "start a background compaction snapshot at this prompt size; 0 = off")
+      .addOption(new Option("--routing <mode>", "how a provider is picked for a model").choices([...ROUTING_MODES]))
+      .addOption(new Option("--model-mode <mode>", "what happens to an unknown request model").choices([...MODEL_MODES]))
+      .addOption(new Option("--billing-mode <mode>", "whose provider keys pay for requests").choices([...BILLING_MODES]))
+      .addOption(new Option("--stream-granularity <level>", "how much server-side tool activity the stream shows").choices([...STREAM_GRANULARITIES]))
+      .option("--max-tool-rounds <n>", `server-side tool loop cap per request (0-${MAX_TOOL_ROUNDS})`)
+      .option("--batch <on|off>", "admit batch submissions")
+      .option("--batch-max-requests <n>", `requests one batch may carry (0-${MAX_BATCH_MAX_REQUESTS}; 0 disables)`)
+      .option("--kind-route <kind=model>", `pin a request kind to a model (${ROUTABLE_KINDS.join(", ")}); repeatable, empty value removes one`, collect)
+      .option("--model-route <requested=target>", "map a requested model id to a provider model; repeatable, empty value removes one", collect)
+      .option("--alias <name=model>", "name a model on this endpoint; repeatable, empty value removes one", collect)
+      .option("--clear-kind-routes", "remove every kind route")
+      .option("--clear-model-routes", "remove every model route")
+      .option("--clear-aliases", "remove every alias")
       .option("--yes", "skip the confirmation when raising a spend limit")
       .addOption(outputOption())
       .action(cmdEndpointSet),
     `  heyditto endpoints set my-endpoint --model openai/gpt-5.6-luna --record-trace on
   heyditto endpoints set my-endpoint --spend-limit 5000000 --spend-period monthly
+  heyditto endpoints set my-endpoint --context-compaction aggressive --result-compression grouped
+  heyditto endpoints set my-endpoint --routing cheap --model-mode passthrough --max-tool-rounds 16
+  heyditto endpoints set my-endpoint --kind-route aside=openai/gpt-5.6-nano --kind-route probe=openai/gpt-5.6-nano
+  heyditto endpoints set my-endpoint --alias fast=openai/gpt-5.6-nano --model-route gpt-4o=openai/gpt-5.6-luna
   heyditto endpoints set my-endpoint --codex-models on --codex-catalog on
   heyditto endpoints set my-endpoint --codex-prompt @prompt.md
   heyditto endpoints set my-endpoint --codex-prompt reset --codex-prompt-autoupdate off`,
