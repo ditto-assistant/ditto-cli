@@ -250,3 +250,46 @@ test("endpoints show reports which mode is in force", async () => {
     stub.close();
   }
 });
+
+// `reset` returns the endpoint to the vendored baseline, so the mode that
+// described the removed text has to go with it. A stale mode reads as
+// configured, describes nothing, and silently takes effect again the next
+// time someone sets a prompt.
+test("--codex-prompt reset clears the mode alongside the prompt", async () => {
+  const stub = await startStub({
+    ...ENDPOINT,
+    providerOptions: { codex_system_prompt: "old", codex_prompt_mode: "append", codex_models: true },
+  });
+  try {
+    const out = await run(stub.base, ["endpoints", "set", "alpha", "--codex-prompt", "reset"]);
+    assert.equal(out.status, 0, out.stderr);
+    assert.deepEqual(patchOf(stub).providerOptions, { codex_models: true });
+  } finally {
+    stub.close();
+  }
+});
+
+test("--claude-prompt reset clears the mode alongside the prompt", async () => {
+  const stub = await startStub({
+    ...ENDPOINT,
+    providerOptions: { claude_system_prompt: "old", claude_prompt_mode: "append" },
+  });
+  try {
+    const out = await run(stub.base, ["endpoints", "set", "alpha", "--claude-prompt", "reset"]);
+    assert.equal(out.status, 0, out.stderr);
+    assert.deepEqual(patchOf(stub).providerOptions, {});
+  } finally {
+    stub.close();
+  }
+});
+
+test("setting a prompt without a mode leaves the mode alone", async () => {
+  const stub = await startStub({ ...ENDPOINT, providerOptions: { codex_prompt_mode: "append" } });
+  try {
+    const out = await run(stub.base, ["endpoints", "set", "alpha", "--codex-prompt", "new text"]);
+    assert.equal(out.status, 0, out.stderr);
+    assert.deepEqual(patchOf(stub).providerOptions, { codex_system_prompt: "new text", codex_prompt_mode: "append" });
+  } finally {
+    stub.close();
+  }
+});

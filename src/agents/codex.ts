@@ -16,8 +16,18 @@ export function tomlString(value: string): string {
  */
 export function planCodex(input: PlanInput): HarnessPlan {
   const args: string[] = [];
-  if (input.prompt !== undefined) args.push("exec");
-  else if (input.resumeId || input.resumeLast) args.push("resume");
+  // `exec` is the headless entry point and `resume` reopens a thread; asking
+  // for both means "reopen this thread and run one turn in it", which codex
+  // spells `exec resume`. Emitting only `exec` silently started a fresh
+  // conversation, so a resumed headless run answered as if it had never seen
+  // the earlier turns.
+  const resuming = Boolean(input.resumeId || input.resumeLast);
+  if (input.prompt !== undefined) {
+    args.push("exec");
+    if (resuming) args.push("resume");
+  } else if (resuming) {
+    args.push("resume");
+  }
 
   args.push(
     "-c",
@@ -39,7 +49,12 @@ export function planCodex(input: PlanInput): HarnessPlan {
   else if (input.yellow) args.push("-a", "on-request", "-s", "workspace-write");
 
   if (input.prompt !== undefined) {
-    args.push("--skip-git-repo-check", ...input.passthrough, input.prompt);
+    args.push("--skip-git-repo-check", ...input.passthrough);
+    // `exec resume` takes the session before the prompt: `[SESSION_ID] [PROMPT]`,
+    // or --last in place of the id.
+    if (input.resumeId) args.push(input.resumeId);
+    else if (input.resumeLast) args.push("--last");
+    args.push(input.prompt);
   } else if (input.resumeId) {
     args.push(...input.passthrough, input.resumeId);
   } else if (input.resumeLast) {
