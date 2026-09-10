@@ -148,3 +148,53 @@ test("unknown search option fails with commander error", () => {
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /unknown option '--definitely-not-real'/);
 });
+
+test("endpoints set --help lists every web-editor setting", () => {
+  const result = run(["endpoints", "set", "--help"]);
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /Usage: heyditto endpoints set/);
+  // Every setting the developer console exposes must be reachable from here;
+  // the gaps this list closes were flags the web editor had and the CLI did not.
+  const flat = result.stdout.replace(/\s+/g, " ");
+  for (const flag of [
+    "--context-compaction",
+    "--result-compression",
+    "--tool-compression",
+    "--precompact-at",
+    "--routing",
+    "--model-mode",
+    "--billing-mode",
+    "--stream-granularity",
+    "--max-tool-rounds",
+    "--trace-retention",
+    "--record-attachments",
+    "--batch ",
+    "--batch-max-requests",
+    "--kind-route",
+    "--model-route",
+    "--alias ",
+    "--clear-kind-routes",
+    "--clear-model-routes",
+    "--clear-aliases",
+  ]) {
+    assert.ok(flat.includes(flag), `endpoints set --help is missing ${flag}`);
+  }
+  assert.equal(result.stderr, "");
+});
+
+test("endpoints set --help documents the enum choices it validates", () => {
+  const result = run(["endpoints", "set", "--help"]);
+  assert.equal(result.status, 0);
+  // commander wraps long option descriptions, so compare on one line.
+  const flat = result.stdout.replace(/\s+/g, " ");
+  for (const choices of [
+    '"off", "light", "balanced", "aggressive"',
+    '"off", "conservative", "grouped"',
+    '"cheap", "fast", "balanced"',
+    '"default", "passthrough"',
+    '"ditto", "byok", "both"',
+    '"final", "tool", "full"',
+  ]) {
+    assert.ok(flat.includes(`(choices: ${choices})`), `endpoints set --help does not offer ${choices}`);
+  }
+});

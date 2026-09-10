@@ -401,9 +401,7 @@ heyditto endpoints show <endpoint>
 heyditto endpoints use <endpoint>          make it the default
 heyditto endpoints pick                    choose the default interactively
 heyditto endpoints open [endpoint]         open the editor in the Ditto app
-heyditto endpoints set <endpoint> --model … --system-prompt … --spend-limit <tokens|none>
-                                   --spend-period … --record-trace on|off --recall on|off
-                                   --record on|off --memory-depth <n>
+heyditto endpoints set <endpoint> [settings flags — see the table below]
 heyditto endpoints delete <endpoint> [--yes]
 heyditto endpoints keys <endpoint>         list keys
 heyditto endpoints keys create <endpoint> --store <destination> --secret <NAME> [scoping flags]
@@ -416,6 +414,50 @@ heyditto endpoints keys revoke <endpoint> <keyId> [--yes]
 Endpoints spend your Ditto credits, so deleting one, revoking a key or raising a
 spend limit asks you to type the slug back; pass `--yes` in scripts. `--output
 json` is available everywhere and includes the gateway base URL.
+
+#### `endpoints set` — every setting the console has
+
+`set` is a full mirror of the endpoint editor at
+https://developer.heyditto.ai/endpoints: anything the web form can change, this
+can change. `heyditto endpoints show <endpoint>` prints all of it back, and
+`--output json` gives the raw fields.
+
+| Flag | What it does |
+| --- | --- |
+| `--name <name>` / `--model <id>` | display name / default model id |
+| `--system-prompt <text>` | prompt prepended to every request |
+| `--spend-limit <tokens\|none>` `--spend-period <daily…never>` | spend cap and the window it resets on |
+| `--recall on\|off` `--record on\|off` `--memory-depth <0-25>` | memory recall and recording |
+| `--record-trace on\|off` `--record-attachments on\|off` | store raw traces / store images sent on the user turn |
+| `--trace-retention <days>` | days traces are kept; `0` = forever. Clamped to your plan — the CLI says so when it was |
+| `--context-compaction off\|light\|balanced\|aggressive` | how eagerly finished tool results are digested |
+| `--result-compression off\|conservative\|grouped` | compress tool results at ingestion |
+| `--tool-compression on\|off` | swap harness tool descriptions for stored condensed rewrites |
+| `--precompact-at <tokens>` | start a background compaction snapshot at this prompt size; `0` = off |
+| `--routing cheap\|fast\|balanced` | how a provider is picked for a model |
+| `--model-mode default\|passthrough` | what happens to a request model that is neither alias, route nor provider id |
+| `--billing-mode ditto\|byok\|both` | whose provider keys pay for requests |
+| `--stream-granularity final\|tool\|full` | how much server-side tool activity the stream shows |
+| `--max-tool-rounds <0-32>` | server-side tool loop cap per request |
+| `--batch on\|off` `--batch-max-requests <0-50000>` | admit batch submissions, and the per-batch cap |
+| `--kind-route <kind=model>` | pin a request archetype to a model: `chat`, `tool_round`, `aside`, `compaction`, `structured_output`, `probe` |
+| `--model-route <requested=target>` | map a model id exactly as a harness sends it to a provider model |
+| `--alias <name=model>` | name a model on this endpoint |
+| `--clear-kind-routes` `--clear-model-routes` `--clear-aliases` | empty a whole map |
+
+The three map flags are repeatable and **merge** onto what the endpoint already
+has, so setting one route never drops the others. An empty value removes a
+single entry:
+
+```
+heyditto endpoints set my-endpoint --kind-route aside=openai/gpt-5.6-nano \
+                                   --kind-route probe=openai/gpt-5.6-nano
+heyditto endpoints set my-endpoint --kind-route aside=          # remove just that one
+heyditto endpoints set my-endpoint --clear-kind-routes          # remove all of them
+```
+
+Choices and numeric bounds are checked locally against the gateway's own
+enums, so a typo fails instantly instead of costing a round trip.
 
 #### Put a key straight into a secret manager
 
