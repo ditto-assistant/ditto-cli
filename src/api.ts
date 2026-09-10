@@ -629,3 +629,247 @@ export function listReceipts(input: { leg?: string; app?: string; days?: number;
   const qs = params.toString();
   return apiFetch<ReceiptsResponse>(`/api/v5/me/receipts${qs ? `?${qs}` : ""}`);
 }
+
+// ---------------------------------------------------------------------------
+// Organizations
+//
+// The CLI had no concept of one. Identity was "whoever the API key belongs to",
+// which is fine until the thing you are managing belongs to a team: an
+// organization's MCP connections and its endpoints' approvals are not yours,
+// they are the organization's, and the server decides what your role lets you
+// do with them.
+//
+// The CLI never re-implements that decision. It passes the scope and renders
+// whatever the server says, including its refusals.
+// ---------------------------------------------------------------------------
+
+export interface Company {
+  id: string;
+  slug: string;
+  name: string;
+  kind: string;
+  /** The caller's role: owner, admin, member or viewer. */
+  role: string;
+}
+
+export async function listCompanies(): Promise<Company[]> {
+  const out = await apiFetch<{ companies?: Company[] }>("/api/v5/companies");
+  return out.companies ?? [];
+}
+
+/**
+ * Resolve a slug, id or `@handle` to one organization the caller belongs to.
+ *
+ * Matching happens here rather than server-side because the error is much
+ * better: naming the organizations you ARE in beats a 404 that leaves you
+ * guessing whether you typed it wrong or were never a member.
+ */
+export async function resolveCompany(wanted: string): Promise<Company> {
+  const needle = wanted.trim().replace(/^@/, "").toLowerCase();
+  if (!needle) throw new Error("--org needs an organization slug or id");
+  const companies = await listCompanies();
+  const match = companies.find(
+    (c) => c.id.toLowerCase() === needle || c.slug.toLowerCase() === needle,
+  );
+  if (match) return match;
+  const known = companies.map((c) => c.slug).join(", ");
+  throw new Error(
+    `you are not a member of an organization called "${wanted}".` +
+      (known ? `\n\nOrganizations you belong to: ${known}` : "\n\nYou are not in any organization."),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// MCP connections an organization owns
+// ---------------------------------------------------------------------------
+
+export interface MCPConnectionConfig {
+  url: string;
+  authType: string;
+  /** Names only. Values are stored encrypted and never returned. */
+  headerNames?: string[];
+}
+
+export interface MCPConnection {
+  id: string;
+  companyId: string;
+  name: string;
+  description?: string;
+  transport: string;
+  /** The stable tool namespace: tools dispatch as `<prefix>__<tool>`. */
+  prefix: string;
+  connectedByUid?: string;
+  /** "not_connected" | "connected" | "expired" for OAuth; "" otherwise. */
+  oauthStatus?: string;
+  enabled: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+  lastUsedAt?: string | null;
+  config: MCPConnectionConfig;
+}
+
+export interface MCPConnectionList {
+  servers: MCPConnection[];
+  canManage: boolean;
+}
+
+export interface MCPConnectionInput {
+  name?: string;
+  description?: string;
+  transport?: string;
+  enabled?: boolean;
+  config?: { url?: string; authType?: string; headers?: Record<string, string> };
+}
+
+export async function listMCPConnections(companyId: string): Promise<MCPConnectionList> {
+  const out = await apiFetch<Partial<MCPConnectionList>>(
+    `/api/v5/companies/${encodeURIComponent(companyId)}/mcp-servers`,
+  );
+  return { servers: out.servers ?? [], canManage: out.canManage ?? false };
+}
+
+export async function createMCPConnection(
+  companyId: string,
+  input: MCPConnectionInput,
+): Promise<MCPConnection> {
+  return apiFetch<MCPConnection>(`/api/v5/companies/${encodeURIComponent(companyId)}/mcp-servers`, {
+    method: "POST",
+    body: input,
+  });
+}
+
+export async function updateMCPConnection(
+  companyId: string,
+  serverId: string,
+  input: MCPConnectionInput,
+): Promise<MCPConnection> {
+  return apiFetch<MCPConnection>(
+    `/api/v5/companies/${encodeURIComponent(companyId)}/mcp-servers/${encodeURIComponent(serverId)}`,
+    { method: "PATCH", body: input },
+  );
+}
+
+export async function deleteMCPConnection(companyId: string, serverId: string): Promise<void> {
+  await apiFetch<void>(
+    `/api/v5/companies/${encodeURIComponent(companyId)}/mcp-servers/${encodeURIComponent(serverId)}`,
+    { method: "DELETE" },
+  );
+}
+
+export async function startMCPOAuth(serverId: string): Promise<string> {
+  const out = await apiFetch<{ authorization_url?: string }>(
+    `/api/v2/mcp/servers/${encodeURIComponent(serverId)}/oauth/start`,
+    { method: "POST" },
+  );
+  return out.authorization_url ?? "";
+}
+
+export interface EndpointTool {
+  name: string;
+  title?: string;
+  description?: string;
+  kind?: string;
+  group?: string;
+  enabled?: boolean;
+  requiresApproval?: boolean;
+  mcpServerId?: string;
+  tier?: string;
+  tierSource?: string;
+}
+
+export interface EndpointToolCatalog {
+  tools: EndpointTool[];
+  selected: string[];
+  toolApprovalMode: string;
+  autoApproveTools: string[];
+}
+
+/** One endpoint's catalog, resolved from the ENDPOINT rather than the caller. */
+export async function listEndpointTools(endpointId: string): Promise<EndpointToolCatalog> {
+  const out = await apiFetch<Partial<EndpointToolCatalog>>(
+    `/api/v5/inference/endpoints/${encodeURIComponent(endpointId)}/tools`,
+  );
+  return {
+    tools: out.tools ?? [],
+    selected: out.selected ?? [],
+    toolApprovalMode: out.toolApprovalMode ?? "off",
+    autoApproveTools: out.autoApproveTools ?? [],
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Tool approvals
+// ---------------------------------------------------------------------------
+
+export interface ToolApproval {
+  id: string;
+  status: string;
+  surface?: string;
+  endpointId?: string;
+  companyId?: string;
+  sessionId?: string;
+  /** Every call one inbound request parked shares this. */
+  requestId: string;
+  seq: number;
+  toolName: string;
+  toolTitle?: string;
+  mcpServerId?: string;
+  summary?: string;
+  tier?: string;
+  /** "annotations" (the server declared it) | "catalog" | "heuristic". */
+  tierSource?: string;
+  arguments?: unknown;
+  result?: unknown;
+  error?: string;
+  createdAt?: string;
+  expiresAt?: string;
+  executedAt?: string | null;
+}
+
+export interface ToolApprovalList {
+  approvals: ToolApproval[];
+  /**
+   * Whether the caller may decide what is listed.
+   *
+   * Only ever false for `--endpoint` on an organization endpoint: any active
+   * member may READ that queue, while deciding is an owner/admin action. Worth
+   * reporting rather than letting someone read a row and then take a 404 from
+   * `approvals allow`.
+   */
+  canDecide: boolean;
+}
+
+export async function listToolApprovals(opts: {
+  companyId?: string;
+  endpointId?: string;
+} = {}): Promise<ToolApprovalList> {
+  const params = new URLSearchParams();
+  if (opts.companyId) params.set("company", opts.companyId);
+  if (opts.endpointId) params.set("endpoint", opts.endpointId);
+  const query = params.toString();
+  const out = await apiFetch<{ approvals?: ToolApproval[]; canDecide?: boolean }>(
+    `/api/v5/tool-approvals${query ? `?${query}` : ""}`,
+  );
+  // A backend that predates the field only ever served queues the caller could
+  // act on, so absent means yes.
+  return { approvals: out.approvals ?? [], canDecide: out.canDecide ?? true };
+}
+
+/**
+ * Run one held tool now.
+ *
+ * It does NOT resume the run that parked it: that request is over, and on a
+ * Code Mode endpoint the sandboxed script and its workspace are gone. The
+ * result is recorded on the approval.
+ */
+export async function approveToolApproval(id: string): Promise<ToolApproval> {
+  return apiFetch<ToolApproval>(`/api/v5/tool-approvals/${encodeURIComponent(id)}/approve`, {
+    method: "POST",
+  });
+}
+
+export async function rejectToolApproval(id: string): Promise<ToolApproval> {
+  return apiFetch<ToolApproval>(`/api/v5/tool-approvals/${encodeURIComponent(id)}/reject`, {
+    method: "POST",
+  });
+}

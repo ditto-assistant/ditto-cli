@@ -27,6 +27,7 @@ import {
 import { type ActiveSession, markSessionUsed, resolveActiveSession, sessionHeaders } from "./mcp-session.js";
 import { NO_KEY_MESSAGE } from "./api.js";
 import { openInBrowser } from "./browser.js";
+import { registerOrgCommands } from "./org-commands.js";
 import { registerTeleportCommands } from "./teleport/commands.js";
 import { registerAppCommands } from "./app-commands.js";
 import { deviceLogin } from "./device-login.js";
@@ -135,6 +136,17 @@ function outputOption(): Option {
   return new Option("--output <format>", "output format")
     .choices([...OUTPUT_FORMATS])
     .default("text");
+}
+
+/**
+ * Which organization a command acts on.
+ *
+ * Repeated per command rather than declared globally: only the commands that
+ * genuinely act on an organization should advertise it, and a global --org on
+ * `heyditto search` would be a promise the memory tools do not keep.
+ */
+function orgOption(): Option {
+  return new Option("--org <org>", "organization slug or id (default: heyditto orgs use)");
 }
 
 function hiddenOutputOption(): Option {
@@ -1155,6 +1167,7 @@ your own graph or an app graph.`,
 
   registerEndpointCommands(program, addExamples, outputOption);
   registerAppCommands(program, addExamples, outputOption);
+  registerOrgCommands(program, addExamples, outputOption, orgOption);
   registerHarnessCommands(program, addExamples);
   registerSessionCommands(program, addExamples);
   registerTeleportCommands(program, addExamples);
