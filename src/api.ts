@@ -423,3 +423,80 @@ export async function listChatAgents(): Promise<ChatAgent[]> {
   const out = await apiFetch<{ agents?: ChatAgent[] }>("/api/v5/chat-agents");
   return out.agents ?? [];
 }
+
+/** One server-side tool the endpoint can be configured to offer. */
+export interface InferenceToolInfo {
+  name: string;
+  title?: string;
+  description?: string;
+  kind?: string;
+  group?: string;
+  enabled?: boolean;
+}
+
+/** One recorded session of an endpoint: one thread inside it. */
+export interface EndpointSession {
+  id: string;
+  endpointId: string;
+  sessionKey?: string;
+  systemPromptHash?: string;
+  threadId?: string;
+  harness?: string;
+  grouping?: string;
+  keyId?: string;
+  model?: string;
+  traceBytes?: number;
+  turnCount?: number;
+  firstSeenAt?: string;
+  lastSeenAt?: string;
+}
+
+/** One recorded turn inside a session. */
+export interface EndpointTrace {
+  id: string;
+  sessionId?: string;
+  model?: string;
+  requestedModel?: string;
+  provider?: string;
+  finishReason?: string;
+  kind?: string;
+  api?: string;
+  bytes?: number;
+  promptTokens?: number;
+  completionTokens?: number;
+  dittoTokenCost?: number;
+  turnIndex?: number;
+  toolCalls?: number;
+  memoryInjected?: number;
+  createdAt?: string;
+}
+
+/** The server-side tool catalogue an endpoint can draw `--tools` from. */
+export async function listInferenceTools(): Promise<InferenceToolInfo[]> {
+  const res = await apiFetch<{ tools?: InferenceToolInfo[] }>("/api/v5/inference/tools");
+  return res.tools ?? [];
+}
+
+export async function listEndpointSessions(endpointId: string): Promise<EndpointSession[]> {
+  const res = await apiFetch<{ sessions?: EndpointSession[] }>(`${endpointPath(endpointId)}/sessions`);
+  return res.sessions ?? [];
+}
+
+export async function listTraces(sessionId: string): Promise<{ session?: EndpointSession; traces: EndpointTrace[] }> {
+  const res = await apiFetch<{ session?: EndpointSession; traces?: EndpointTrace[] }>(
+    `/api/v5/inference/sessions/${encodeURIComponent(sessionId)}/traces`,
+  );
+  return { session: res.session, traces: res.traces ?? [] };
+}
+
+/**
+ * The exact system prompt a session ran on, with the hash the gateway
+ * recorded. This is how you answer "which prompt was this session actually
+ * using" after the endpoint's prompt has since been edited.
+ */
+export async function sessionSystemPrompt(sessionId: string): Promise<{ systemPrompt: string; hash: string }> {
+  const res = await apiFetch<{ systemPrompt?: string; hash?: string }>(
+    `/api/v5/inference/sessions/${encodeURIComponent(sessionId)}/system-prompt`,
+  );
+  return { systemPrompt: res.systemPrompt ?? "", hash: res.hash ?? "" };
+}

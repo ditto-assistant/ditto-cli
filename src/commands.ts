@@ -6,6 +6,13 @@ import { listSessions, removeSession } from "./agents/sessions.js";
 import { DEFAULT_LAUNCH_EXPIRY, HARNESSES, type Harness, KEY_EXPIRIES, type KeyExpiry, apiRootOf } from "./agents/types.js";
 import {
   ENDPOINT_CHOICES,
+  type EndpointSession,
+  type EndpointTrace,
+  type InferenceToolInfo,
+  listInferenceTools,
+  listEndpointSessions,
+  listTraces,
+  sessionSystemPrompt,
   type ChatAgent,
   type EndpointInput,
   type InferenceEndpoint,
@@ -263,6 +270,117 @@ function codingAgentLines(endpoint: InferenceEndpoint): string[] {
     if (bits.length) lines.push(`${harness} prompt:  ${bits.join(", ")}`);
   }
   return lines;
+}
+
+/** Renders aligned columns, matching how `endpoints list` prints. */
+function columns(headers: string[], rows: string[][]): string {
+  const widths = headers.map((h, i) => Math.max(h.length, ...rows.map((r) => (r[i] ?? "").length)));
+  const line = (cells: string[]) => cells.map((cell, i) => pad(cell ?? "", widths[i])).join("  ").trimEnd();
+  return [line(headers), ...rows.map(line)].join("\n");
+}
+
+function writeJSON(value: unknown): void {
+  process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+}
+
+/** Renders a byte count the way a human scans it. */
+function bytes(n: number | undefined): string {
+  const v = n ?? 0;
+  if (v < 1024) return `${v} B`;
+  if (v < 1024 * 1024) return `${(v / 1024).toFixed(1)} KB`;
+  return `${(v / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function ago(iso: string | undefined): string {
+  if (!iso) return "-";
+  const ms = Date.now() - new Date(iso).getTime();
+  if (!Number.isFinite(ms)) return "-";
+  const mins = Math.round(ms / 60000);
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 48) return `${hours}h ago`;
+  return `${Math.round(hours / 24)}d ago`;
+}
+
+/** `endpoints tools` — the catalogue `--tools` draws from. */
+export async function cmdEndpointTools(options: { output?: string }): Promise<void> {
+  const tools = await listInferenceTools();
+  if (isJSON(options)) return writeJSON(tools);
+  if (tools.length === 0) {
+    process.stdout.write("no server tools are available to this account\n");
+    return;
+  }
+  const rows = tools.map((t: InferenceToolInfo) => [
+    t.name,
+    t.group ?? "",
+    t.enabled === false ? "unavailable" : "",
+    (t.title || t.description || "").split("\n")[0].slice(0, 60),
+  ]);
+  process.stdout.write(`${columns(["TOOL", "GROUP", "", "WHAT IT DOES"], rows)}\n`);
+  process.stderr.write(`\nset them with: heyditto endpoints set <endpoint> --tools ${tools.filter((t) => t.enabled !== false).slice(0, 2).map((t) => t.name).join(",")}\n`);
+}
+
+/** `endpoints sessions` — the threads recorded against an endpoint. */
+export async function cmdEndpointSessions(ref: string, options: { output?: string; limit?: string }): Promise<void> {
+  const { endpoint } = await getEndpoint(ref);
+  const sessions = await listEndpointSessions(endpoint.id);
+  if (isJSON(options)) return writeJSON(sessions);
+  if (sessions.length === 0) {
+    process.stdout.write(`no recorded sessions on ${endpoint.slug}\n`);
+    return;
+  }
+  const limit = options.limit ? Number(options.limit) : 20;
+  const rows = sessions.slice(0, Number.isFinite(limit) ? limit : 20).map((s: EndpointSession) => [
+    s.id,
+    s.harness ?? "api",
+    String(s.turnCount ?? 0),
+    bytes(s.traceBytes),
+    ago(s.lastSeenAt),
+  ]);
+  process.stdout.write(`${columns(["SESSION", "HARNESS", "TURNS", "TRACES", "LAST SEEN"], rows)}\n`);
+  process.stderr.write(`\ninspect one with: heyditto endpoints traces ${sessions[0].id}\n`);
+}
+
+/** `endpoints traces` — the turns inside one session. */
+export async function cmdEndpointTraces(sessionId: string, options: { output?: string }): Promise<void> {
+  const { session, traces } = await listTraces(sessionId);
+  if (isJSON(options)) return writeJSON({ session, traces });
+  if (traces.length === 0) {
+    process.stdout.write(`no traces recorded for ${sessionId}\n`);
+    process.stderr.write("traces are only kept when the endpoint has --record-trace on\n");
+    return;
+  }
+  const rows = traces.map((t: EndpointTrace) => [
+    String(t.turnIndex ?? 0),
+    t.kind ?? "",
+    t.provider ?? "",
+    t.model ?? "",
+    `${t.promptTokens ?? 0}→${t.completionTokens ?? 0}`,
+    String(t.toolCalls ?? 0),
+    t.finishReason ?? "",
+  ]);
+  process.stdout.write(`${columns(["TURN", "KIND", "PROVIDER", "MODEL", "TOKENS", "TOOLS", "FINISH"], rows)}\n`);
+  if (session?.systemPromptHash) {
+    process.stderr.write(`\nsystem prompt ${session.systemPromptHash.slice(0, 12)} — read it with: heyditto endpoints system-prompt ${sessionId}\n`);
+  }
+}
+
+/**
+ * `endpoints system-prompt` — the exact prompt a session ran on.
+ *
+ * This is the question an endpoint's prompt settings make answerable: once
+ * someone has edited the agent's prompt, "what was this session actually
+ * running" is otherwise unanswerable from the outside.
+ */
+export async function cmdEndpointSystemPrompt(sessionId: string, options: { output?: string }): Promise<void> {
+  const { systemPrompt, hash } = await sessionSystemPrompt(sessionId);
+  if (isJSON(options)) return writeJSON({ sessionId, hash, systemPrompt });
+  if (systemPrompt === "") {
+    process.stdout.write(`no system prompt recorded for ${sessionId}\n`);
+    return;
+  }
+  process.stderr.write(`# session ${sessionId}  hash ${hash.slice(0, 12)}  ${systemPrompt.length} chars\n`);
+  process.stdout.write(systemPrompt.endsWith("\n") ? systemPrompt : `${systemPrompt}\n`);
 }
 
 export async function cmdEndpointUse(ref: string, options: { output?: string }): Promise<void> {
@@ -828,6 +946,30 @@ through the gh CLI; the plaintext never reaches your terminal.`,
     .argument("<endpoint>", "endpoint slug or id")
     .addOption(outputOption())
     .action(cmdEndpointShow);
+  endpoints
+    .command("tools")
+    .description("list the server-side tools an endpoint can offer (for --tools)")
+    .addOption(outputOption())
+    .action(cmdEndpointTools);
+  endpoints
+    .command("sessions")
+    .description("list the sessions recorded against an endpoint")
+    .argument("<endpoint>", "endpoint slug or id")
+    .option("--limit <n>", "how many sessions to show (default 20)")
+    .addOption(outputOption())
+    .action(cmdEndpointSessions);
+  endpoints
+    .command("traces")
+    .description("list the turns recorded inside one session")
+    .argument("<session>", "session id (from `endpoints sessions`)")
+    .addOption(outputOption())
+    .action(cmdEndpointTraces);
+  endpoints
+    .command("system-prompt")
+    .description("print the exact system prompt a session ran on")
+    .argument("<session>", "session id (from `endpoints sessions`)")
+    .addOption(outputOption())
+    .action(cmdEndpointSystemPrompt);
   endpoints
     .command("use")
     .description("make an endpoint the default for heyditto claude / codex")
