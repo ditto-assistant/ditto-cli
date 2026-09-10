@@ -108,6 +108,18 @@ export interface InferenceEndpoint {
   recordEnabled?: boolean;
   /** Free-form per-provider settings, including the coding-agent keys. */
   providerOptions?: Record<string, unknown>;
+  streamGranularity?: string;
+  routingMode?: string;
+  contextCompaction?: string;
+  resultCompression?: string;
+  precompactAtTokens?: number;
+  traceRetentionDays?: number;
+  batchEnabled?: boolean;
+  batchMaxRequests?: number;
+  toolCompression?: boolean;
+  aliases?: Record<string, string>;
+  modelRoutes?: Record<string, string>;
+  kindRoutes?: Record<string, string>;
   tools?: string[];
   modelMode?: string;
   billingMode?: string;
@@ -130,7 +142,34 @@ export interface EndpointInput {
   recordEnabled?: boolean;
   memoryDepth?: number;
   providerOptions?: Record<string, unknown>;
+  streamGranularity?: string;
+  modelMode?: string;
+  billingMode?: string;
+  routingMode?: string;
+  contextCompaction?: string;
+  resultCompression?: string;
+  maxToolRounds?: number;
+  precompactAtTokens?: number;
+  traceRetentionDays?: number;
+  batchEnabled?: boolean;
+  batchMaxRequests?: number;
+  toolCompression?: boolean;
+  recordAttachments?: boolean;
+  tools?: string[];
+  aliases?: Record<string, string>;
+  modelRoutes?: Record<string, string>;
+  kindRoutes?: Record<string, string>;
 }
+
+/** Accepted values for the endpoint settings the server treats as enums. */
+export const ENDPOINT_CHOICES = {
+  streamGranularity: ["final", "tool", "full"],
+  modelMode: ["default", "passthrough"],
+  billingMode: ["ditto", "byok", "both"],
+  routingMode: ["cheap", "fast", "balanced"],
+  contextCompaction: ["off", "light", "balanced", "aggressive"],
+  resultCompression: ["off", "conservative", "grouped"],
+} as const;
 
 /**
  * providerOptions keys that configure a coding agent on this endpoint. The

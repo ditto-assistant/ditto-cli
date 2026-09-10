@@ -5,6 +5,7 @@ import { launchHarness, pickEndpoint } from "./agents/launch.js";
 import { listSessions, removeSession } from "./agents/sessions.js";
 import { DEFAULT_LAUNCH_EXPIRY, HARNESSES, type Harness, KEY_EXPIRIES, type KeyExpiry, apiRootOf } from "./agents/types.js";
 import {
+  ENDPOINT_CHOICES,
   type ChatAgent,
   type EndpointInput,
   type InferenceEndpoint,
@@ -210,10 +211,26 @@ export async function cmdEndpointShow(ref: string, options: { output?: string })
     `memory:        recall ${endpoint.recallEnabled === false ? "off" : "on"}, record ${endpoint.recordEnabled === false ? "off" : "on"}${endpoint.memoryDepth !== undefined ? `, depth ${endpoint.memoryDepth}` : ""}`,
     `traces:        ${endpoint.recordTrace ? "on" : "off"}`,
     `tools:         ${(endpoint.tools ?? []).join(", ") || "(none)"}`,
+    `routing:       ${endpoint.routingMode ?? "balanced"}, billing ${endpoint.billingMode ?? "ditto"}, stream ${endpoint.streamGranularity ?? "tool"}`,
+    `context:       compaction ${endpoint.contextCompaction ?? "balanced"}, results ${endpoint.resultCompression ?? "off"}${endpoint.toolCompression ? ", tool descriptions compressed" : ""}`,
     `gateway:       ${catalog.baseUrl}`,
     `web:           ${endpointURL(endpoint.id)}`,
   ];
   if (endpoint.systemPrompt) lines.push(`system prompt: ${endpoint.systemPrompt.length > 120 ? `${endpoint.systemPrompt.slice(0, 117)}…` : endpoint.systemPrompt}`);
+  if (endpoint.maxToolRounds) lines.push(`tool rounds:   ${endpoint.maxToolRounds}`);
+  if (endpoint.precompactAtTokens) lines.push(`precompact at: ${endpoint.precompactAtTokens.toLocaleString()} tokens`);
+  if (endpoint.traceRetentionDays !== undefined) {
+    lines.push(`trace keep:    ${endpoint.traceRetentionDays === 0 ? "forever" : `${endpoint.traceRetentionDays} days`}`);
+  }
+  if (endpoint.batchEnabled) lines.push(`batch:         on${endpoint.batchMaxRequests ? ` (max ${endpoint.batchMaxRequests} per batch)` : ""}`);
+  for (const [label, map] of [
+    ["aliases", endpoint.aliases],
+    ["model routes", endpoint.modelRoutes],
+    ["kind routes", endpoint.kindRoutes],
+  ] as const) {
+    const entries = Object.entries(map ?? {});
+    if (entries.length > 0) lines.push(`${`${label}:`.padEnd(14)} ${entries.map(([k, v]) => `${k} → ${v}`).join(", ")}`);
+  }
   lines.push(...codingAgentLines(endpoint));
   process.stdout.write(`${lines.join("\n")}\n`);
   await noteActivation([endpoint]);
@@ -299,6 +316,24 @@ interface EndpointSetOptions {
   recall?: string;
   record?: string;
   memoryDepth?: string;
+  streamGranularity?: string;
+  modelMode?: string;
+  billingMode?: string;
+  routingMode?: string;
+  contextCompaction?: string;
+  resultCompression?: string;
+  maxToolRounds?: string;
+  precompactAt?: string;
+  traceRetention?: string;
+  batch?: string;
+  batchMaxRequests?: string;
+  toolCompression?: string;
+  recordAttachments?: string;
+  tools?: string;
+  rename?: string;
+  alias?: string[];
+  modelRoute?: string[];
+  kindRoute?: string[];
   codexModels?: string;
   codexCatalog?: string;
   codexCatalogLimit?: string;
@@ -317,6 +352,45 @@ interface EndpointSetOptions {
  * back on the vendored baseline the harness ships with; an explicit empty
  * string means "send no system prompt at all".
  */
+/** Commander accumulator for repeatable flags. */
+function collectRepeatable(value: string, previous: string[] | undefined): string[] {
+  return [...(previous ?? []), value];
+}
+
+/** Parses a bounded integer flag; a silent clamp would hide a typo. */
+function intFlag(flag: string, raw: string, min: number, max: number): number {
+  const n = Number(raw.trim().replace(/[_,]/g, ""));
+  if (!Number.isInteger(n) || n < min || n > max) throw new Error(`${flag} must be an integer from ${min} to ${max}`);
+  return n;
+}
+
+/** Validates an enum flag against the values the server accepts. */
+function choiceFlag(flag: string, raw: string, choices: readonly string[]): string {
+  const v = raw.trim().toLowerCase();
+  if (!choices.includes(v)) throw new Error(`${flag} must be one of: ${choices.join(", ")}`);
+  return v;
+}
+
+/**
+ * Parses repeatable `key=value` flags. These maps are replaced wholesale
+ * server-side, so the flags given are the complete new set and `none` clears
+ * it — merging would make removing a single entry impossible from the CLI.
+ */
+function pairFlags(flag: string, raw: string[] | undefined): Record<string, string> | undefined {
+  if (raw === undefined) return undefined;
+  const out: Record<string, string> = {};
+  for (const entry of raw) {
+    const trimmed = entry.trim();
+    if (trimmed === "" || trimmed.toLowerCase() === "none") continue;
+    const eq = trimmed.indexOf("=");
+    const key = eq > 0 ? trimmed.slice(0, eq).trim() : "";
+    const value = eq > 0 ? trimmed.slice(eq + 1).trim() : "";
+    if (key === "" || value === "") throw new Error(`${flag} must be key=value, got "${entry}"`);
+    out[key] = value;
+  }
+  return out;
+}
+
 /** Validates a prompt mode; a typo must not silently mean "replace". */
 function promptMode(flag: string, raw: string): string {
   const value = raw.trim().toLowerCase();
@@ -374,6 +448,34 @@ export async function cmdEndpointSet(ref: string, options: EndpointSetOptions): 
     if (!Number.isInteger(n) || n < 0 || n > 25) throw new Error("--memory-depth must be an integer from 0 to 25");
     patch.memoryDepth = n;
   }
+  if (options.rename !== undefined) patch.slug = options.rename.trim();
+  if (options.streamGranularity !== undefined) patch.streamGranularity = choiceFlag("--stream-granularity", options.streamGranularity, ENDPOINT_CHOICES.streamGranularity);
+  if (options.modelMode !== undefined) patch.modelMode = choiceFlag("--model-mode", options.modelMode, ENDPOINT_CHOICES.modelMode);
+  if (options.billingMode !== undefined) patch.billingMode = choiceFlag("--billing-mode", options.billingMode, ENDPOINT_CHOICES.billingMode);
+  if (options.routingMode !== undefined) patch.routingMode = choiceFlag("--routing-mode", options.routingMode, ENDPOINT_CHOICES.routingMode);
+  if (options.contextCompaction !== undefined) patch.contextCompaction = choiceFlag("--context-compaction", options.contextCompaction, ENDPOINT_CHOICES.contextCompaction);
+  if (options.resultCompression !== undefined) patch.resultCompression = choiceFlag("--result-compression", options.resultCompression, ENDPOINT_CHOICES.resultCompression);
+  if (options.maxToolRounds !== undefined) patch.maxToolRounds = intFlag("--max-tool-rounds", options.maxToolRounds, 0, 100);
+  if (options.precompactAt !== undefined) patch.precompactAtTokens = intFlag("--precompact-at", options.precompactAt, 0, 10_000_000);
+  if (options.traceRetention !== undefined) patch.traceRetentionDays = intFlag("--trace-retention", options.traceRetention, 0, 3650);
+  if (options.batchMaxRequests !== undefined) patch.batchMaxRequests = intFlag("--batch-max-requests", options.batchMaxRequests, 1, 100_000);
+  const batch = onOff("--batch", options.batch);
+  if (batch !== undefined) patch.batchEnabled = batch;
+  const toolCompression = onOff("--tool-compression", options.toolCompression);
+  if (toolCompression !== undefined) patch.toolCompression = toolCompression;
+  const recordAttachments = onOff("--record-attachments", options.recordAttachments);
+  if (recordAttachments !== undefined) patch.recordAttachments = recordAttachments;
+  if (options.tools !== undefined) {
+    const raw = options.tools.trim();
+    patch.tools = raw === "" || raw.toLowerCase() === "none" ? [] : raw.split(",").map((t) => t.trim()).filter(Boolean);
+  }
+  const aliases = pairFlags("--alias", options.alias);
+  if (aliases !== undefined) patch.aliases = aliases;
+  const modelRoutes = pairFlags("--model-route", options.modelRoute);
+  if (modelRoutes !== undefined) patch.modelRoutes = modelRoutes;
+  const kindRoutes = pairFlags("--kind-route", options.kindRoute);
+  if (kindRoutes !== undefined) patch.kindRoutes = kindRoutes;
+
   // Coding-agent settings live in providerOptions. They are merged onto what
   // the endpoint already has, so setting one flag never silently drops the
   // others; `reset` removes a key rather than writing an empty one, which is
@@ -751,6 +853,24 @@ through the gh CLI; the plaintext never reaches your terminal.`,
       .option("--name <name>", "display name")
       .option("--model <id>", "default model id")
       .option("--system-prompt <text>", "system prompt prepended to every request")
+      .option("--rename <slug>", "change the endpoint's slug (its URL name)")
+      .option("--stream-granularity <final|tool|full>", "how much of a streamed turn the client sees")
+      .option("--model-mode <default|passthrough>", "route the request's own model id instead of the endpoint's")
+      .option("--billing-mode <ditto|byok|both>", "pay with Ditto credits, your own provider keys, or either")
+      .option("--routing-mode <cheap|fast|balanced>", "how the provider ladder is ranked")
+      .option("--context-compaction <off|light|balanced|aggressive>", "how eagerly finished tool results are digested")
+      .option("--result-compression <off|conservative|grouped>", "compress tool results at ingestion")
+      .option("--max-tool-rounds <n>", "cap the server-side tool rounds per turn")
+      .option("--precompact-at <tokens>", "start a background compaction snapshot at this prompt size (0 disables)")
+      .option("--trace-retention <days>", "how long recorded traces are kept (0 = forever, plan permitting)")
+      .option("--batch <on|off>", "admit batch submissions")
+      .option("--batch-max-requests <n>", "cap the requests one batch may carry")
+      .option("--tool-compression <on|off>", "replace harness tool descriptions with condensed rewrites")
+      .option("--record-attachments <on|off>", "store images sent on the user turn")
+      .option("--tools <a,b|none>", "server-side tools this endpoint offers")
+      .option("--alias <name=model>", "model alias; repeatable, replaces the whole set", collectRepeatable, undefined)
+      .option("--model-route <requested=provider>", "pin a requested model id to a provider model; repeatable", collectRepeatable, undefined)
+      .option("--kind-route <kind=model>", "pin a request archetype to a model; repeatable", collectRepeatable, undefined)
       .option("--codex-models <on|off>", "list this endpoint's models in Codex's /model picker")
       .option("--codex-catalog <on|off>", "also list the provider catalog (Claude, Gemini, …) in Codex")
       .option("--codex-catalog-limit <n>", "how many catalog models to list in Codex (default 40)")
