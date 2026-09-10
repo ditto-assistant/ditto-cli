@@ -1,6 +1,6 @@
 {
   "name": "@heyditto/cli",
-  "version": "2.7.0",
+  "version": "2.8.0",
   "description": "Ditto Memory CLI — save, search, fetch, and traverse the Ditto memory graph from the shell.",
   "type": "module",
   "bin": {
