@@ -413,3 +413,74 @@ test("no flags at all is still an error", async () => {
     stub.close();
   }
 });
+
+/**
+ * Regression guard for the shape of the write, not just its contents.
+ *
+ * `endpoints set` is a PATCH: it sends only the fields the operator named and
+ * relies on the server keeping the rest (UpdateInferenceEndpoint seeds its
+ * params from the current row and overrides only non-nil request fields). A
+ * change that started echoing fetched state back — say, spreading the endpoint
+ * into the patch to merge route maps — would turn every `set` into a
+ * last-write-wins full-object write: concurrent console edits would be
+ * clobbered, and server-clamped values (traceRetentionDays) would be written
+ * back as if the operator had asked for them.
+ *
+ * So: assert the exact key set on the wire, not merely that the flag arrived.
+ */
+test("a single-flag set puts that field and nothing else on the wire", async () => {
+  const cases = [
+    [["--context-compaction", "off"], ["contextCompaction"]],
+    [["--routing", "cheap"], ["routingMode"]],
+    [["--record-trace", "off"], ["recordTrace"]],
+    [["--max-tool-rounds", "4"], ["maxToolRounds"]],
+    [["--kind-route", "aside=openai/gpt-5.6-nano"], ["kindRoutes"]],
+  ];
+  for (const [args, expected] of cases) {
+    const stub = await startStub();
+    try {
+      const out = await run(stub.base, ["endpoints", "set", "alpha", ...args]);
+      assert.equal(out.status, 0, out.stderr);
+      assert.deepEqual(Object.keys(patchOf(stub)).sort(), expected.sort(), `${args.join(" ")} sent the wrong field set`);
+    } finally {
+      stub.close();
+    }
+  }
+});
+
+/**
+ * The exact scenario reported against 2.8.0: an endpoint with recall, record
+ * and trace recording all off, changed with one unrelated flag. None of the
+ * three may appear in the request at all — naming them is what would let a
+ * server default decide their value.
+ */
+test("changing compaction never mentions the memory or trace booleans", async () => {
+  const off = { ...ENDPOINT, slug: "screener", recallEnabled: false, recordEnabled: false, recordTrace: false, recordAttachments: false, batchEnabled: false };
+  const stub = await startStub(off);
+  try {
+    const out = await run(stub.base, ["endpoints", "set", "screener", "--context-compaction", "off"]);
+    assert.equal(out.status, 0, out.stderr);
+    const body = patchOf(stub);
+    for (const key of ["recallEnabled", "recordEnabled", "recordTrace", "recordAttachments", "batchEnabled"]) {
+      assert.ok(!(key in body), `${key} must not be sent; body was ${JSON.stringify(body)}`);
+    }
+    assert.deepEqual(body, { contextCompaction: "off" });
+  } finally {
+    stub.close();
+  }
+});
+
+/** The PATCH must go to the endpoint's id, never the create route. */
+test("set targets the endpoint's own PATCH route", async () => {
+  const stub = await startStub();
+  try {
+    const out = await run(stub.base, ["endpoints", "set", "alpha", "--routing", "fast"]);
+    assert.equal(out.status, 0, out.stderr);
+    const writes = stub.calls.filter((c) => c.method !== "GET");
+    assert.equal(writes.length, 1, `expected exactly one write, got ${JSON.stringify(writes)}`);
+    assert.equal(writes[0].method, "PATCH");
+    assert.equal(writes[0].url, `/api/v5/inference/endpoints/${ENDPOINT.id}`);
+  } finally {
+    stub.close();
+  }
+});
