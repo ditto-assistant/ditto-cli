@@ -73,6 +73,47 @@ const APPROVALS = [
 ];
 
 /** Stubs the organization, connection and approval routes the CLI calls. */
+/**
+ * The backend's bearer-key auth rules, mirrored from ditto-assistant/backend
+ * main.go (`middleware.WithBearerKeyAuth`).
+ *
+ * This stub used to accept any request with any token, which meant the whole
+ * suite passed against a server shape that does not exist: five of the six
+ * routes these commands call were never registered for `ditto_mcp_` keys and
+ * answered 401 in production, and nothing here could see it. A stub that
+ * authenticates nothing cannot catch an auth-routing bug, so it now enforces
+ * the same (path prefix, methods) grants the real middleware does.
+ *
+ * Keep this list in sync with main.go. If a new command needs a route that is
+ * not here, the correct fix is a backend PR that registers it — not a wider
+ * rule in this file.
+ */
+const BEARER_KEY_RULES = [
+  { prefix: "/api/v5/inference/", methods: null },
+  { prefix: "/api/v5/chat-agents", methods: null },
+  { prefix: "/api/v5/tool-approvals", methods: ["GET", "POST"] },
+  // Read-only: this prefix also covers member management, invitations and a
+  // credits transfer that moves money, none of which belong to a stored key.
+  { prefix: "/api/v5/companies", methods: ["GET"] },
+  // A `*` matches exactly one segment, so an organization's tool connections
+  // are reachable for writes without opening its siblings.
+  { prefix: "/api/v5/companies/*/mcp-servers", methods: null },
+  { prefix: "/api/v2/mcp/servers/", methods: ["GET", "POST"] },
+];
+
+/** Whether a ditto_mcp_ key is accepted on this method+path at all. */
+function bearerKeyAccepted(method, url) {
+  const path = url.split("?")[0];
+  return BEARER_KEY_RULES.some((rule) => {
+    if (rule.methods !== null && !rule.methods.includes(method)) return false;
+    if (!rule.prefix.includes("*")) return path.startsWith(rule.prefix);
+    const want = rule.prefix.replace(/^\/|\/$/g, "").split("/");
+    const got = path.replace(/^\/|\/$/g, "").split("/");
+    if (got.length < want.length) return false;
+    return want.every((segment, i) => (segment === "*" ? !!got[i] : got[i] === segment));
+  });
+}
+
 function startStub({ companies = [OMNI, KLYRO], canManage = true, canDecide = true } = {}) {
   const calls = [];
   const connections = [structuredClone(LINEAR), structuredClone(INTERNAL)];
@@ -88,6 +129,16 @@ function startStub({ companies = [OMNI, KLYRO], canManage = true, canDecide = tr
         res.statusCode = status;
         res.end(payload === undefined ? "" : JSON.stringify(payload));
       };
+
+      // Auth first, exactly as the real middleware does. A CLI key on a route
+      // nobody registered is a 401 before any handler runs.
+      const token = (req.headers.authorization ?? "").replace(/^Bearer\s+/, "");
+      if (!token.startsWith("ditto_mcp_")) {
+        return json(401, { message: "unauthorized", status: 401 });
+      }
+      if (!bearerKeyAccepted(req.method, req.url)) {
+        return json(401, { message: "unauthorized", status: 401 });
+      }
 
       if (req.url === "/api/v5/companies" && req.method === "GET") {
         return json(200, { companies });
@@ -167,7 +218,10 @@ function run(base, args, extraEnv = {}) {
       stdio: ["ignore", "pipe", "pipe"],
       env: {
         ...process.env,
-        DITTO_API_KEY: "test-key",
+        // A realistically shaped first-party key. The stub enforces the
+        // backend's bearer-key prefix, and "test-key" would be rejected there
+        // exactly as it would be in production.
+        DITTO_API_KEY: "ditto_mcp_testkey",
         DITTO_API_BASE: base,
         DITTO_CONFIG_DIR: mkdtempSync(path.join(os.tmpdir(), "heyditto-org-")),
         ...extraEnv,
@@ -438,5 +492,49 @@ test("approvals --output json carries canDecide", async () => {
     assert.equal(JSON.parse(result.stdout).canDecide, false);
   } finally {
     stub.close();
+  }
+});
+
+// Every route these commands call must be one the backend accepts a first-party
+// key on.
+//
+// This is the assertion that was missing when five of six routes answered 401 in
+// production: the stub above accepted anything, so the suite proved only that
+// the CLI formats a response it would never receive. Enumerating the calls
+// against the same rules the middleware applies turns "did we register it" into
+// a test rather than a code review.
+test("every route the org commands call accepts a first-party CLI key", () => {
+  const calls = [
+    ["GET", "/api/v5/companies"],
+    ["GET", `/api/v5/companies/${OMNI.id}/mcp-servers`],
+    ["POST", `/api/v5/companies/${OMNI.id}/mcp-servers`],
+    ["PATCH", `/api/v5/companies/${OMNI.id}/mcp-servers/conn-linear`],
+    ["DELETE", `/api/v5/companies/${OMNI.id}/mcp-servers/conn-linear`],
+    ["GET", "/api/v5/tool-approvals"],
+    ["GET", `/api/v5/tool-approvals?company=${OMNI.id}`],
+    ["POST", "/api/v5/tool-approvals/approval-1/approve"],
+    ["POST", "/api/v5/tool-approvals/approval-1/reject"],
+    ["POST", "/api/v2/mcp/servers/conn-linear/oauth/start"],
+    ["GET", "/api/v5/inference/endpoints"],
+    ["GET", "/api/v5/inference/endpoints/ep-1/tools"],
+  ];
+  for (const [method, url] of calls) {
+    assert.equal(bearerKeyAccepted(method, url), true, `${method} ${url} must accept a CLI key`);
+  }
+});
+
+// And the grants stay as narrow as the commands need. A stored key must not
+// reach an organization's members, invitations or money just because it can
+// list the organization.
+test("a CLI key does not reach the rest of the organization surface", () => {
+  for (const [method, url] of [
+    ["POST", "/api/v5/companies"],
+    ["POST", `/api/v5/companies/${OMNI.id}/credits/transfer`],
+    ["POST", `/api/v5/companies/${OMNI.id}/members`],
+    ["DELETE", `/api/v5/companies/${OMNI.id}/members/someone`],
+    ["POST", `/api/v5/companies/${OMNI.id}/invites`],
+    ["GET", "/api/v5/admin/feature-flags"],
+  ]) {
+    assert.equal(bearerKeyAccepted(method, url), false, `${method} ${url} must NOT accept a CLI key`);
   }
 });
