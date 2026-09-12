@@ -447,3 +447,185 @@ export async function listChatAgents(): Promise<ChatAgent[]> {
   const out = await apiFetch<{ agents?: ChatAgent[] }>("/api/v5/chat-agents");
   return out.agents ?? [];
 }
+
+// ===== Developer apps (Sign in with Ditto clients) =====
+
+/** A developer app as GET /api/v5/admin/apps returns it. */
+export interface DeveloperApp {
+  appID: string;
+  name: string;
+  slug?: string;
+  kind?: string;
+  enabled: boolean;
+  archived: boolean;
+  createdAt: string;
+  /** Returned ONLY by create and rotate-secret; never on reads. */
+  appSecret?: string;
+  metadata?: {
+    description?: string;
+    landingURL?: string;
+    appURL?: string;
+    xURL?: string;
+    youtubeURL?: string;
+    instagramURL?: string;
+    linkedinURL?: string;
+  };
+  consentRationale?: Record<string, string>;
+}
+
+export interface AppEndpoint extends InferenceEndpoint {
+  appBilling: "user" | "sponsor";
+}
+
+export interface ConsentProfile {
+  appID: string;
+  name: string;
+  iconUrl?: string;
+  description?: string;
+  landingURL?: string;
+  appURL?: string;
+  ownerName?: string;
+  enabled: boolean;
+  rationale: Record<string, string>;
+  endpoints: { slug: string; name: string; model?: string; billing?: string }[];
+  callbackOrigins: string[];
+}
+
+const APPS = "/api/v5/admin/apps";
+
+export async function listApps(companyId?: string): Promise<DeveloperApp[]> {
+  const query = companyId ? `?company=${encodeURIComponent(companyId)}` : "";
+  const out = await apiFetch<{ apps?: DeveloperApp[] }>(`${APPS}${query}`);
+  return out.apps ?? [];
+}
+
+/** Resolves an app by app id, slug or (unique) name. */
+export async function findApp(ref: string, companyId?: string): Promise<DeveloperApp> {
+  const apps = await listApps(companyId);
+  const wanted = ref.trim().toLowerCase();
+  const matches = apps.filter(
+    (a) => a.appID.toLowerCase() === wanted || (a.slug ?? "").toLowerCase() === wanted || a.name.toLowerCase() === wanted,
+  );
+  if (matches.length === 1) return matches[0];
+  if (matches.length === 0) {
+    const known = apps.map((a) => a.appID).join(", ") || "(none)";
+    throw new Error(`no app "${ref}". Known apps: ${known}`);
+  }
+  throw new Error(`"${ref}" matches several apps (${matches.map((a) => a.appID).join(", ")}); pass the app id`);
+}
+
+export function createApp(name: string, companyId?: string): Promise<DeveloperApp> {
+  return apiFetch<DeveloperApp>(APPS, { method: "POST", body: { name, ...(companyId ? { companyId } : {}) } });
+}
+
+export interface AppPatch {
+  name?: string;
+  enabled?: boolean;
+  archived?: boolean;
+  description?: string;
+  landingURL?: string;
+  appURL?: string;
+  xURL?: string;
+  youtubeURL?: string;
+  instagramURL?: string;
+  linkedinURL?: string;
+  consentRationale?: Record<string, string>;
+}
+
+export function updateApp(appId: string, patch: AppPatch): Promise<DeveloperApp> {
+  return apiFetch<DeveloperApp>(`${APPS}/${encodeURIComponent(appId)}`, { method: "PATCH", body: patch });
+}
+
+/** Mints a fresh app secret. The response is the ONLY copy. */
+export function rotateAppSecret(appId: string): Promise<{ appID: string; appSecret: string }> {
+  return apiFetch(`${APPS}/${encodeURIComponent(appId)}/rotate-secret`, { method: "POST", body: {} });
+}
+
+export interface OriginChallenge {
+  origin: string;
+  token?: string;
+  wellKnown?: string;
+  verified: boolean;
+  callbackOrigins?: string[];
+}
+
+export function verifyCallbackOrigin(appId: string, origin: string, confirm: boolean): Promise<OriginChallenge> {
+  return apiFetch<OriginChallenge>(`${APPS}/${encodeURIComponent(appId)}/verify-callback-origin`, {
+    method: "POST",
+    body: { origin, confirm },
+  });
+}
+
+export function uploadAppIcon(appId: string, contentType: string, dataBase64: string): Promise<{ iconURL?: string; iconUrl?: string }> {
+  return apiFetch(`${APPS}/${encodeURIComponent(appId)}/icon`, { method: "POST", body: { contentType, dataBase64 } });
+}
+
+export async function listAppEndpoints(appId: string): Promise<{ endpoints: AppEndpoint[]; baseUrl: string; onBehalfOfHeader: string }> {
+  const out = await apiFetch<{ endpoints?: AppEndpoint[]; baseUrl?: string; onBehalfOfHeader?: string }>(
+    `${APPS}/${encodeURIComponent(appId)}/endpoints`,
+  );
+  return { endpoints: out.endpoints ?? [], baseUrl: out.baseUrl ?? "", onBehalfOfHeader: out.onBehalfOfHeader ?? "X-Ditto-On-Behalf-Of" };
+}
+
+export function attachAppEndpoint(appId: string, endpointId: string, billing: "user" | "sponsor"): Promise<AppEndpoint> {
+  return apiFetch<AppEndpoint>(`${APPS}/${encodeURIComponent(appId)}/endpoints`, { method: "POST", body: { endpointId, billing } });
+}
+
+export function setAppEndpointBilling(appId: string, endpointId: string, billing: "user" | "sponsor"): Promise<AppEndpoint> {
+  return apiFetch<AppEndpoint>(`${APPS}/${encodeURIComponent(appId)}/endpoints/${encodeURIComponent(endpointId)}`, {
+    method: "PATCH",
+    body: { billing },
+  });
+}
+
+export function detachAppEndpoint(appId: string, endpointId: string): Promise<void> {
+  return apiFetch<void>(`${APPS}/${encodeURIComponent(appId)}/endpoints/${encodeURIComponent(endpointId)}`, { method: "DELETE" });
+}
+
+/** Public: what the consent screen shows for an app. */
+export function getConsentProfile(appId: string): Promise<ConsentProfile> {
+  return apiFetch<ConsentProfile>(`/api/v5/consent-profile/${encodeURIComponent(appId)}`, { auth: false });
+}
+
+// ===== Receipts =====
+
+export interface Receipt {
+  id: number;
+  timestamp: string;
+  leg: string;
+  serviceName?: string;
+  appID?: string;
+  model?: string;
+  provider?: string;
+  billing?: string;
+  dittoTokens: number;
+  estimatedTokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+}
+
+export interface ReceiptSummaryLine {
+  leg: string;
+  appID?: string;
+  appName?: string;
+  calls: number;
+  dittoTokens: number;
+  estimatedTokens: number;
+}
+
+export interface ReceiptsResponse {
+  since?: string;
+  receipts: Receipt[];
+  summary: ReceiptSummaryLine[];
+}
+
+export function listReceipts(input: { leg?: string; app?: string; days?: number; limit?: number }): Promise<ReceiptsResponse> {
+  const params = new URLSearchParams();
+  if (input.leg) params.set("leg", input.leg);
+  if (input.app) params.set("app", input.app);
+  if (input.days) params.set("days", String(input.days));
+  if (input.limit) params.set("limit", String(input.limit));
+  const qs = params.toString();
+  return apiFetch<ReceiptsResponse>(`/api/v5/me/receipts${qs ? `?${qs}` : ""}`);
+}

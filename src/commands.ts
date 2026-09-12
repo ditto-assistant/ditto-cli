@@ -71,7 +71,7 @@ function pad(s: string, n: number): string {
 }
 
 /** Left-aligned columns sized to their widest cell; the last column is not padded. */
-function printTable(header: string[], rows: string[][]): void {
+export function printTable(header: string[], rows: string[][]): void {
   const widths = header.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i].length)));
   const line = (r: string[]) => r.map((c, i) => (i === r.length - 1 ? c : pad(c, widths[i]))).join("  ");
   process.stdout.write(`${line(header)}\n`);
@@ -84,7 +84,7 @@ function spendColumn(e: InferenceEndpoint): string {
   return `${used} / ${e.spendLimitTokens.toLocaleString()}${e.spendPeriod && e.spendPeriod !== "never" ? ` ${e.spendPeriod}` : ""}`;
 }
 
-function isJSON(options: { output?: string }): boolean {
+export function isJSON(options: { output?: string }): boolean {
   return options.output === "json" || options.output === "raw";
 }
 
@@ -101,7 +101,7 @@ async function confirmElevated(action: string, slug: string, yes: boolean | unde
  * Generic typed confirmation: the operator must type `expected` back (or pass
  * `--yes`). Refuses without a terminal so scripts cannot stumble into it.
  */
-async function confirmTyped(input: { action: string; expected: string; label: string; yes: boolean | undefined; preview?: string }): Promise<void> {
+export async function confirmTyped(input: { action: string; expected: string; label: string; yes: boolean | undefined; preview?: string }): Promise<void> {
   if (input.yes) return;
   if (!process.stdin.isTTY || !process.stderr.isTTY) {
     throw new Error(`refusing to ${input.action} without confirmation. Re-run with --yes to confirm.`);
@@ -718,7 +718,7 @@ export async function cmdEndpointKeysRevoke(ref: string, keyId: string, options:
   process.stdout.write(`Revoked key ${keyId} on ${endpoint.slug}.\n`);
 }
 
-interface KeysCreateOptions {
+export interface KeysCreateOptions {
   output?: string;
   /** Canonical destination selector; every store also has a shorthand flag. */
   store?: string;
@@ -758,7 +758,7 @@ interface KeysCreateOptions {
 }
 
 /** Shorthand flag values keyed by the store they select. */
-function shorthandsOf(options: KeysCreateOptions): Partial<Record<StoreId, string>> {
+export function shorthandsOf(options: KeysCreateOptions): Partial<Record<StoreId, string>> {
   return {
     github: options.ghSecret,
     gitlab: options.gitlabVar,
@@ -879,7 +879,7 @@ export async function cmdEndpointKeysCreate(ref: string, options: KeysCreateOpti
 }
 
 /** Key label in the Ditto app: which store, which target, which name. */
-function defaultKeyName(store: SecretStore, target: StoreTarget, secretName: string): string {
+export function defaultKeyName(store: SecretStore, target: StoreTarget, secretName: string): string {
   if (store.keyName) return store.keyName(secretName, target);
   const scope = Object.entries(target.fields)
     .filter(([key, value]) => key !== "kind" && value)
