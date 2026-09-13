@@ -12,6 +12,15 @@ export interface StoredAuth {
   createdAt?: string;
   /** Endpoint slug or id used by `heyditto claude` / `heyditto codex` when --endpoint is omitted. */
   defaultEndpoint?: string;
+  /**
+   * Organization slug used when `--org` is omitted, set by `heyditto orgs use`.
+   *
+   * Deliberately the slug rather than the id: it is what a person recognises in
+   * `heyditto orgs`, and it is what they will type. The id is resolved from it
+   * on every command, so a renamed organization fails loudly instead of quietly
+   * acting on the wrong one.
+   */
+  defaultCompany?: string;
   /** Explicit MCP session (`heyditto session new`) sent as X-Ditto-Session-Id on every request. */
   activeSession?: { id: string; name?: string; createdAt?: string };
 }
