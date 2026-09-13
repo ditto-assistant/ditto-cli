@@ -28,6 +28,7 @@ import { type ActiveSession, markSessionUsed, resolveActiveSession, sessionHeade
 import { NO_KEY_MESSAGE } from "./api.js";
 import { openInBrowser } from "./browser.js";
 import { registerTeleportCommands } from "./teleport/commands.js";
+import { registerAppCommands } from "./app-commands.js";
 import { deviceLogin } from "./device-login.js";
 
 type OutputFormat = "json" | "text" | "markdown" | "raw";
@@ -1153,6 +1154,7 @@ your own graph or an app graph.`,
     .action(cmdLogin);
 
   registerEndpointCommands(program, addExamples, outputOption);
+  registerAppCommands(program, addExamples, outputOption);
   registerHarnessCommands(program, addExamples);
   registerSessionCommands(program, addExamples);
   registerTeleportCommands(program, addExamples);

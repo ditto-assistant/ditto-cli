@@ -141,6 +141,11 @@ heyditto graphs sharing (--enable|--disable) [--title <t>] [--description <d>]
 heyditto init [--name <name>] [--subscribe <@graph>]... [<@graph>...] [--json]
 heyditto login [<key>] [--paste] [--stdin]
 heyditto endpoints [--set-default <slug>] [--clear-default]
+heyditto apps list [--company <id>]
+heyditto apps create <name> [--gh-secret NAME --repo o/r | --gcp-secret NAME | …]
+heyditto apps show|update|oidc|icon set|origins verify|secret rotate|consent set …
+heyditto apps endpoints list|attach|billing|detach <app> [<endpoint>]
+heyditto receipts [--leg ditto|byok|covered] [--app <app_id>] [--days <n>]
 heyditto claude [options] [-- <claude args>]
 heyditto codex  [options] [-- <codex args>]
 heyditto sessions [--json] [--all]
@@ -304,6 +309,55 @@ Top-level aliases are also available:
 ```bash
 heyditto knowledge-graphs --output json
 heyditto graph-sharing --enable --title "Support Graph" --description "Public support notes"
+```
+
+### `apps` — developer apps ("Sign in with Ditto")
+
+Everything the developer console (developer.heyditto.ai) does for an app, from the
+shell, so an agent can set an app up end to end. The client secret follows the same
+rule as endpoint keys: it is **forwarded straight into a secret store** over that
+store CLI's stdin and never printed.
+
+```bash
+heyditto apps create "DittoBench" --gh-secret DITTO_OIDC_CLIENT_SECRET --repo ditto-assistant/ditto-subnet
+heyditto apps origins verify dittobench-3f9a https://dittobench.ai            # serve the token, then:
+heyditto apps origins verify dittobench-3f9a https://dittobench.ai --confirm
+heyditto apps consent set dittobench-3f9a credits:spend "Pays for the inference your miner uses."
+heyditto apps icon set dittobench-3f9a ./logo.png
+heyditto apps oidc dittobench-3f9a --callback https://dittobench.ai/auth/ditto/callback >> .env
+heyditto apps endpoints attach dittobench-3f9a screener --billing sponsor
+heyditto apps endpoints attach dittobench-3f9a competition --billing user
+heyditto endpoints keys create competition --gh-secret DITTO_ROUTER_KEY --repo ditto-assistant/ditto-subnet
+```
+
+- `create` mints the app and its secret. With a store flag the secret is stored and
+  never shown; without one it is minted but hidden — rotate it into a store later
+  with `apps secret rotate` (the previous secret stops working).
+- `oidc` prints the non-secret OIDC configuration (`DITTO_OIDC_ISSUER`,
+  `DITTO_OIDC_CLIENT_ID`, authorization/token/userinfo/JWKS endpoints) as env lines
+  or `--output json`. `client_id` is the app id; redirect URIs must live on a
+  verified callback origin.
+- `consent set <app> <scope> "<why>"` sets the app's own reason under each requested
+  permission on the consent screen; `consent show` renders the public consent
+  profile (`GET /api/v5/consent-profile/<app>`).
+- `endpoints attach <app> <endpoint> --billing user|sponsor` makes a Router endpoint
+  app-owned: the app's users get inference through it (never keys or edits). `user`
+  bills the consenting user under their `credits:spend` grant to this app
+  (`X-Ditto-On-Behalf-Of: <ditto uid>` from your server, 402 when not authorized);
+  `sponsor` bills the endpoint owner and only records the user for attribution.
+- `apps` commands use your first-party key against `/api/v5/admin/apps`; pass
+  `--company <id>` to act on an organization's apps.
+
+### `receipts`
+
+Your receipts for the last 30 days by billing leg (`ditto` = your balance, `byok` =
+your own provider keys, no Ditto charge, `covered` = paid by Ditto) and by the app
+that spent under your consent; sponsored app calls show up on the sponsor's account.
+
+```bash
+heyditto receipts
+heyditto receipts --leg byok --days 7
+heyditto receipts --app dittobench-3f9a --output json
 ```
 
 ### `status`
