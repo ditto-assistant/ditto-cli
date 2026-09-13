@@ -51,6 +51,7 @@ function startStub() {
       }
       if (u === `/api/v5/admin/apps/${APP.appID}/endpoints` && req.method === "GET") return json(200, { endpoints: [{ ...ENDPOINT, appBilling: "sponsor" }], baseUrl: "https://api.example.test/v1", onBehalfOfHeader: "X-Ditto-On-Behalf-Of" });
       if (u === `/api/v5/admin/apps/${APP.appID}/endpoints` && req.method === "POST") return json(201, { ...ENDPOINT, appBilling: JSON.parse(body).billing });
+      if (u === `/api/v5/admin/apps/${APP.appID}/endpoints/${ENDPOINT.id}` && req.method === "DELETE") { res.writeHead(204); return res.end(); }
       if (u === "/api/v5/inference/endpoints" && req.method === "GET") return json(200, { baseUrl: "https://api.example.test/v1", endpoints: [ENDPOINT], limit: 5, used: 1 });
       if (u === `/api/v5/consent-profile/${APP.appID}`) return json(200, { appID: APP.appID, name: APP.name, enabled: true, rationale: APP.consentRationale, endpoints: [], callbackOrigins: ["https://dittobench.ai"], iconUrl: "https://cdn.example.test/icon.png" });
       if (u.startsWith("/api/v5/me/receipts")) return json(200, { since: "2026-08-13T00:00:00Z", receipts: [{ id: 1, timestamp: "2026-09-12T10:00:00Z", leg: "ditto", appID: APP.appID, model: "openai/gpt-5.6-luna", billing: "user", dittoTokens: 25000000, estimatedTokens: 0, inputTokens: 10, outputTokens: 5, totalTokens: 15 }], summary: [{ leg: "ditto", appID: APP.appID, appName: APP.name, calls: 1, dittoTokens: 25000000, estimatedTokens: 0 }] });
@@ -207,6 +208,53 @@ test("receipts renders the summary and lines with app attribution", async () => 
     assert.match(out.stdout, /DittoBench/);
     assert.match(out.stdout, /\$0\.0250/);
     assert.ok(stub.calls[0].url.includes(`app=${APP.appID}`));
+  } finally {
+    await stub.close();
+  }
+});
+
+test("apps secret rotate: a failed delivery never prints the secret and says the old one is dead", async () => {
+  const stub = await startStub();
+  const fake = createFakeCLIs(["gh"]);
+  try {
+    const out = await run(
+      ["apps", "secret", "rotate", "dittobench", "--gh-secret", "DITTO_OIDC_CLIENT_SECRET", "--repo", "ditto-assistant/ditto-subnet", "--yes"],
+      { ...baseEnv(stub), ...fake.env(), FAKE_CLI_FAIL: "secret set" },
+    );
+    assert.notEqual(out.code, 0);
+    assert.ok(!out.stdout.includes(SECRET) && !out.stderr.includes(SECRET), "secret must never reach stdout/stderr on failure");
+    assert.match(out.stderr, /rotated but could NOT be stored/);
+    assert.match(out.stderr, /previous secret no longer works/);
+    assert.match(out.stderr, /apps secret rotate dittobench/);
+  } finally {
+    await stub.close();
+  }
+});
+
+test("apps create preflights the store before the app exists", async () => {
+  const stub = await startStub();
+  try {
+    // No fake gh on PATH: preflight fails, so no app may be created.
+    const out = await run(
+      ["apps", "create", "DittoBench", "--gh-secret", "DITTO_OIDC_CLIENT_SECRET", "--repo", "ditto-assistant/ditto-subnet", "--yes"],
+      { ...baseEnv(stub), PATH: "/nonexistent" },
+    );
+    assert.notEqual(out.code, 0);
+    assert.ok(!stub.calls.some((c) => c.method === "POST" && c.url === "/api/v5/admin/apps"), "the app must not be created when the store is unusable");
+  } finally {
+    await stub.close();
+  }
+});
+
+test("apps endpoints detach asks for the slug unless --yes", async () => {
+  const stub = await startStub();
+  try {
+    const refused = await run(["apps", "endpoints", "detach", "dittobench", "screener"], baseEnv(stub));
+    assert.notEqual(refused.code, 0);
+    assert.ok(!stub.calls.some((c) => c.method === "DELETE"), "nothing detached without confirmation");
+    const done = await run(["apps", "endpoints", "detach", "dittobench", "screener", "--yes"], baseEnv(stub));
+    assert.equal(done.code, 0, done.stderr);
+    assert.ok(stub.calls.some((c) => c.method === "DELETE" && c.url.endsWith("/endpoints/11111111-1111-1111-1111-111111111111")));
   } finally {
     await stub.close();
   }

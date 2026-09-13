@@ -101,10 +101,19 @@ function requireEnabledScope(scope: string): string {
  * Forwards a secret (the app secret) into the selected store exactly like an
  * endpoint key: stdin to the platform CLI, never argv, never stdout.
  */
-function forwardSecret(options: KeysCreateOptions, defaultName: string, plaintext: string, what: string): { secretName: string; describe: string } {
+type PreparedStore = { store: ReturnType<typeof selectStore>["store"]; secretName: string; target: ReturnType<ReturnType<typeof selectStore>["store"]["resolveTarget"]> };
+
+/** Select the store, preflight its CLI and resolve the target — nothing is minted yet. */
+function prepareSecretStore(options: KeysCreateOptions, defaultName: string): PreparedStore {
   const { store, name: secretName } = selectStore({ ...options, secret: options.secret ?? defaultName, shorthands: shorthandsOf(options) });
   store.preflight();
   const target = store.resolveTarget(options);
+  return { store, secretName, target };
+}
+
+/** Forward a secret into a prepared store over stdin; never argv, never stdout. */
+function deliverPrepared(prepared: PreparedStore, plaintext: string, what: string): { secretName: string; describe: string } {
+  const { store, secretName, target } = prepared;
   deliver(store, secretName, store.deliveries(secretName, target), plaintext);
   process.stderr.write(`Stored ${what} as ${secretName} in ${target.describe}.\n`);
   return { secretName, describe: target.describe };
@@ -160,11 +169,22 @@ export async function cmdAppsList(options: ScopeOptions): Promise<void> {
 }
 
 export async function cmdAppsCreate(name: string, options: KeysCreateOptions & ScopeOptions): Promise<void> {
+  // Everything that can fail cheaply happens before the app exists: the
+  // platform CLI is present and signed in and its target resolves. Otherwise
+  // a typo in --repo would create the app and lose its only secret.
+  const prepared = hasStoreFlag(options) ? prepareSecretStore(options, "DITTO_OIDC_CLIENT_SECRET") : undefined;
   const app = await createApp(name.trim(), options.company);
   const { appSecret, ...safe } = app;
   let stored: { secretName: string; describe: string } | undefined;
-  if (appSecret && hasStoreFlag(options)) {
-    stored = forwardSecret(options, "DITTO_OIDC_CLIENT_SECRET", appSecret, "the app secret");
+  if (appSecret && prepared) {
+    try {
+      stored = deliverPrepared(prepared, appSecret, "the app secret");
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new Error(
+        `${reason}\nApp ${app.appID} was created but its secret could NOT be stored and is not recoverable. Rotate it into a store: heyditto apps secret rotate ${app.appID} --gh-secret ${prepared.secretName} --repo <owner/repo>`,
+      );
+    }
   }
   if (isJSON(options)) return writeJSON({ app: safe, secretStored: stored ?? null, oidc: oidcConfig(app) });
   process.stdout.write(`Created app ${app.appID} ("${app.name}").\n`);
@@ -293,8 +313,17 @@ export async function cmdAppsSecretRotate(ref: string, options: KeysCreateOption
   });
   const rotated = await rotateAppSecret(app.appID);
   const { appSecret, ...safe } = rotated;
-  deliver(store, secretName, store.deliveries(secretName, target), appSecret ?? "");
-  if (isJSON(options)) return writeJSON({ ...safe, secretStored: { secretName, describe: target.describe } });
+  try {
+    deliver(store, secretName, store.deliveries(secretName, target), appSecret ?? "");
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    // The backend already replaced the secret; the plaintext is gone with this
+    // process. Never print it as a fallback — say what happened and how to recover.
+    throw new Error(
+      `${reason}\nThe app secret of ${app.appID} was rotated but could NOT be stored; the previous secret no longer works and the new one is not recoverable. Re-run: heyditto apps secret rotate ${app.appID} --gh-secret ${secretName} --repo <owner/repo>`,
+    );
+  }
+  if (isJSON(options)) return writeJSON({ ...safe, appID: app.appID, secretStored: { secretName, describe: target.describe } });
   process.stdout.write(`Rotated the app secret of ${app.appID} and stored ${secretName} in ${target.describe}.\n`);
 }
 
@@ -352,9 +381,17 @@ export async function cmdAppsEndpointsBilling(ref: string, endpointRef: string, 
   process.stdout.write(`${updated.slug} now bills the ${updated.appBilling === "user" ? "consenting user" : "sponsor"}.\n`);
 }
 
-export async function cmdAppsEndpointsDetach(ref: string, endpointRef: string, options: ScopeOptions): Promise<void> {
+export async function cmdAppsEndpointsDetach(ref: string, endpointRef: string, options: ScopeOptions & { yes?: boolean }): Promise<void> {
   const app = await findApp(ref, options.company);
   const { endpoint } = await getEndpoint(endpointRef);
+  // App users lose this endpoint the moment it is detached; make it deliberate.
+  await confirmTyped({
+    action: `detach ${endpoint.slug} from ${app.appID} (its app users lose access immediately)`,
+    expected: endpoint.slug,
+    label: "the endpoint slug",
+    yes: options.yes,
+    preview: `Will detach ${endpoint.slug} from ${app.appID}. The endpoint and its keys are kept; app users can no longer call it.`,
+  });
   await detachAppEndpoint(app.appID, endpoint.id);
   if (isJSON(options)) return writeJSON({ appID: app.appID, detached: endpoint.id });
   process.stdout.write(`Detached ${endpoint.slug} from ${app.appID}.\n`);
@@ -497,7 +534,15 @@ export function registerAppCommands(program: Command, addExamples: (command: Com
   heyditto endpoints keys create competition --gh-secret DITTO_ROUTER_KEY --repo ditto-assistant/ditto-subnet   # the app's server key`,
   );
   endpoints.command("billing").description("change who pays on an attached endpoint").argument("<app>").argument("<endpoint>").argument("<who>", "user | sponsor").addOption(companyOption()).addOption(outputOption()).action(cmdAppsEndpointsBilling);
-  endpoints.command("detach").argument("<app>").argument("<endpoint>").addOption(companyOption()).addOption(outputOption()).action(cmdAppsEndpointsDetach);
+  endpoints
+    .command("detach")
+    .description("detach an endpoint from the app (its app users lose access immediately; asks you to type the slug)")
+    .argument("<app>")
+    .argument("<endpoint>")
+    .option("--yes", "skip the confirmation")
+    .addOption(companyOption())
+    .addOption(outputOption())
+    .action(cmdAppsEndpointsDetach);
 
   addExamples(
     program
