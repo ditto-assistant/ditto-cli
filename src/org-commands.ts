@@ -68,6 +68,31 @@ function writeJSON(value: unknown): void {
  * commands have a meaningful personal answer, and the ones that do not say so
  * themselves with a message naming the flag.
  */
+/**
+ * Reads one header value from stdin.
+ *
+ * Exists so a bearer token never has to appear in argv: `--header "Name: -"`
+ * takes the value from the pipe. Trailing newline is stripped because
+ * `printf %s` and `echo` differ there and a token with a stray \n fails
+ * server-side in a way that looks like a bad credential rather than a bad pipe.
+ */
+async function readHeaderValueFromStdin(headerName: string): Promise<string> {
+  if (process.stdin.isTTY) {
+    throw new Error(
+      `--header "${headerName}: -" reads the value from stdin; pipe it in, e.g. printf %s "$TOKEN" | heyditto ...`,
+    );
+  }
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  const value = Buffer.concat(chunks).toString("utf8").replace(/\r?\n$/, "");
+  if (value === "") {
+    throw new Error(`--header "${headerName}: -" got an empty value on stdin`);
+  }
+  return value;
+}
+
 async function resolveScope(options: ScopeOptions): Promise<Company | undefined> {
   const wanted = options.org?.trim() || (await readStoredAuth())?.defaultCompany;
   if (!wanted) return undefined;
@@ -207,7 +232,15 @@ export async function cmdMCPAdd(
   for (const raw of options.header ?? []) {
     const index = raw.indexOf(":");
     if (index <= 0) throw new Error(`--header must be "Name: value", got "${raw}"`);
-    headers[raw.slice(0, index).trim()] = raw.slice(index + 1).trim();
+    const headerName = raw.slice(0, index).trim();
+    const headerValue = raw.slice(index + 1).trim();
+    // A bare `--header "Authorization: Bearer ..."` leaves the credential in
+    // shell history and in the process table, where any local user can read it
+    // off `ps`. A value of "-" reads it from stdin instead, which keeps it out
+    // of both. The header NAME still comes from the flag; the name is not the
+    // secret.
+    headers[headerName] =
+      headerValue === "-" ? await readHeaderValueFromStdin(headerName) : headerValue;
   }
   const authType = options.auth ?? (Object.keys(headers).length > 0 ? "headers" : "oauth");
   if (authType === "headers" && Object.keys(headers).length === 0) {
@@ -529,13 +562,18 @@ running. See \`heyditto approvals\`.`,
       .argument("<url>", "the server's MCP endpoint (https)")
       .option("--transport <transport>", "streamable_http (default) or sse")
       .option("--auth <type>", "oauth (default) or headers")
-      .option("--header <header...>", 'for --auth headers: "Name: value"')
+      .option(
+        "--header <header...>",
+        'for --auth headers: "Name: value", or "Name: -" to read the value from stdin',
+      )
       .option("--description <text>", "why the team has this connected")
       .addOption(orgOption())
       .addOption(outputOption())
       .action(cmdMCPAdd),
     `  heyditto mcp add Linear https://mcp.linear.app/mcp --org omni-aura
-  heyditto mcp add Internal https://tools.internal/mcp --auth headers --header "Authorization: Bearer xxx"`,
+  # "-" reads the secret from stdin, keeping it out of shell history and out of
+  # the process table. Prefer it for anything bearer-shaped.
+  printf %s "$TOKEN" | heyditto mcp add Internal https://tools.internal/mcp --auth headers --header "Authorization: -"`,
   );
   addExamples(
     mcp
