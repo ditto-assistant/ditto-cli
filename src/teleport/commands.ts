@@ -562,3 +562,14 @@ export function registerTeleportCommands(program: Command, addExamples: (c: Comm
 function collect(value: string, previous: string[]): string[] {
   return [...previous, value];
 }
+
+/**
+ * Remote Control checkpoint: push the session's root as a new generation and
+ * return its number. Same code path as `heyditto teleport push`, without the
+ * printing.
+ */
+export async function checkpointPush(root: string, harness: string | undefined, sessionId: string | undefined): Promise<number> {
+  const summary = await runPush(root, { harness, session: sessionId });
+  if (!summary) throw new Error("checkpoint produced no generation");
+  return summary.generation;
+}

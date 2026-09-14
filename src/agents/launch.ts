@@ -17,7 +17,7 @@ import {
   revokeKey,
 } from "../api.js";
 import { openInBrowser } from "../browser.js";
-import { endpointURL, resolveApiKey } from "../config.js";
+import { apiBaseURL, endpointURL, resolveApiKey } from "../config.js";
 import { deviceLogin } from "../device-login.js";
 import { formatActivation } from "../endpoint-format.js";
 import { readStoredAuth, saveLogin, updateStoredAuth } from "../store.js";
@@ -37,6 +37,11 @@ import {
   stripSeparator,
 } from "./types.js";
 import { defaultWorktreeName, ensureWorktree } from "./worktree.js";
+import { RemoteSession } from "../remote/controller.js";
+import { startHeadlessTurn } from "../remote/headless.js";
+import { type HookServer, claudeHookSettings, codexNotifyOverride, startHookServer, withHookArgs } from "../remote/hooks.js";
+import { type PtySession, loadPty, spawnInPty } from "../remote/pty.js";
+import { checkpointPush } from "../teleport/commands.js";
 
 export interface LaunchOptions {
   endpoint?: string;
@@ -60,6 +65,17 @@ export interface LaunchOptions {
    * restored transcript even when the original directory still exists.
    */
   cwd?: string;
+  /**
+   * Remote Control: announce the session to the Ditto backend so the app can
+   * send prompts (with attachments) into this terminal. On by default;
+   * `--no-remote-control` turns it off.
+   */
+  remoteControl?: boolean;
+  /**
+   * Headless Remote Control: no terminal UI. Each prompt from the app runs one
+   * `claude -p` / `codex exec` turn in the session's thread until Ctrl+C.
+   */
+  headless?: boolean;
 }
 
 const DRY_RUN_KEY = "ditto_inf_<minted-at-launch>";
@@ -481,17 +497,26 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   };
   await writeSession(nextRecord);
 
-  const child = spawn(plan.command, plan.args, {
-    stdio: "inherit",
-    env: childEnv(plan, process.env),
-    cwd,
-  });
-  const restore = forwardSignals(child);
+  const remote: RemoteMode = remoteMode(options);
   let exitCode: number | null = null;
   try {
-    exitCode = await waitForExit(child, plan.command, cwd);
+    if (remote === "headless") {
+      exitCode = await runHeadless(harness, {
+        cwd,
+        sessionId,
+        harnessSessionId,
+        baseUrl: catalog.baseUrl,
+        apiKey: key.key ?? "",
+        model,
+        options,
+        record: nextRecord,
+      });
+    } else if (remote === "tui") {
+      exitCode = await runInTerminalWithRemote(harness, plan, { cwd, sessionId, harnessSessionId, record: nextRecord });
+    } else {
+      exitCode = await runInTerminal(plan, cwd);
+    }
   } finally {
-    restore();
     process.stderr.write("\n");
     if (key.expiresAt && Date.parse(key.expiresAt) <= Date.now()) {
       // The gateway answers an expired key with a 401 the harness shows, not us;
@@ -514,4 +539,207 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     await writeSession({ ...nextRecord, endedAt: new Date().toISOString(), exitCode });
   }
   process.exitCode = exitCode ?? 1;
+}
+
+// ---------------------------------------------------------------------------
+// Remote Control
+// ---------------------------------------------------------------------------
+
+type RemoteMode = "off" | "tui" | "headless";
+
+/**
+ * Every interactive launch is remote-controllable unless the user opts out.
+ * One-shot `-p` runs are scripts, not sessions to type into, so they never
+ * connect (unless `--headless` asked for a long-lived headless session).
+ */
+function remoteMode(options: LaunchOptions): RemoteMode {
+  if (options.headless) return "headless";
+  if (options.remoteControl === false) return "off";
+  if (options.prompt !== undefined) return "off";
+  if (process.env.HEYDITTO_REMOTE_CONTROL === "0") return "off";
+  return "tui";
+}
+
+/** The hook flags that make a harness report its turn boundaries to `hooks`. */
+function hookArgs(harness: Harness, hooks: HookServer): string[] {
+  return harness === "claude"
+    ? ["--settings", claudeHookSettings(hooks.socketPath)]
+    : ["-c", codexNotifyOverride(hooks.socketPath)];
+}
+
+/** Plain launch: the harness owns the terminal directly. */
+async function runInTerminal(plan: HarnessPlan, cwd: string): Promise<number | null> {
+  const child = spawn(plan.command, plan.args, {
+    stdio: "inherit",
+    env: childEnv(plan, process.env),
+    cwd,
+  });
+  const restore = forwardSignals(child);
+  try {
+    return await waitForExit(child, plan.command, cwd);
+  } finally {
+    restore();
+  }
+}
+
+interface RemoteRunContext {
+  cwd: string;
+  sessionId: string;
+  harnessSessionId?: string;
+  record: SessionRecord;
+}
+
+/**
+ * Remote-controllable TUI: the harness runs in a pseudo-terminal this process
+ * owns and mirrors to the real one, so prompts from the app can be typed into
+ * its input box. Anything that stops that (no node-pty, not a terminal) falls
+ * back to the plain launch with a note, never a failure.
+ */
+async function runInTerminalWithRemote(harness: Harness, plan: HarnessPlan, ctx: RemoteRunContext): Promise<number | null> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    log(`remote control off: not running in a terminal (use --headless to control a session without one)`);
+    return runInTerminal(plan, ctx.cwd);
+  }
+  const loaded = loadPty();
+  if (!loaded.pty) {
+    log(`${c("yellow", "remote control off:")} ${loaded.reason}`);
+    return runInTerminal(plan, ctx.cwd);
+  }
+  const { key: apiKey } = await resolveApiKey();
+  const baseUrl = apiBaseURL();
+  if (!apiKey) {
+    log("remote control off: no Ditto login");
+    return runInTerminal(plan, ctx.cwd);
+  }
+
+  const hooks = await startHookServer();
+  const session = new RemoteSession(
+    {
+      harness,
+      sessionId: ctx.sessionId,
+      cwd: ctx.cwd,
+      mode: "tui",
+      baseUrl,
+      apiKey,
+      log,
+      checkpoint: (root) => checkpointPush(root, harness, ctx.harnessSessionId),
+    },
+    hooks,
+  );
+  let pty: PtySession;
+  try {
+    pty = await spawnInPty(plan.command, withHookArgs(harness, plan.args, hookArgs(harness, hooks)), {
+      cwd: ctx.cwd,
+      env: childEnv(plan, process.env),
+    });
+  } catch (err) {
+    await hooks.close();
+    log(`${c("yellow", "remote control off:")} ${err instanceof Error ? err.message : String(err)}`);
+    return runInTerminal(plan, ctx.cwd);
+  }
+  session.attachTui(pty);
+  const onTerm = () => pty.kill();
+  process.on("SIGTERM", onTerm);
+  process.on("SIGHUP", onTerm);
+  // Announce in the background; the harness is already on screen.
+  void session.start().then((ok) => {
+    if (ok) log(`${c("green", "remote control on")} — send prompts from the Ditto app to session ${c("bold", ctx.sessionId)}`);
+    else log("remote control: backend not reachable yet; retrying in the background");
+  });
+  try {
+    return await pty.exit;
+  } finally {
+    process.off("SIGTERM", onTerm);
+    process.off("SIGHUP", onTerm);
+    session.stop();
+    await hooks.close();
+  }
+}
+
+interface HeadlessRunContext extends RemoteRunContext {
+  baseUrl: string;
+  apiKey: string;
+  model?: string;
+  options: LaunchOptions;
+}
+
+/**
+ * Headless Remote Control: no terminal UI, one harness invocation per turn
+ * delivered from the app, all in the same thread, until Ctrl+C. Close the
+ * laptop lid later; keep talking from the phone until then.
+ */
+async function runHeadless(harness: Harness, ctx: HeadlessRunContext): Promise<number | null> {
+  const { key: dittoKey } = await resolveApiKey();
+  if (!dittoKey) throw new Error("headless remote control needs a Ditto login (run `heyditto login`)");
+  const hooks = await startHookServer();
+  // Claude's first turn creates the session under our id; later turns resume it.
+  let claudeStarted = ctx.record.launches > 1;
+  let codexStarted = ctx.record.launches > 1;
+  let running = false;
+  const session = new RemoteSession(
+    {
+      harness,
+      sessionId: ctx.sessionId,
+      cwd: ctx.cwd,
+      mode: "headless",
+      baseUrl: apiBaseURL(),
+      apiKey: dittoKey,
+      log,
+      checkpoint: (root) => checkpointPush(root, harness, ctx.harnessSessionId),
+    },
+    hooks,
+  );
+  const runTurn = (prompt: string) => {
+    running = true;
+    const resumeId = harness === "claude" && claudeStarted ? (ctx.harnessSessionId ?? ctx.sessionId) : undefined;
+    const resumeLast = harness === "codex" && codexStarted;
+    const turn = startHeadlessTurn({
+      harness,
+      base: {
+        baseUrl: ctx.baseUrl,
+        apiKey: ctx.apiKey,
+        sessionId: ctx.sessionId,
+        model: ctx.model,
+        yolo: ctx.options.yolo,
+        yellow: ctx.options.yellow,
+        env: process.env,
+      },
+      prompt,
+      resumeId,
+      resumeLast,
+      cwd: ctx.cwd,
+      extraArgs: harness === "codex" ? hookArgs(harness, hooks) : [],
+      onProgress: (line) => process.stderr.write(`${c("dim", "  ›")} ${line}\n`),
+    });
+    void turn.exit.then(() => {
+      running = false;
+      if (harness === "claude") claudeStarted = true;
+      else codexStarted = true;
+    });
+    return turn;
+  };
+  session.attachHeadless(runTurn);
+  if (ctx.options.prompt !== undefined) {
+    // `-p` together with `--headless`: the given prompt is the first turn,
+    // finished before the session is announced so app turns queue behind it.
+    log(`running the first turn from -p before going remote`);
+    await runTurn(ctx.options.prompt).exit;
+  }
+  const ok = await session.start();
+  log(
+    ok
+      ? `${c("green", "headless remote control on")} — prompts sent from the Ditto app to session ${c("bold", ctx.sessionId)} run here; Ctrl+C to stop`
+      : `${c("yellow", "backend not reachable yet")}; retrying in the background (Ctrl+C to stop)`,
+  );
+  await new Promise<void>((resolve) => {
+    const stop = () => {
+      if (running) log("stopping after the current turn (press Ctrl+C again to abort it)");
+      resolve();
+    };
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+  });
+  session.stop();
+  await hooks.close();
+  return 0;
 }

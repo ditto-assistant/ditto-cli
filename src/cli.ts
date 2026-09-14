@@ -29,6 +29,7 @@ import { NO_KEY_MESSAGE } from "./api.js";
 import { openInBrowser } from "./browser.js";
 import { registerOrgCommands } from "./org-commands.js";
 import { registerTeleportCommands } from "./teleport/commands.js";
+import { registerForkCommand } from "./remote/fork-command.js";
 import { registerAppCommands } from "./app-commands.js";
 import { deviceLogin } from "./device-login.js";
 
@@ -1171,6 +1172,7 @@ your own graph or an app graph.`,
   registerHarnessCommands(program, addExamples);
   registerSessionCommands(program, addExamples);
   registerTeleportCommands(program, addExamples);
+  registerForkCommand(program, addExamples);
 
   addExamples(
     program

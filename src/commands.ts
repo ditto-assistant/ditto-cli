@@ -1184,6 +1184,8 @@ export function registerHarnessCommands(program: Command, addExamples: (c: Comma
       .option("-w, --worktree [name]", "run inside <repo>/.worktrees/<name> (created on a branch of the same name)")
       .option("--name <label>", "key name shown in the Ditto app (default: cli:<harness>:<hostname>)")
       .option("--dry-run", "print the command, args and env (key masked) without minting a key")
+      .option("--no-remote-control", "do not announce this session to the Ditto app (no prompts from your phone)")
+      .option("--headless", "no terminal UI: run each prompt sent from the Ditto app as one turn until Ctrl+C")
       .allowUnknownOption()
       .passThroughOptions();
     if (harness === "claude") cmd.option("--plan", "start in plan mode (--permission-mode plan)");
@@ -1196,7 +1198,9 @@ export function registerHarnessCommands(program: Command, addExamples: (c: Comma
   heyditto ${harness} --endpoint my-endpoint --budget 500000
   heyditto ${harness} --yellow --worktree feature-x
   heyditto ${harness} -p "summarize this repo" ${harness === "claude" ? "--output-format json" : "--json"}
-  heyditto ${harness} --resume                 reopen the last session in its thread
+  heyditto  --resume                 reopen the last session in its thread
+  heyditto ${harness} --headless               keep the session reachable from the app without a terminal UI
+  heyditto ${harness} --no-remote-control      keep this session local only
   heyditto ${harness} -- --verbose             forward flags to ${harness}
   (see also: heyditto ${other})`,
     );

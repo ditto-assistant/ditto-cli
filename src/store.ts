@@ -23,6 +23,8 @@ export interface StoredAuth {
   defaultCompany?: string;
   /** Explicit MCP session (`heyditto session new`) sent as X-Ditto-Session-Id on every request. */
   activeSession?: { id: string; name?: string; createdAt?: string };
+  /** Remote Control identity the backend assigned this machine (from the host bridge `welcome`). */
+  hostId?: string;
 }
 
 export async function readStoredAuth(): Promise<StoredAuth | undefined> {

@@ -615,6 +615,80 @@ List your Ditto agents (`GET /api/v5/chat-agents`): id, kind (`main`, `chat`,
 `inference_endpoint`, `mcp`, `connector`), name, thread count, last activity and
 the live connections (API keys, OAuth grants, endpoints) writing into each.
 
+## Remote Control
+
+Every `heyditto claude` / `heyditto codex` session is reachable from the Ditto
+app by default: open the session's thread on your phone and the chat input
+becomes the terminal's input. Text and attachments you send there are typed
+into the harness on your machine; the harness's own slash commands, skills and
+permission prompts work from the app too.
+
+```bash
+heyditto claude                        # remote-controllable (the default)
+heyditto claude --no-remote-control    # local only: never talks to the host bridge
+heyditto codex --headless              # no terminal UI; each app prompt runs one turn until Ctrl+C
+heyditto claude --headless -p "start"  # run one turn now, then keep taking turns from the app
+```
+
+How it works:
+
+- The CLI opens one WebSocket to `/api/v5/hosts/ws` (host bridge protocol
+  v1.1), announces the session (`session.announce`) and its command catalog
+  (`session.commands`), and reconnects with backoff when the backend goes
+  away. The host id the backend assigns is kept in the CLI config so a
+  machine stays the same device across launches. A backend without the bridge,
+  or no network, never blocks the harness: remote control just stays off.
+- **TUI mode** runs the harness in a pseudo-terminal the CLI owns (via the
+  optional `node-pty` dependency) and mirrors it to your terminal. A prompt
+  from the app is pasted into the harness's input box (bracketed paste) and
+  submitted; `turn.interrupt` sends Esc (Claude Code) or Ctrl+C (Codex).
+  Without `node-pty`, or outside a terminal, the launch falls back to a plain
+  spawn and says why remote control is off.
+- **Turn boundaries come from the harnesses, not from parsing the screen.**
+  Claude Code is launched with `--settings` hooks (`UserPromptSubmit`, `Stop`,
+  `Notification`, `PreToolUse` for `AskUserQuestion`); Codex with
+  `-c notify=[…]`. Each hook runs `dist/remote/hook.js`, which writes one JSON
+  line to a Unix socket the CLI listens on. `Stop` / `agent-turn-complete`
+  mark `turn.finished`; if a harness never reports (older builds, builtin
+  commands that run no model turn), a quiet-screen fallback ends the turn.
+- **Attachments** are downloaded to `<cwd>/.tmp/ditto/attachments/<turnId>/`
+  (size and sha256 verified, mode 0600). `.tmp/` is added to the clone's
+  `.git/info/exclude`, never to `.gitignore`. The prompt the harness sees is
+  your text followed by `Attached files:` and the relative paths.
+- **Commands** (`turn.deliver {kind: "command"}`): the catalog lists Claude
+  Code builtins, `.claude/commands/**` and `~/.claude/commands/**`, skills from
+  `.claude/skills` and `~/.claude/skills`, installed plugin skills; Codex
+  builtins, `~/.codex/prompts/*.md` (as `/prompts:<name>`) and skills (as
+  `$<name>`). It is re-sent when those directories change. TUI mode types the
+  command; headless mode runs it through `claude -p "/name args" --resume` or
+  `codex exec resume --last`, and answers `turn.finished {unsupported}` for
+  TUI-only builtins.
+- **Prompts** (`prompt.request` / `prompt.answer`): a Claude Code permission
+  dialog or `AskUserQuestion` is forwarded to the app with its options; the
+  answer is typed back as the option's hotkey (or as text). Codex exposes no
+  hook for its approval dialogs, so those still need the keyboard.
+- **Headless mode** runs one `claude -p --resume <id> --output-format
+  stream-json` / `codex exec resume --last` per turn, prints a compact progress
+  line per event, and reports `turn.finished {exitCode}`. Ctrl+C finishes the
+  current turn, announces the session closed and revokes the session key.
+- `checkpoint.request` runs the same push as `heyditto teleport push` and
+  answers `checkpoint.done {generation}`.
+
+### `fork`
+
+Start a new session from a copy of an existing conversation.
+
+```bash
+heyditto fork <session-id>                    # copy the transcript under a new session id
+heyditto fork <session-id> --worktree try-b   # same, in <repo>/.worktrees/try-b on branch try-b
+heyditto fork <session-id> --cloud            # teleport the fork and resume it in Ditto Cloud
+```
+
+Claude Code transcripts are copied to a new uuid (session id fields rewritten,
+and the project directory moved when the fork lives in a new worktree); Codex
+rollouts are copied under a new thread id. The original stays untouched; the
+fork is a normal local session (`heyditto sessions`, `--resume <new-id>`).
+
 ## Teleport
 
 Worktrees, clones, package caches and agent traces pile up until a laptop runs
