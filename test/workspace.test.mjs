@@ -179,3 +179,18 @@ test("offload blockers name unrelated files and escaping symlinks; a clean repo 
   assert.equal(solo.kind, "repo");
   assert.deepEqual(await offloadBlockers(solo), []);
 });
+
+
+test("files inside excluded directories never make the plan partial or block an offload", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "heyditto-ws-nm-"));
+  await initRepo(dir, { "package.json": "{}", "index.js": "1", ".gitignore": "node_modules/\n" });
+  await write(dir, Object.fromEntries(Array.from({ length: 60 }, (_, i) => [`node_modules/pkg/f${i}.js`, "x"])));
+  const plan = await planCapture(dir, { maxEstimateFiles: 20 });
+  assert.equal(plan.repos[0].estimatePartial, false);
+  assert.equal(plan.repos[0].excludedEstimatePartial, true);
+  assert.deepEqual(await offloadBlockers(plan), []);
+
+  const quick = await planCapture(dir, { estimate: false });
+  assert.equal(quick.repos[0].includedFiles, 0);
+  assert.deepEqual(quick.repos[0].excludes, plan.repos[0].excludes);
+});

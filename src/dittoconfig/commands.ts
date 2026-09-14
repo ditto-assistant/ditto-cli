@@ -1,7 +1,7 @@
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Command } from "commander";
-import { DittoConfigError, DittoConfigNotFound, loadDittoConfig, summarize } from "./load.js";
+import { DittoConfigError, DittoConfigNotFound, loadDittoConfig, slugify, summarize } from "./load.js";
 import { CONFIG_FILE, DITTO_DIR, MISE_FILE } from "./types.js";
 import { MISE_TOOL_FOR_TYPE } from "../teleport/catalog.js";
 import { type CapturePlan, discoverWorkspace } from "../teleport/workspace.js";
@@ -92,7 +92,9 @@ async function cmdInit(pathArg: string | undefined, options: { force?: boolean }
     process.exitCode = 1;
     return;
   }
-  const name = path.basename(dir).toLowerCase().replace(/[^a-z0-9._-]/g, "-");
+  // repository.name must start with a letter or digit; slugify (kept identical to
+  // the backend's, which feeds the digest) can leave a leading underscore.
+  const name = slugify(path.basename(dir)).replace(/^_+/, "") || "repo";
   const labels = discovery.projects.filter((p) => p.labels.length).map((p) => `${p.relPath}: ${p.labels.join(", ")}`);
   const config = `# Ditto repository configuration — see https://heyditto.ai/docs/ditto-config
 version = 1
@@ -172,6 +174,7 @@ export function formatCapturePlan(plan: CapturePlan): string[] {
     for (const rule of r.rules.filter((x) => x.bytes > 0 || x.source === "config").sort((a, b) => b.bytes - a.bytes)) {
       lines.push(`    exclude ${rule.pattern.padEnd(40)} ${formatBytes(rule.bytes).padStart(10)}  ${rule.reason}`);
     }
+    if (r.excludedEstimatePartial) lines.push("    note: excluded sizes are a lower bound (too many files to count)");
     for (const inc of r.includes) lines.push(`    force-include ${inc}  (.ditto teleport.include)`);
     for (const t of r.trackedArtifacts) lines.push(`    note: ${t} is git-tracked; excluded from the working tree but its bytes remain in history packs`);
     if (r.dittoConfig) lines.push(`    .ditto: digest ${r.dittoConfig.digest.slice(0, 12)} (${(r.dittoConfig.layers ?? []).join(" < ") || "defaults"})${r.dittoConfig.misePath ? `, mise ${r.dittoConfig.misePath}` : ""}`);

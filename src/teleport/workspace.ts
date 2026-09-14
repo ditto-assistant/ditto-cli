@@ -201,7 +201,10 @@ export interface RepoPlan {
   includedFiles: number;
   excludedBytes: number;
   excludedFiles: number;
+  /** The included-file walk hit its cap: included bytes are a lower bound and unscanned files may exist. */
   estimatePartial: boolean;
+  /** Sizing excluded directories hit its cap: excluded bytes are a lower bound. Never blocks an offload. */
+  excludedEstimatePartial: boolean;
   dittoConfig?: DittoConfigSummary;
   /** Repo-relative files the effective `.ditto/` configuration was read from (manifest provenance). */
   dittoConfigSources?: string[];
@@ -222,6 +225,8 @@ export interface CapturePlan {
 export interface PlanOptions extends DiscoverOptions {
   /** Cap on files visited per repo while estimating bytes; beyond it estimates are marked partial. */
   maxEstimateFiles?: number;
+  /** Skip the byte estimate (push only needs the rules); counts stay zero. Default true. */
+  estimate?: boolean;
 }
 
 /**
@@ -273,7 +278,10 @@ export async function planCapture(rootInput: string, opts: PlanOptions = {}): Pr
     }
     const uniqueRules = [...byPattern.values()];
     const excludes = uniqueRules.map((r) => r.pattern).filter((p) => !includes.some((inc) => samePattern(inc, p)));
-    const est = await estimate(repoDir, uniqueRules, includes, opts.maxEstimateFiles ?? 250_000);
+    const est =
+      opts.estimate === false
+        ? { includedBytes: 0, includedFiles: 0, excludedBytes: 0, excludedFiles: 0, partial: false, excludedPartial: false }
+        : await estimate(repoDir, uniqueRules, includes, opts.maxEstimateFiles ?? 250_000);
     const trackedArtifacts: string[] = [];
     if (isGitRepo(repoDir)) {
       for (const r of uniqueRules.filter((r) => r.source === "catalog")) {
@@ -295,6 +303,7 @@ export async function planCapture(rootInput: string, opts: PlanOptions = {}): Pr
       excludedBytes: est.excludedBytes,
       excludedFiles: est.excludedFiles,
       estimatePartial: est.partial,
+      excludedEstimatePartial: est.excludedPartial,
       dittoConfig,
       dittoConfigSources,
       configWarnings,
@@ -334,12 +343,19 @@ interface Estimate {
   excludedBytes: number;
   excludedFiles: number;
   partial: boolean;
+  excludedPartial: boolean;
 }
 
-/** Walks the working tree once, attributing every file to the first matching rule (or to "included"). */
+/**
+ * Walks the working tree once, attributing every file to the first matching rule
+ * (or to "included"). Files inside excluded directories have their own budget: a
+ * huge node_modules makes the excluded total a lower bound, never the included
+ * scan (and so an offload) partial.
+ */
 async function estimate(repoDir: string, rules: ExcludeRule[], includes: string[], maxFiles: number): Promise<Estimate> {
-  const out: Estimate = { includedBytes: 0, includedFiles: 0, excludedBytes: 0, excludedFiles: 0, partial: false };
+  const out: Estimate = { includedBytes: 0, includedFiles: 0, excludedBytes: 0, excludedFiles: 0, partial: false, excludedPartial: false };
   let visited = 0;
+  let excludedVisited = 0;
   const walk = async (dir: string): Promise<void> => {
     let entries: import("node:fs").Dirent[];
     try {
@@ -360,12 +376,12 @@ async function estimate(repoDir: string, rules: ExcludeRule[], includes: string[
       const rule = forced ? undefined : rules.find((r) => isExcluded(rel + (e.isDirectory() ? "/x" : ""), [r.pattern]));
       if (e.isDirectory()) {
         if (rule) {
-          const size = await sizeOf(abs, maxFiles, () => (visited++, visited > maxFiles));
+          const size = await sizeOf(abs, () => ++excludedVisited > maxFiles);
           rule.bytes += size.bytes;
           rule.files += size.files;
           out.excludedBytes += size.bytes;
           out.excludedFiles += size.files;
-          if (size.partial) out.partial = true;
+          if (size.partial) out.excludedPartial = true;
           continue;
         }
         await walk(abs);
@@ -388,7 +404,7 @@ async function estimate(repoDir: string, rules: ExcludeRule[], includes: string[
   return out;
 }
 
-async function sizeOf(dir: string, maxFiles: number, over: () => boolean): Promise<{ bytes: number; files: number; partial: boolean }> {
+async function sizeOf(dir: string, over: () => boolean): Promise<{ bytes: number; files: number; partial: boolean }> {
   let bytes = 0;
   let files = 0;
   let partial = false;
@@ -417,7 +433,6 @@ async function sizeOf(dir: string, maxFiles: number, over: () => boolean): Promi
     }
   };
   await walk(dir);
-  void maxFiles;
   return { bytes, files, partial };
 }
 

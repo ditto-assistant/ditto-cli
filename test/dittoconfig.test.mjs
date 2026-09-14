@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -154,4 +155,17 @@ test("digest is content-only and canonical JSON sorts keys", async () => {
   const c = await loadDittoConfig(await repo({ ".ditto/config.toml": VALID.replace("max_attempts = 2", "max_attempts = 3"), ".ditto/endpoints/work.toml": ENDPOINT, ".ditto/mise.toml": "" }));
   assert.notEqual(digest(a), digest(c));
   assert.equal(canonicalJson({ b: 1, a: [{ d: 2, c: 3 }], e: undefined }), '{"a":[{"c":3,"d":2}],"b":1}');
+});
+
+
+test("repo init writes a repository name that repo validate accepts", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "heyditto-init-"));
+  const dir = path.join(base, "_My.App");
+  await mkdir(dir);
+  await writeFile(path.join(dir, "package.json"), "{}");
+  const cli = path.join(root, "dist", "cli.js");
+  execFileSync(process.execPath, [cli, "repo", "init", dir], { stdio: "pipe" });
+  const out = execFileSync(process.execPath, [cli, "repo", "validate", dir], { stdio: "pipe" }).toString();
+  assert.match(out, /^ok: /);
+  assert.match(await readFile(path.join(dir, ".ditto", "config.toml"), "utf8"), /name = "my.app"/);
 });

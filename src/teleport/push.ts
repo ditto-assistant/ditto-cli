@@ -88,7 +88,7 @@ export async function pushCapsule(input: PushInput, forceFull: Set<string> = new
     // Language-aware plan: per-repo exclusions (built-in + catalog scoped to each
     // detected project + .ditto overrides) and the effective .ditto identity. A
     // plan failure never blocks a push; the built-in rules still apply.
-    const plan = await planCapture(discovery.root).catch(() => undefined);
+    const plan = await planCapture(discovery.root, { estimate: false }).catch(() => undefined);
     const prevByRel = new Map<string, RepoManifest>();
     for (const r of input.previousManifest?.repos ?? []) prevByRel.set(r.relPath, r);
 
