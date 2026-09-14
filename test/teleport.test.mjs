@@ -900,3 +900,46 @@ test("storage add/list/test/remove round trip by name against the buckets API", 
     stub.close();
   }
 });
+
+test("manifest carries capture provenance (excludes, detectors, .ditto digest) and it round-trips", async () => {
+  const stub = await startTeleportStub();
+  const src = makeRepo();
+  // A Node project with a committed .ditto/ configuration.
+  writeFileSync(path.join(src, "package.json"), '{"name":"fixture","private":true}\n');
+  mkdirSync(path.join(src, ".ditto"), { recursive: true });
+  writeFileSync(path.join(src, ".ditto", "config.toml"), 'version = 1\n[repository]\nname = "fixture"\n[teleport]\nexclude = ["fixtures/large/"]\n');
+  git(["add", "."], src);
+  git(["commit", "-m", "node + ditto config"], src);
+  const configDir = tmp("teleport-cfg-");
+  const prevEnv = { ...process.env };
+  Object.assign(process.env, { DITTO_API_BASE: stub.base, DITTO_API_KEY: "ditto_mcp_test", DITTO_CONFIG_DIR: configDir });
+  stub.capsules.set("cap-prov", { id: "cap-prov", name: "prov", rootKind: "repo", headGeneration: 0, generations: new Map() });
+  try {
+    const push = await pushCapsule({ root: src, capsuleId: "cap-prov", parentGeneration: null, harness: { kind: "none" }, ignoredIncludes: [], rootName: "prov", rootKind: "repo" });
+    assert.equal(push.generation, 1);
+    const committed = stub.capsules.get("cap-prov").generations.get(1).manifest;
+    const tags = goJsonTags(readFileSync(path.join(fixtureDir, "manifest.go"), "utf8"));
+    const repo = committed.repos[0];
+    assertMatchesStruct(repo, "Repo", tags, "repo");
+    assertMatchesStruct(repo.dittoConfig, "RepoDittoConfig", tags, "repo.dittoConfig");
+    assert.ok(repo.excludes.includes("node_modules/"), "built-in rule recorded");
+    assert.ok(repo.excludes.includes(".angular/"), "Node catalog rule recorded");
+    assert.ok(repo.excludes.includes("fixtures/large/"), ".ditto exclude recorded");
+    assert.ok(repo.excludes.length <= 256 && repo.excludes.every((e) => e.trim().length > 0));
+    assert.deepEqual(repo.projectTypes, ["node"]);
+    assert.equal(repo.dittoConfig.version, 1);
+    assert.match(repo.dittoConfig.digest, /^[0-9a-f]{64}$/);
+    assert.deepEqual(repo.dittoConfig.sources, [".ditto/config.toml"]);
+
+    // Round trip: the restored repository loads to the same digest.
+    const dest = tmp("teleport-prov-restore-");
+    await pullCapsule("cap-prov", undefined, dest, { restoreHarness: false });
+    const { loadDittoConfig, digest } = await import("../dist/dittoconfig/load.js");
+    const eff = await loadDittoConfig(dest, {});
+    assert.equal(digest(eff), repo.dittoConfig.digest, "restored .ditto/ digests identically");
+    assert.equal(readFileSync(path.join(dest, ".ditto", "config.toml"), "utf8"), readFileSync(path.join(src, ".ditto", "config.toml"), "utf8"));
+  } finally {
+    process.env = prevEnv;
+    await stub.close();
+  }
+});

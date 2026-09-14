@@ -31,6 +31,7 @@ import { registerOrgCommands } from "./org-commands.js";
 import { registerTeleportCommands } from "./teleport/commands.js";
 import { registerForkCommand } from "./remote/fork-command.js";
 import { registerAppCommands } from "./app-commands.js";
+import { registerConfigCommands } from "./dittoconfig/commands.js";
 import { deviceLogin } from "./device-login.js";
 
 type OutputFormat = "json" | "text" | "markdown" | "raw";
@@ -1245,6 +1246,7 @@ your own workspace or an app workspace.`,
   registerSessionCommands(program, addExamples);
   registerTeleportCommands(program, addExamples);
   registerForkCommand(program, addExamples);
+  registerConfigCommands(program, addExamples);
 
   addExamples(
     program
