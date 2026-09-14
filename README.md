@@ -456,6 +456,7 @@ heyditto endpoints use <endpoint>          make it the default
 heyditto endpoints pick                    choose the default interactively
 heyditto endpoints open [endpoint]         open the editor in the Ditto app
 heyditto endpoints set <endpoint> [settings flags — see the table below]
+heyditto endpoints usage <endpoint> [--window 7d|30d|month]   requests, tokens, spend and cap
 heyditto endpoints delete <endpoint> [--yes]
 heyditto endpoints keys <endpoint>         list keys
 heyditto endpoints keys create <endpoint> --store <destination> --secret <NAME> [scoping flags]
