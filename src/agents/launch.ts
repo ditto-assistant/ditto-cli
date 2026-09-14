@@ -592,7 +592,7 @@ interface RemoteRunContext {
 /**
  * Remote-controllable TUI: the harness runs in a pseudo-terminal this process
  * owns and mirrors to the real one, so prompts from the app can be typed into
- * its input box. Anything that stops that (no node-pty, not a terminal) falls
+ * its input box. Anything that stops that (no PTY module, not a terminal) falls
  * back to the plain launch with a note, never a failure.
  */
 async function runInTerminalWithRemote(harness: Harness, plan: HarnessPlan, ctx: RemoteRunContext): Promise<number | null> {
