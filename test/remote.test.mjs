@@ -16,13 +16,23 @@ import { startHostStub } from "./helpers/host-stub.mjs";
 const cliPath = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
 const require = createRequire(import.meta.url);
 
+// @lydell/node-pty ships prebuilt binaries for darwin/linux/win32 on x64 and
+// arm64. The PTY tests skip on a platform it has no prebuilt for; on a
+// supported platform a load failure (optional dependencies omitted, broken
+// install) fails the load test below instead of silently skipping everything.
 let nodePty;
+let ptyLoadError;
 try {
-  nodePty = require("node-pty");
-} catch {
-  nodePty = undefined;
+  nodePty = require("@lydell/node-pty");
+} catch (err) {
+  ptyLoadError = (err instanceof Error ? err.message : String(err)).split("\n")[0];
 }
-const ptyAvailable = Boolean(nodePty);
+const ptyUnsupported = ptyLoadError !== undefined && /does not support your platform/.test(ptyLoadError);
+const ptySkip = nodePty
+  ? false
+  : ptyUnsupported
+    ? `@lydell/node-pty has no prebuilt for ${process.platform}-${process.arch}`
+    : `@lydell/node-pty failed to load: ${ptyLoadError}`;
 
 const tmp = (prefix) => mkdtempSync(path.join(os.tmpdir(), prefix));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -155,10 +165,14 @@ test("catalog: discovers custom commands, skills, plugin skills and builtins per
 });
 
 // ---------------------------------------------------------------------------
-// TUI mode (needs node-pty)
+// TUI mode (needs @lydell/node-pty)
 // ---------------------------------------------------------------------------
 
-test("tui: default launch announces, sends the catalog, and runs prompt / command / permission turns from the app", { skip: !ptyAvailable && "node-pty unavailable" }, async () => {
+test("tui: @lydell/node-pty loads on every platform it ships a prebuilt for", { skip: ptyUnsupported && ptySkip }, () => {
+  assert.ok(nodePty, `${ptyLoadError} — were optional dependencies omitted at install?`);
+});
+
+test("tui: default launch announces, sends the catalog, and runs prompt / command / permission turns from the app", { skip: ptySkip }, async () => {
   const stub = await startHostStub();
   const fakes = createFakeHarnesses();
   const homes = makeHomes();
@@ -259,7 +273,7 @@ test("tui: default launch announces, sends the catalog, and runs prompt / comman
   }
 });
 
-test("tui: turn.interrupt sends the harness its interrupt key and finishes the turn as interrupted", { skip: !ptyAvailable && "node-pty unavailable" }, async () => {
+test("tui: turn.interrupt sends the harness its interrupt key and finishes the turn as interrupted", { skip: ptySkip }, async () => {
   const stub = await startHostStub();
   const fakes = createFakeHarnesses();
   const homes = makeHomes();
@@ -285,7 +299,7 @@ test("tui: turn.interrupt sends the harness its interrupt key and finishes the t
   }
 });
 
-test("tui: a dropped connection reconnects and re-announces the session and its catalog", { skip: !ptyAvailable && "node-pty unavailable" }, async () => {
+test("tui: a dropped connection reconnects and re-announces the session and its catalog", { skip: ptySkip }, async () => {
   const stub = await startHostStub();
   const fakes = createFakeHarnesses();
   const homes = makeHomes();
@@ -318,7 +332,7 @@ test("tui: a dropped connection reconnects and re-announces the session and its 
   }
 });
 
-test("tui: --no-remote-control never connects and launches the harness without hooks", { skip: !ptyAvailable && "node-pty unavailable" }, async () => {
+test("tui: --no-remote-control never connects and launches the harness without hooks", { skip: ptySkip }, async () => {
   const stub = await startHostStub();
   const fakes = createFakeHarnesses();
   const homes = makeHomes();

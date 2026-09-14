@@ -639,11 +639,13 @@ How it works:
   machine stays the same device across launches. A backend without the bridge,
   or no network, never blocks the harness: remote control just stays off.
 - **TUI mode** runs the harness in a pseudo-terminal the CLI owns (via the
-  optional `node-pty` dependency) and mirrors it to your terminal. A prompt
-  from the app is pasted into the harness's input box (bracketed paste) and
-  submitted; `turn.interrupt` sends Esc (Claude Code) or Ctrl+C (Codex).
-  Without `node-pty`, or outside a terminal, the launch falls back to a plain
-  spawn and says why remote control is off.
+  optional `@lydell/node-pty` dependency, which ships prebuilt binaries for
+  macOS, Linux and Windows on x64/arm64 and runs no install scripts) and
+  mirrors it to your terminal. A prompt from the app is pasted into the
+  harness's input box (bracketed paste) and submitted; `turn.interrupt` sends
+  Esc (Claude Code) or Ctrl+C (Codex). Without a PTY module for your platform,
+  or outside a terminal, the launch falls back to a plain spawn and says why
+  remote control is off.
 - **Turn boundaries come from the harnesses, not from parsing the screen.**
   Claude Code is launched with `--settings` hooks (`UserPromptSubmit`, `Stop`,
   `Notification`, `PreToolUse` for `AskUserQuestion`); Codex with

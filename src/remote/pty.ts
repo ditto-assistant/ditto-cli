@@ -6,8 +6,9 @@ import type { Harness } from "../agents/types.js";
 /**
  * Runs a harness inside a pseudo-terminal this process owns, mirrored to the
  * real terminal, so Remote Control can type into the harness's own input box
- * exactly as the user would. node-pty is an optional dependency: when it is
- * missing the launcher falls back to a plain spawn and says why remote
+ * exactly as the user would. `@lydell/node-pty` is an optional dependency
+ * (node-pty repackaged as script-free prebuilt binaries per platform): when
+ * it is missing the launcher falls back to a plain spawn and says why remote
  * control is off.
  */
 
@@ -30,27 +31,32 @@ interface PtyProcess {
 
 const requireModule = createRequire(import.meta.url);
 
-/** Loads node-pty, or explains what is missing. */
+const PTY_PACKAGE = "@lydell/node-pty";
+/** The per-platform package that carries the prebuilt binary. */
+const PTY_PLATFORM_PACKAGE = `${PTY_PACKAGE}-${process.platform}-${process.arch}`;
+
+/** Loads the PTY module, or explains what is missing. */
 export function loadPty(): { pty?: PtyModule; reason?: string } {
   try {
-    return { pty: requireModule("node-pty") as PtyModule };
+    return { pty: requireModule(PTY_PACKAGE) as PtyModule };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return {
-      reason: `node-pty is not installed or failed to build (${message.split("\n")[0]}); reinstall with \`npm i -g @heyditto/cli\` and approve its build script`,
+      reason: `${PTY_PACKAGE} is not installed or has no prebuilt binary for ${process.platform}-${process.arch} (${message.split("\n")[0]}); reinstall with \`npm i -g @heyditto/cli\` without \`--omit=optional\``,
     };
   }
 }
 
 /**
- * npm sometimes extracts node-pty's prebuilt `spawn-helper` without its
- * execute bit, which surfaces as "posix_spawnp failed". Restoring the bit is
- * safe (it is node-pty's own binary) and fixes the spawn on retry.
+ * npm sometimes extracts the prebuilt `spawn-helper` without its execute bit,
+ * which surfaces as "posix_spawnp failed". The prebuilt package has no
+ * install script that could restore it, so we do: the bit is safe to set (it
+ * is the PTY package's own binary) and fixes the spawn on retry.
  */
 async function repairSpawnHelper(): Promise<boolean> {
   try {
-    const dir = path.dirname(requireModule.resolve("node-pty/package.json"));
-    const helper = path.join(dir, "prebuilds", `${process.platform}-${process.arch}`, "spawn-helper");
+    const entry = requireModule.resolve(PTY_PLATFORM_PACKAGE); // <pkg>/lib/index.js
+    const helper = path.join(path.dirname(entry), "..", "prebuilds", `${process.platform}-${process.arch}`, "spawn-helper");
     await chmod(helper, 0o755);
     return true;
   } catch {
