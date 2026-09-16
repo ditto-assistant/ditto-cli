@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import http from "node:http";
 import { WebSocketServer } from "ws";
-import { ALPHA, MINTED_PLAINTEXT } from "./stub-api.mjs";
+import { ALPHA, MINTED_PLAINTEXT, listEndpointsStubHandler } from "./stub-api.mjs";
 
 /**
  * Stub backend for Remote Control tests: the endpoint + key routes the launch
@@ -38,6 +38,7 @@ export function startHostStub({ apiKey = "ditto_mcp_test", endpoints = [ALPHA] }
       if (req.url === "/api/v5/inference/endpoints" && req.method === "GET") {
         return json(200, { baseUrl: "https://api.example.test/v1", endpoints, limit: 5, used: endpoints.length });
       }
+      if (listEndpointsStubHandler(req, json)) return;
       const m = req.url.match(/^\/api\/v5\/inference\/endpoints\/([^/]+)(\/keys(?:\/([^/]+))?)?$/);
       if (m && m[2] === "/keys" && req.method === "POST") {
         const input = JSON.parse(body);

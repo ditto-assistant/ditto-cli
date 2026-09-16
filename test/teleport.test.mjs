@@ -7,6 +7,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+
+import { listEndpointsStubHandler } from "./helpers/stub-api.mjs";
 import zlib from "node:zlib";
 
 import { discoverRepos } from "../dist/teleport/discover.js";
@@ -233,6 +235,7 @@ function startTeleportStub() {
       if (p === "/api/v5/inference/endpoints" && req.method === "GET") {
         return send(200, { baseUrl: `${base}/v1`, endpoints: stubEndpoints });
       }
+      if (listEndpointsStubHandler(req, (code, obj) => send(code, obj))) return;
       // Bring-your-own buckets (/api/v5/teleport/buckets).
       if (p === "/api/v5/teleport/buckets" && req.method === "GET") {
         return send(200, { buckets: [...buckets.values()] });

@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 
 import { deviceLogin, verificationLink } from "../dist/device-login.js";
 import { mergeActivationURL, saveLogin, readStoredAuth } from "../dist/store.js";
+import { listEndpointsStubHandler } from "./helpers/stub-api.mjs";
 
 const cliPath = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
 
@@ -130,6 +131,7 @@ function startStub({ endpoints = [ALPHA, BETA], tokenPollsUntilOk = 2 } = {}) {
         return json(200, { keys: [{ id: "key-1", endpointId: m[1], name: "cli:claude:host", keyHint: "ab12", expiresAt: null, lastUsedAt: null, revokedAt: null }] });
       }
       if (m && m[3] && req.method === "DELETE") return json(204);
+      if (listEndpointsStubHandler(req, json)) return;
       json(404, {});
     });
   });

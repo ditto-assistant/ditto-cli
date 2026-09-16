@@ -227,11 +227,33 @@ export interface InferenceEndpointsResponse {
   used?: number;
 }
 
+/**
+ * Every endpoint the caller may act on: their own endpoints plus each
+ * organization's catalog. The bare route lists only caller-created endpoints
+ * (backend ListInferenceEndpointsByUser), so an org endpoint created by a
+ * colleague is invisible here until its organization is listed with
+ * `?company=<id>` — the query the developer console also uses. Endpoints are
+ * deduped by id (an org endpoint the caller personally created appears in
+ * both listings) and personal ones first.
+ *
+ * Failures propagate rather than degrade to a personal-only list: an
+ * incomplete catalog reads as "the endpoint does not exist", which is the
+ * bug this fixes, not an acceptable fallback.
+ */
 export async function listEndpoints(): Promise<InferenceEndpointsResponse> {
   const res = await apiFetch<InferenceEndpointsResponse>("/api/v5/inference/endpoints");
+  const endpoints = [...(res.endpoints ?? [])];
+  for (const company of await listCompanies()) {
+    const orgRes = await apiFetch<InferenceEndpointsResponse>(
+      `/api/v5/inference/endpoints?company=${encodeURIComponent(company.id)}`,
+    );
+    for (const orgEndpoint of orgRes.endpoints ?? []) {
+      if (!endpoints.some((e) => e.id === orgEndpoint.id)) endpoints.push(orgEndpoint);
+    }
+  }
   return {
     baseUrl: (res.baseUrl || `${apiBase()}/v1`).replace(/\/+$/, ""),
-    endpoints: res.endpoints ?? [],
+    endpoints,
     limit: res.limit,
     used: res.used,
   };

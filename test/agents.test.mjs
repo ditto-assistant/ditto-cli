@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 
 import { planClaude } from "../dist/agents/claude.js";
 import { planCodex, tomlString } from "../dist/agents/codex.js";
+import { listEndpointsStubHandler } from "./helpers/stub-api.mjs";
 import { apiRootOf, childEnv, stripSeparator } from "../dist/agents/types.js";
 import { defaultWorktreeName, ensureGitignore, validWorktreeName } from "../dist/agents/worktree.js";
 
@@ -48,6 +49,10 @@ function startStub() {
         res.statusCode = 204;
         return res.end();
       }
+      if (listEndpointsStubHandler(req, (status, payload) => {
+        res.statusCode = status;
+        res.end(JSON.stringify(payload));
+      })) return;
       res.statusCode = 404;
       res.end("{}");
     });
