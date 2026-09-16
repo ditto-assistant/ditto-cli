@@ -8,6 +8,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { createFakeCLIs } from "./helpers/fake-cli.mjs";
+import { listEndpointsStubHandler } from "./helpers/stub-api.mjs";
 
 const cliPath = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
 const SECRET = "app-secret-PLAINTEXT-MUST-NEVER-PRINT-77";
@@ -55,6 +56,7 @@ function startStub() {
       if (u === "/api/v5/inference/endpoints" && req.method === "GET") return json(200, { baseUrl: "https://api.example.test/v1", endpoints: [ENDPOINT], limit: 5, used: 1 });
       if (u === `/api/v5/consent-profile/${APP.appID}`) return json(200, { appID: APP.appID, name: APP.name, enabled: true, rationale: APP.consentRationale, endpoints: [], callbackOrigins: ["https://dittobench.ai"], iconUrl: "https://cdn.example.test/icon.png" });
       if (u.startsWith("/api/v5/me/receipts")) return json(200, { since: "2026-08-13T00:00:00Z", receipts: [{ id: 1, timestamp: "2026-09-12T10:00:00Z", leg: "ditto", appID: APP.appID, model: "openai/gpt-5.6-luna", billing: "user", dittoTokens: 25000000, estimatedTokens: 0, inputTokens: 10, outputTokens: 5, totalTokens: 15 }], summary: [{ leg: "ditto", appID: APP.appID, appName: APP.name, calls: 1, dittoTokens: 25000000, estimatedTokens: 0 }] });
+      if (listEndpointsStubHandler(req, json)) return;
       json(404, {});
     });
   });

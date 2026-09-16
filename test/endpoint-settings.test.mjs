@@ -7,6 +7,8 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { listEndpointsStubHandler } from "./helpers/stub-api.mjs";
+
 const cliPath = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
 
 /**
@@ -58,6 +60,7 @@ function startStub(endpoint = ENDPOINT, { patchResponse } = {}) {
         const merged = { ...endpoint, ...JSON.parse(body) };
         return json(200, patchResponse ? { ...merged, ...patchResponse } : merged);
       }
+      if (listEndpointsStubHandler(req, json)) return;
       json(404, {});
     });
   });

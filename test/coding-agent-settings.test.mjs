@@ -7,6 +7,8 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { listEndpointsStubHandler } from "./helpers/stub-api.mjs";
+
 const cliPath = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
 
 const ENDPOINT = {
@@ -35,6 +37,7 @@ function startStub(endpoint = ENDPOINT) {
       }
       const m = req.url.match(/^\/api\/v5\/inference\/endpoints\/([^/]+)$/);
       if (m && req.method === "PATCH") return json(200, { ...endpoint, ...JSON.parse(body) });
+      if (listEndpointsStubHandler(req, json)) return;
       json(404, {});
     });
   });
