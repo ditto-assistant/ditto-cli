@@ -22,6 +22,7 @@ import { deviceLogin } from "../device-login.js";
 import { formatActivation } from "../endpoint-format.js";
 import { readStoredAuth, saveLogin, updateStoredAuth } from "../store.js";
 import { err as c } from "../ui.js";
+import { holdNotesForTui, releaseNotes, writeNote } from "../terminal-note.js";
 import { planClaude } from "./claude.js";
 import { planCodex } from "./codex.js";
 import { type SessionRecord, latestSession, readSession, writeSession } from "./sessions.js";
@@ -81,7 +82,7 @@ export interface LaunchOptions {
 const DRY_RUN_KEY = "ditto_inf_<minted-at-launch>";
 
 function log(line: string): void {
-  process.stderr.write(`${c("dim", "ditto:")} ${line}\n`);
+  writeNote(`${c("dim", "ditto:")} ${line}\n`);
 }
 
 /**
@@ -90,7 +91,7 @@ function log(line: string): void {
  * the command.
  */
 function logResumeHint(harness: Harness, sessionId: string): void {
-  process.stderr.write(`${c("dim", "ditto:")} resume this session with:\n\n  ${c(["bold", "green"], `heyditto ${harness} --resume ${sessionId}`)}\n\n`);
+  writeNote(`${c("dim", "ditto:")} resume this session with:\n\n  ${c(["bold", "green"], `heyditto ${harness} --resume ${sessionId}`)}\n\n`);
 }
 
 function planFor(harness: Harness, input: PlanInput): HarnessPlan {
@@ -641,6 +642,10 @@ async function runInTerminalWithRemote(harness: Harness, plan: HarnessPlan, ctx:
   const onTerm = () => pty.kill();
   process.on("SIGTERM", onTerm);
   process.on("SIGHUP", onTerm);
+  // The harness now owns the screen: status notes wait for a quiet beat in its
+  // painting and then write wrapped in save/restore-cursor, instead of pasting
+  // over the agent's text mid-frame (issue #61).
+  holdNotesForTui(() => pty.quietFor());
   // Announce in the background; the harness is already on screen.
   void session.start().then((ok) => {
     if (ok) log(`${c("green", "remote control on")} — send prompts from the Ditto app to session ${c("bold", ctx.sessionId)}`);
@@ -649,6 +654,7 @@ async function runInTerminalWithRemote(harness: Harness, plan: HarnessPlan, ctx:
   try {
     return await pty.exit;
   } finally {
+    releaseNotes();
     process.off("SIGTERM", onTerm);
     process.off("SIGHUP", onTerm);
     session.stop();

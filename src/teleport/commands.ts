@@ -91,6 +91,8 @@ interface PushOptions extends OutputOptions {
   dryRun?: boolean;
   session?: string;
   harness?: string;
+  /** Skip the progress note ("Teleporting N repo(s)…") — for in-session checkpoints. */
+  quiet?: boolean;
 }
 
 export async function cmdTeleportPush(pathArg: string | undefined, options: PushOptions): Promise<void> {
@@ -124,7 +126,7 @@ async function runPush(pathArg: string | undefined, options: PushOptions): Promi
   const { capsule, previous } = await resolveCapsule(root, { name: options.name, create: true, harness });
   if (options.mirror) await tapi.setMirrorPolicy(capsule.id, parsePolicy(options.mirror));
 
-  err(`Teleporting ${discovery.repos.length} repo(s) from ${root} → capsule ${capsule.name}…`);
+  if (!options.quiet) err(`Teleporting ${discovery.repos.length} repo(s) from ${root} → capsule ${capsule.name}…`);
   const result = await pushCapsule({
     root,
     capsuleId: capsule.id,
@@ -594,10 +596,11 @@ function collect(value: string, previous: string[]): string[] {
 /**
  * Remote Control checkpoint: push the session's root as a new generation and
  * return its number. Same code path as `heyditto teleport push`, without the
- * printing.
+ * printing — a checkpoint runs while a harness owns the screen, and even one
+ * stderr line pastes over its frame (issue #61).
  */
 export async function checkpointPush(root: string, harness: string | undefined, sessionId: string | undefined): Promise<number> {
-  const summary = await runPush(root, { harness, session: sessionId });
+  const summary = await runPush(root, { harness, session: sessionId, quiet: true });
   if (!summary) throw new Error("checkpoint produced no generation");
   return summary.generation;
 }
