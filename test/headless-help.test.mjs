@@ -42,4 +42,6 @@ test("each harness's example uses its own flag", async () => {
   assert.match(codex, /heyditto codex -p "summarize this repo" --json/);
   const claude = await run(["claude", "--help"]);
   assert.match(claude, /heyditto claude -p "summarize this repo" --output-format json/);
+  const grok = await run(["grok", "--help"]);
+  assert.match(grok, /headless run \(grok -p\)/, "grok's headless entry point must be named");
 });
