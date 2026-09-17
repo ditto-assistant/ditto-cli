@@ -1,6 +1,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { planClaude } from "../agents/claude.js";
 import { planCodex } from "../agents/codex.js";
+import { planGrok } from "../agents/grok.js";
 import { type Harness, type PlanInput, childEnv } from "../agents/types.js";
 import { withHookArgs } from "./hooks.js";
 
@@ -20,6 +21,8 @@ export interface HeadlessTurnInput {
   /** Claude: the session id to resume (after the first turn). Codex: resume the last thread. */
   resumeId?: string;
   resumeLast?: boolean;
+  /** grok: the launch GROK_HOME the plan's env points at. */
+  grokHome?: string;
   cwd: string;
   /** Extra args (e.g. Codex `-c notify=…`, Claude `--settings …`). */
   extraArgs?: string[];
@@ -64,7 +67,10 @@ export function startHeadlessTurn(input: HeadlessTurnInput): HeadlessTurn {
     resumeLast: input.resumeLast,
     passthrough: input.harness === "claude" ? ["--output-format", "stream-json", "--verbose"] : [],
   };
-  const plan = input.harness === "claude" ? planClaude(planInput) : planCodex(planInput);
+  const plan =
+    input.harness === "claude" ? planClaude(planInput)
+    : input.harness === "grok" ? planGrok(planInput, input.grokHome ?? "")
+    : planCodex(planInput);
   const args = withHookArgs(input.harness, plan.args, input.extraArgs ?? []);
   const child = spawn(plan.command, args, {
     cwd: input.cwd,

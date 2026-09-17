@@ -10,7 +10,7 @@ export const PROTOCOL_VERSION = "1.1";
 export type HostKind = "cli" | "desktop";
 export type SessionMode = "tui" | "headless";
 export type SessionStatus = "idle" | "running";
-export type HarnessName = "claude-code" | "codex";
+export type HarnessName = "claude-code" | "codex" | "grok";
 
 export interface HostCapabilities {
   harnesses: HarnessName[];

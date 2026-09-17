@@ -921,7 +921,7 @@ Environment:
                     or ~/.config/heyditto/cli.
 
 Coding agents:
-  heyditto claude / heyditto codex launch the agent through one of your Ditto
+  heyditto claude / codex / grok launch the agent through one of your Ditto
   inference endpoints with a temporary key that is revoked when it exits, so
   every session becomes its own thread with full traces in the Ditto app.
   First run with no login? They open your browser to sign in (or create an

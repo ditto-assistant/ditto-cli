@@ -46,7 +46,8 @@ export async function restoreCapsule(
       if (manifest.harness.kind === "claude-code" && manifest.harness.sessionId) {
         await restoreClaudeTranscript(tar, compression, manifest.harness.sessionId, originalCwd, targetCwd);
       } else {
-        // Codex keys transcripts on absolute cwd inside a shared home; extract as-is.
+        // Codex and grok key transcripts on absolute cwd inside a shared home;
+        // extract as-is.
         extractWorktree(tar, os.homedir(), compression);
       }
       harnessCwd = targetCwd;

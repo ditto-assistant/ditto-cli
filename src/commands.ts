@@ -1190,7 +1190,7 @@ export async function cmdSessions(options: SessionsOptions): Promise<void> {
     return;
   }
   if (shown.length === 0) {
-    process.stdout.write("No coding-agent sessions yet. Start one with `heyditto claude` or `heyditto codex`.\n");
+    process.stdout.write("No coding-agent sessions yet. Start one with `heyditto claude`, `heyditto codex`, or `heyditto grok`.\n");
     return;
   }
   for (const s of shown) {
@@ -1203,7 +1203,7 @@ export async function cmdSessions(options: SessionsOptions): Promise<void> {
   if (!options.all && records.length > shown.length) {
     process.stdout.write(`\n…and ${records.length - shown.length} more (use --all)\n`);
   }
-  process.stdout.write(`\nResume: heyditto <claude|codex> --resume <id>\n`);
+  process.stdout.write(`\nResume: heyditto <claude|codex|grok> --resume <id>\n`);
 }
 
 export async function cmdSessionsRm(id: string): Promise<void> {
@@ -1213,15 +1213,22 @@ export async function cmdSessionsRm(id: string): Promise<void> {
 }
 
 /** Registers `claude` and `codex` on the program (which must have enablePositionalOptions()). */
+const HARNESS_LABELS: Record<Harness, string> = {
+  claude: "Claude Code",
+  codex: "Codex",
+  grok: "Grok",
+};
+
 export function registerHarnessCommands(program: Command, addExamples: (c: Command, ex: string) => Command): void {
   for (const harness of HARNESSES) {
     const other: Harness = harness === "claude" ? "codex" : "claude";
+    const label = HARNESS_LABELS[harness];
     const cmd = program
       .command(`${harness} [args...]`)
       .description(
-        `launch ${harness === "claude" ? "Claude Code" : "Codex"} through a Ditto inference endpoint with a temporary key`,
+        `launch ${label} through a Ditto inference endpoint with a temporary key`,
       )
-      .summary(`launch ${harness === "claude" ? "Claude Code" : "Codex"} through a Ditto endpoint`)
+      .summary(`launch ${label} through a Ditto endpoint`)
       .option("-e, --endpoint <slug>", "inference endpoint slug or id (default: saved default, or a picker)")
       .option("--budget <tokens>", "spend cap for this session's key, in Ditto tokens")
       .addOption(
@@ -1233,17 +1240,17 @@ export function registerHarnessCommands(program: Command, addExamples: (c: Comma
       .option("--session <id>", "reuse a Ditto session id (X-Ditto-Session-Id) for the traces thread")
       .option("--resume [id]", "resume a local session (default: the most recent one); mints a fresh key")
       .option("-c, --continue", `continue the most recent ${harness} conversation in this directory`)
-      .option("--yolo", `bypass all permission prompts (${harness === "claude" ? "--dangerously-skip-permissions" : "--dangerously-bypass-approvals-and-sandbox"})`)
-      .option("--yellow", `auto-accept edits (${harness === "claude" ? "--permission-mode acceptEdits" : "-a on-request -s workspace-write"})`)
+      .option("--yolo", `bypass all permission prompts (${harness === "claude" ? "--dangerously-skip-permissions" : harness === "grok" ? "--always-approve" : "--dangerously-bypass-approvals-and-sandbox"})`)
+      .option("--yellow", `auto-accept edits (${harness === "claude" ? "--permission-mode acceptEdits" : harness === "grok" ? "--permission-mode auto" : "-a on-request -s workspace-write"})`)
       // The machine-readable flag differs per harness: Claude Code takes
       // --output-format, Codex takes --json. Naming the wrong one sends people
       // to "error: unexpected argument", which is what this used to do for
       // Codex.
       .option(
         "-p, --prompt <text>",
-        `headless run (${harness === "claude" ? "claude -p" : "codex exec"}); pair with ${harness === "claude" ? "--output-format json" : "--json"} for machine-readable output`,
+        `headless run (${harness === "claude" ? "claude -p" : `${label.toLowerCase().replace(/ /g, "")} -p`}); pair with ${harness === "claude" ? "--output-format json" : "--json"} for machine-readable output`,
       )
-      .option("-m, --model <id>", `model id (default: let the endpoint route ${harness === "codex" ? "Codex's" : "Claude's"} own model ids)`)
+      .option("-m, --model <id>", `model id (default: let the endpoint route ${label}'s own model ids)`)
       .option("-w, --worktree [name]", "run inside <repo>/.worktrees/<name> (created on a branch of the same name)")
       .option("--name <label>", "key name shown in the Ditto app (default: cli:<harness>:<hostname>)")
       .option("--dry-run", "print the command, args and env (key masked) without minting a key")
@@ -1251,7 +1258,7 @@ export function registerHarnessCommands(program: Command, addExamples: (c: Comma
       .option("--headless", "no terminal UI: run each prompt sent from the Ditto app as one turn until Ctrl+C")
       .allowUnknownOption()
       .passThroughOptions();
-    if (harness === "claude") cmd.option("--plan", "start in plan mode (--permission-mode plan)");
+    if (harness === "claude" || harness === "grok") cmd.option("--plan", "start in plan mode (--permission-mode plan)");
     cmd.action(async (args: string[], options) => {
       await launchHarness(harness, args, options);
     });

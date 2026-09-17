@@ -4,6 +4,7 @@ import { Command, Option } from "commander";
 import { configDir } from "../config.js";
 import { type InferenceEndpoint, ApiError, listEndpoints } from "../api.js";
 import { listSessions } from "../agents/sessions.js";
+import type { Harness } from "../agents/types.js";
 import { launchHarness } from "../agents/launch.js";
 import * as tapi from "../teleport/api.js";
 import { detectCommitter, pushCapsule } from "../teleport/push.js";
@@ -34,7 +35,8 @@ function pad(s: string, n: number): string {
 function harnessKindOf(h: string | undefined): HarnessKind {
   if (h === "claude") return "claude-code";
   if (h === "codex") return "codex";
-  if (h === "claude-code" || h === "codex") return h;
+  if (h === "grok") return "grok";
+  if (h === "claude-code" || h === "codex" || h === "grok") return h;
   return "none";
 }
 
@@ -189,12 +191,12 @@ export async function cmdTeleportPull(nameArg: string | undefined, pathArg: stri
     if (result.harnessSessionId) out(`Harness session ${result.harnessSessionId} restored under ${result.harnessCwd}.`);
   }
   if (options.resume && result.harnessSessionId && harnessKind !== "none") {
-    const harness = harnessKind === "claude-code" ? "claude" : "codex";
+    const harness = harnessKind === "claude-code" ? "claude" : harnessKind === "grok" ? "grok" : "codex";
     // Resume inside the restored tree, never the source cwd (which may still
     // exist on this machine): the transcript was placed under this slug.
     const resumeCwd = result.harnessCwd ?? result.root;
     err(`Resuming ${harness} in ${resumeCwd}…`);
-    await launchHarness(harness as "claude" | "codex", [], { resume: result.harnessSessionId, cwd: resumeCwd, dryRun: options.dryRun });
+    await launchHarness(harness as Harness, [], { resume: result.harnessSessionId, cwd: resumeCwd, dryRun: options.dryRun });
   }
 }
 
@@ -291,7 +293,7 @@ export async function cmdTeleport(pathArg: string | undefined, options: Teleport
   try {
     session = await tapi.launchCloudSession(name, {
       prompt: options.prompt?.trim() || "Resume the teleported session and continue where it left off.",
-      harness: harnessKind === "codex" ? "codex" : "claude-code",
+      harness: harnessKind === "codex" ? "codex" : harnessKind === "grok" ? "grok" : "claude-code",
       endpointId: endpoint?.id,
     });
   } catch (e) {
@@ -501,7 +503,7 @@ export function registerTeleportCommands(program: Command, addExamples: (c: Comm
       .option("--mirror <policy>", "all | <target>[,…]")
       .option("--include-ignored <glob>", "also capture a git-ignored path (repeatable)", collect, [])
       .option("--session <id>", "harness session id to capture with the repos")
-      .addOption(new Option("--harness <kind>", "harness whose session to capture").choices(["claude", "codex", "none"]))
+      .addOption(new Option("--harness <kind>", "harness whose session to capture").choices(["claude", "codex", "grok", "none"]))
       .option("--dry-run", "print what would be captured, upload nothing")
       .action(cmdTeleportPush),
   );
