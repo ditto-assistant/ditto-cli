@@ -148,6 +148,7 @@ heyditto apps endpoints list|attach|billing|detach <app> [<endpoint>]
 heyditto receipts [--leg ditto|byok|covered] [--app <app_id>] [--days <n>]
 heyditto claude [options] [-- <claude args>]
 heyditto codex  [options] [-- <codex args>]
+heyditto codex-app [--endpoint <slug>] [--model <id>] [--unset]
 heyditto sessions [--json] [--all]
 heyditto sessions rm <id>
 heyditto session new [<name>...] [--id <id>]
@@ -441,6 +442,36 @@ How the wiring works:
 - **Codex** speaks the Responses API only, so the endpoint is injected as a
   `ditto` model provider via `-c` overrides (nothing is written to
   `~/.codex/config.toml`) with the key in `DITTO_INFERENCE_API_KEY`.
+
+### `codex-app`
+
+`heyditto codex-app` wires the **Codex desktop app** (ChatGPT.app) to one of
+your inference endpoints, so its models — GLM Flash and friends — work in the
+app behind its own **"Sign in with an API key"** screen. Unlike the CLI, the
+app cannot be handed environment variables (a Dock-launched app inherits
+none), so the wiring is file-based in the `~/.codex` directory the app shares
+with the CLI:
+
+- `openai_base_url` in `~/.codex/config.toml` repoints the built-in `openai`
+  provider (the Responses wire the gateway speaks) at your endpoint;
+- the minted endpoint key lands in `~/.codex/auth.json` as the API-key login,
+  the same place the app's sign-in screen writes.
+
+```bash
+heyditto codex-app                          # sign in, pick an endpoint, wire the app
+heyditto codex-app --endpoint my-endpoint   # route through a specific endpoint
+heyditto codex-app --model glm-5.3-flash    # pin the app's model
+heyditto codex-app --dry-run                # show what would be written
+heyditto codex-app --unset                  # restore the previous wiring, revoke the key
+```
+
+The command also enables the endpoint's model picker (`--codex-models on`),
+so the app's model picker lists the endpoint's models. A previous login
+(especially a ChatGPT-plan one) is backed up to `auth.json.pre-ditto` and
+confirmed before it is replaced; `--unset` restores it. The key is long-lived
+(unlike `heyditto codex`'s per-session keys) and is revoked by `--unset` or
+rotated on the next run. Both files are shared with the Codex CLI, so a bare
+`codex` run routes through Ditto too; `heyditto codex` is unaffected.
 
 ### `endpoints`
 
