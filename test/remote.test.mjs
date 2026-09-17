@@ -533,3 +533,56 @@ test("fork: --worktree puts the copy on a fresh branch and moves the transcript 
   assert.ok(out.transcript.includes(Array.from(wtCanonical, (ch) => (/[A-Za-z0-9]/.test(ch) ? ch : "-")).join("")), "transcript lives under the worktree's project slug");
   assert.ok(readFileSync(out.transcript, "utf8").includes(wtCanonical), "cwd fields point at the worktree");
 });
+
+test("tui: status notes never paste over the harness frame (save/restore cursor around stderr writes)", { skip: ptySkip }, async () => {
+  const stub = await startHostStub();
+  const fakes = createFakeHarnesses();
+  const homes = makeHomes();
+  const repo = makeRepo();
+  // A long turn keeps the fake harness streaming so notes race its repaints.
+  const run = spawnTui(["claude"], { cwd: repo, env: baseEnv(stub, fakes, homes, { FAKE_TURN_MS: "2500" }) });
+  let announced;
+  try {
+    const announce = await stub.waitFor((f) => f.type === "session.announce");
+    announced = announce;
+    await waitUntil(() => run.output().includes("fake claude ready"), { what: "fake claude banner" });
+    stub.send({ type: "turn.deliver", turnId: "noisy", sessionId: announce.sessionId, text: "work for a while" });
+    await stub.waitFor((f) => f.type === "turn.started" && f.turnId === "noisy");
+    // Give the live session a beat so the "remote control on" note and the turn
+    // note are emitted while the harness owns the screen (either written
+    // cursor-guarded immediately or deferred by the quiet hold). The first note
+    // fires after session.start() resolves, which includes an HTTP round trip,
+    // so poll rather than sleep.
+    await waitUntil(() => /ditto:/.test(run.output().split("fake claude ready")[1] ?? ""), { what: "a live-session status note", timeout: 10_000 });
+
+    // Snapshot BEFORE the harness exits: anything written to the screen while
+    // the TUI owns it must sit inside DECSC … DECRC so it cannot paste at the
+    // harness's cursor position mid-frame.
+    const liveSnapshot = run.output();
+    const guardable = liveSnapshot.split("fake claude ready")[1] ?? "";
+    const notes = guardable.match(/ditto:[^\r\n]*/g) ?? [];
+    assert.ok(notes.length >= 1, `expected at least one live-session note, got ${notes.length}: ${JSON.stringify(guardable)} (session ${announced?.sessionId})`);
+    for (const note of notes) {
+      const at = guardable.indexOf(note);
+      // The note carries its own SGR prefix (ESC[2m…), so look past it for the
+      // DECSC that must sit immediately before the whole write.
+      const prefix = guardable.slice(Math.max(0, at - 12), at);
+      assert.ok(
+        prefix.includes("7"),
+        `note is not cursor-guarded (no DECSC before it): ${JSON.stringify(prefix)} … ${JSON.stringify(note)}`,
+      );
+      assert.ok(guardable.slice(at + note.length, at + note.length + 8).includes("8"), "note is not cursor-guarded (no DECRC after it)");
+    }
+    // No live-session note was pasted bare (unwrapped) anywhere in the stream.
+    assert.equal((guardable.match(/7/g) ?? []).length, (guardable.match(/8/g) ?? []).length, "unbalanced DECSC/DECRC");
+
+    stub.send({ type: "turn.interrupt", turnId: "noisy" });
+    await stub.waitFor((f) => f.type === "turn.finished" && f.turnId === "noisy", { timeout: 4000 });
+    run.write("");
+    assert.equal(await run.exit, 0);
+  } finally {
+    run.child.kill();
+    await Promise.race([run.exit, sleep(5000)]);
+    await stub.close();
+  }
+});
