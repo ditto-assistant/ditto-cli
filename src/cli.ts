@@ -30,6 +30,7 @@ import { openInBrowser } from "./browser.js";
 import { registerOrgCommands } from "./org-commands.js";
 import { registerTeleportCommands } from "./teleport/commands.js";
 import { registerForkCommand } from "./remote/fork-command.js";
+import { registerCodexAppCommand } from "./agents/codexapp.js";
 import { registerAppCommands } from "./app-commands.js";
 import { registerConfigCommands } from "./dittoconfig/commands.js";
 import { deviceLogin } from "./device-login.js";
@@ -1243,6 +1244,7 @@ your own workspace or an app workspace.`,
   registerAppCommands(program, addExamples, outputOption);
   registerOrgCommands(program, addExamples, outputOption, orgOption);
   registerHarnessCommands(program, addExamples);
+  registerCodexAppCommand(program, addExamples);
   registerSessionCommands(program, addExamples);
   registerTeleportCommands(program, addExamples);
   registerForkCommand(program, addExamples);

@@ -25,6 +25,26 @@ export interface StoredAuth {
   activeSession?: { id: string; name?: string; createdAt?: string };
   /** Remote Control identity the backend assigned this machine (from the host bridge `welcome`). */
   hostId?: string;
+  /**
+   * What `heyditto codex-app` last wrote into ~/.codex (config.toml wiring,
+   * the auth.json key) so `--unset` can restore the previous state and the
+   * previous run's key can be revoked. The plaintext key is kept: --unset
+   * uses it to recognize codex-app's own auth.json before deleting it.
+   */
+  codexApp?: {
+    endpointId: string;
+    endpointSlug: string;
+    keyId: string;
+    keyHint: string;
+    key?: string;
+    baseUrl: string;
+    forcedLogin?: "api";
+    model?: string;
+    previousBaseUrl?: string | null;
+    previousForcedLogin?: string | null;
+    previousModel?: string | null;
+    wiredAt: string;
+  };
 }
 
 export async function readStoredAuth(): Promise<StoredAuth | undefined> {
