@@ -41,7 +41,7 @@ export interface RemoteSessionContext {
 }
 
 export function harnessName(harness: Harness): HarnessName {
-  return harness === "claude" ? "claude-code" : "codex";
+  return harness === "claude" ? "claude-code" : harness === "grok" ? "grok" : "codex";
 }
 
 interface PendingPrompt extends Omit<PromptRequestFrame, "type"> {
@@ -76,7 +76,7 @@ export class RemoteSession {
       baseUrl: ctx.baseUrl,
       apiKey: ctx.apiKey,
       capabilities: {
-        harnesses: ["claude-code", "codex"],
+        harnesses: ["claude-code", "codex", "grok"],
         attachments: true,
         headless: true,
         teleport: Boolean(ctx.checkpoint),
@@ -216,9 +216,30 @@ export class RemoteSession {
           return;
       }
     }
+    // grok hooks arrive through the same relay as Claude's (hook.js with
+    // source "grok"): event names snake_case on the wire, and hook_event_name
+    // / hookEventName both appear in the payload. grok has no Notification
+    // permission event; its ask_user_question surfaces as a PreToolUse hook
+    // with the tool's input, answered by typing a digit.
+    if (event.source === "grok") {
+      const name = String(payload.hook_event_name ?? payload.hookEventName ?? event.event);
+      switch (name) {
+        case "UserPromptSubmit":
+          this.clearPending();
+          this.host.status(this.ctx.sessionId, "running");
+          return;
+        case "PreToolUse":
+          if (payload.tool_name === "ask_user_question") this.requestQuestion(payload.tool_input);
+          return;
+        case "Stop":
+          this.turnEnded();
+          return;
+        default:
+          return;
+      }
+    }
     if (/turn-complete|turn-ended|agent-turn/.test(event.event)) this.turnEnded();
   }
-
   private turnEnded(): void {
     this.clearPending();
     if (!this.current) this.host.status(this.ctx.sessionId, "idle");

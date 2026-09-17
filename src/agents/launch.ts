@@ -17,13 +17,14 @@ import {
   revokeKey,
 } from "../api.js";
 import { openInBrowser } from "../browser.js";
-import { apiBaseURL, endpointURL, resolveApiKey } from "../config.js";
+import { apiBaseURL, configDir, endpointURL, resolveApiKey } from "../config.js";
 import { deviceLogin } from "../device-login.js";
 import { formatActivation } from "../endpoint-format.js";
 import { readStoredAuth, saveLogin, updateStoredAuth } from "../store.js";
 import { err as c } from "../ui.js";
 import { planClaude } from "./claude.js";
 import { planCodex } from "./codex.js";
+import { ensureGrokHome, planGrok } from "./grok.js";
 import { type SessionRecord, latestSession, readSession, writeSession } from "./sessions.js";
 import {
   DEFAULT_LAUNCH_EXPIRY,
@@ -39,7 +40,7 @@ import {
 import { defaultWorktreeName, ensureWorktree } from "./worktree.js";
 import { RemoteSession } from "../remote/controller.js";
 import { startHeadlessTurn } from "../remote/headless.js";
-import { type HookServer, claudeHookSettings, codexNotifyOverride, startHookServer, withHookArgs } from "../remote/hooks.js";
+import { type HookServer, claudeHookSettings, codexNotifyOverride, hookScriptPath, startHookServer, withHookArgs } from "../remote/hooks.js";
 import { type PtySession, loadPty, spawnInPty } from "../remote/pty.js";
 import { checkpointPush } from "../teleport/commands.js";
 
@@ -93,8 +94,10 @@ function logResumeHint(harness: Harness, sessionId: string): void {
   process.stderr.write(`${c("dim", "ditto:")} resume this session with:\n\n  ${c(["bold", "green"], `heyditto ${harness} --resume ${sessionId}`)}\n\n`);
 }
 
-function planFor(harness: Harness, input: PlanInput): HarnessPlan {
-  return harness === "claude" ? planClaude(input) : planCodex(input);
+function planFor(harness: Harness, input: PlanInput, grokHome?: string): HarnessPlan {
+  if (harness === "claude") return planClaude(input);
+  if (harness === "grok") return planGrok(input, grokHome ?? "");
+  return planCodex(input);
 }
 
 function binaryAvailable(command: string): boolean {
@@ -426,6 +429,26 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     });
   }
 
+  // grok routes through a launch-scoped GROK_HOME (a real directory on disk,
+  // not argv overrides like codex -c), so it is prepared before the plan and
+  // reused by every later launch of the same session.
+  const grokHome = harness === "grok" && !options.dryRun
+    ? await ensureGrokHome(configDir(), sessionId, {
+        baseUrl: catalog.baseUrl,
+        apiKey: key?.key ?? DRY_RUN_KEY,
+        sessionId,
+        model,
+        resumeId: record ? record.harnessSessionId : undefined,
+        resumeLast,
+        prompt: options.prompt,
+        yolo: options.yolo,
+        yellow: options.yellow,
+        plan: options.plan,
+        passthrough,
+        env: process.env,
+      })
+    : undefined;
+
   const plan = planFor(harness, {
     baseUrl: catalog.baseUrl,
     apiKey: key?.key ?? DRY_RUN_KEY,
@@ -439,7 +462,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     plan: options.plan,
     passthrough,
     env: process.env,
-  });
+  }, grokHome);
 
   const field = (name: string, value: string): string => `${c("dim", `${name}=`)}${value}`;
   const banner = [
@@ -510,6 +533,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
         model,
         options,
         record: nextRecord,
+        grokHome,
       });
     } else if (remote === "tui") {
       exitCode = await runInTerminalWithRemote(harness, plan, { cwd, sessionId, harnessSessionId, record: nextRecord });
@@ -562,9 +586,11 @@ function remoteMode(options: LaunchOptions): RemoteMode {
 
 /** The hook flags that make a harness report its turn boundaries to `hooks`. */
 function hookArgs(harness: Harness, hooks: HookServer): string[] {
-  return harness === "claude"
-    ? ["--settings", claudeHookSettings(hooks.socketPath)]
-    : ["-c", codexNotifyOverride(hooks.socketPath)];
+  if (harness === "claude") return ["--settings", claudeHookSettings(hooks.socketPath)];
+  // grok takes its hooks from $GROK_HOME/hooks/*.json, which ensureGrokHome
+  // writes after the hook server is up — there are no argv overrides.
+  if (harness === "grok") return [];
+  return ["-c", codexNotifyOverride(hooks.socketPath)];
 }
 
 /** Plain launch: the harness owns the terminal directly. */
@@ -613,6 +639,15 @@ async function runInTerminalWithRemote(harness: Harness, plan: HarnessPlan, ctx:
   }
 
   const hooks = await startHookServer();
+  if (harness === "grok") {
+    await ensureGrokHome(configDir(), ctx.sessionId, {
+      baseUrl: apiBaseURL() + "/v1",
+      apiKey: apiKey,
+      sessionId: ctx.sessionId,
+      passthrough: [],
+      env: process.env,
+    }, { socketPath: hooks.socketPath, scriptPath: hookScriptPath(), nodePath: process.execPath });
+  }
   const session = new RemoteSession(
     {
       harness,
@@ -661,6 +696,8 @@ interface HeadlessRunContext extends RemoteRunContext {
   apiKey: string;
   model?: string;
   options: LaunchOptions;
+  /** grok: the launch GROK_HOME reused by every headless turn. */
+  grokHome?: string;
 }
 
 /**
@@ -672,9 +709,24 @@ async function runHeadless(harness: Harness, ctx: HeadlessRunContext): Promise<n
   const { key: dittoKey } = await resolveApiKey();
   if (!dittoKey) throw new Error("headless remote control needs a Ditto login (run `heyditto login`)");
   const hooks = await startHookServer();
+  // grok's hooks come from its launch GROK_HOME; refresh the socket path —
+  // it changes every process, and the home persists across launches.
+  if (harness === "grok") {
+    await ensureGrokHome(configDir(), ctx.sessionId, {
+      baseUrl: ctx.baseUrl,
+      apiKey: ctx.apiKey,
+      sessionId: ctx.sessionId,
+      model: ctx.model,
+      passthrough: [],
+      env: process.env,
+    }, { socketPath: hooks.socketPath, scriptPath: hookScriptPath(), nodePath: process.execPath });
+  }
   // Claude's first turn creates the session under our id; later turns resume it.
   let claudeStarted = ctx.record.launches > 1;
   let codexStarted = ctx.record.launches > 1;
+  // grok always pins its session id with -s, so every headless turn lands in
+  // the same grok session without resume bookkeeping.
+  let grokStarted = ctx.record.launches > 1;
   let running = false;
   const session = new RemoteSession(
     {
@@ -707,6 +759,8 @@ async function runHeadless(harness: Harness, ctx: HeadlessRunContext): Promise<n
       prompt,
       resumeId,
       resumeLast,
+      grokHome: ctx.grokHome,
+      grokResume: harness === "grok" && grokStarted,
       cwd: ctx.cwd,
       extraArgs: harness === "codex" ? hookArgs(harness, hooks) : [],
       onProgress: (line) => process.stderr.write(`${c("dim", "  ›")} ${line}\n`),
@@ -715,6 +769,7 @@ async function runHeadless(harness: Harness, ctx: HeadlessRunContext): Promise<n
       running = false;
       if (harness === "claude") claudeStarted = true;
       else codexStarted = true;
+      grokStarted = true;
     });
     return turn;
   };

@@ -419,7 +419,7 @@ export async function listRemoteSessions(endpointId: string): Promise<InferenceS
 // ===== Device login (RFC 8628 style) =====
 
 /** What the CLI was asked to do; the web page specializes its onboarding on it. */
-export type DeviceIntent = "login" | "claude" | "codex";
+export type DeviceIntent = "login" | "claude" | "codex" | "grok";
 
 export const DEVICE_CLIENT = "heyditto-cli";
 

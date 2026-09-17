@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 
 import { planClaude } from "../dist/agents/claude.js";
 import { planCodex, tomlString } from "../dist/agents/codex.js";
+import { GROK_MODEL_ID, GROK_SESSION_ENV, grokModelConfig, planGrok } from "../dist/agents/grok.js";
 import { listEndpointsStubHandler } from "./helpers/stub-api.mjs";
 import { apiRootOf, childEnv, stripSeparator } from "../dist/agents/types.js";
 import { defaultWorktreeName, ensureGitignore, validWorktreeName } from "../dist/agents/worktree.js";
@@ -395,4 +396,63 @@ test("planCodex combines a headless prompt with resume", () => {
   const resumeOnly = planCodex({ ...base, resumeLast: true });
   assert.equal(resumeOnly.args[0], "resume");
   assert.ok(resumeOnly.args.includes("--last"));
+});
+
+// grok routes through a launch-scoped GROK_HOME: a signed-in ~/.grok/auth.json
+// beats XAI_API_KEY for every request, which would send the user's xAI session
+// token to the Ditto gateway. The plan must therefore point GROK_HOME at the
+// prepared home (no auth.json) and pin the session id with -s.
+test("planGrok: session pin, modes, prompt and env", () => {
+  const home = "/cfg/grok-homes/s1";
+  const base = { baseUrl: "https://api.heyditto.ai/v1", apiKey: "k", sessionId: "03a735a2-f328-4fbc-9fb4-5ecd3ef24132", passthrough: [], env: {} };
+
+  const plain = planGrok(base, home);
+  assert.deepEqual(plain.args, ["-s", "03a735a2-f328-4fbc-9fb4-5ecd3ef24132"]);
+  assert.equal(plain.command, "grok");
+  assert.equal(plain.envSet.GROK_HOME, home);
+  assert.equal(plain.envSet.XAI_API_KEY, "k");
+  assert.equal(plain.envSet[GROK_SESSION_ENV], base.sessionId);
+  assert.equal(plain.envSet.GROK_MODELS_BASE_URL, "https://api.heyditto.ai/v1");
+  assert.equal(plain.envSet.GROK_XAI_API_BASE_URL, "https://api.heyditto.ai");
+  assert.equal(plain.envUnset.length, 0, "nothing needs removing: the launch home isolates auth");
+
+  // A headless run cannot answer permission prompts, so it approves implicitly.
+  const prompt = planGrok({ ...base, prompt: "hi", yolo: false }, home);
+  assert.ok(prompt.args.includes("--always-approve"));
+  assert.ok(prompt.args.includes("-p"));
+  assert.equal(prompt.args.at(-1), "hi");
+
+  const yolo = planGrok({ ...base, yolo: true }, home);
+  assert.ok(yolo.args.includes("--always-approve"));
+  assert.ok(!prompt.args.includes("--permission-mode"));
+
+  const yellow = planGrok({ ...base, yellow: true }, home);
+  assert.deepEqual(yellow.args.slice(-2), ["--permission-mode", "auto"]);
+
+  // Non-UUID Ditto session ids cannot pin -s (grok requires UUIDs) but the
+  // X-Ditto-Session-Id header still files the turns into the right thread.
+  const nonUuid = planGrok({ ...base, sessionId: "team-session" }, home);
+  assert.ok(!nonUuid.args.includes("-s"));
+  assert.equal(nonUuid.envSet[GROK_SESSION_ENV], "team-session");
+
+  const resume = planGrok({ ...base, resumeId: "01a0ad96-3c7b-7d42-99f5-22d756d3c5e2" }, home);
+  assert.deepEqual(resume.args.slice(0, 2), ["--resume", "01a0ad96-3c7b-7d42-99f5-22d756d3c5e2"]);
+  assert.ok(!resume.args.includes("-s"), "resume replaces the session pin");
+
+  // Model ids pass through: grok's own grok-* ids normalize like Claude's.
+  const withModel = planGrok({ ...base, model: "grok-4.5" }, home);
+  assert.deepEqual(withModel.args.slice(-2), ["-m", "grok-4.5"]);
+});
+
+test("grokModelConfig: routes at the gateway without secrets on disk", () => {
+  const input = { baseUrl: "https://api.heyditto.ai/v1", apiKey: "secret", sessionId: "s1", passthrough: [], env: {} };
+  const toml = grokModelConfig(input);
+  assert.match(toml, /\[model\.ditto\]/);
+  assert.match(toml, new RegExp(`base_url = "https://api\\.heyditto\\.ai/v1"`));
+  assert.match(toml, /env_key = "DITTO_INFERENCE_API_KEY"/);
+  assert.match(toml, new RegExp(`env_http_headers = \\{ "X-Ditto-Session-Id" = "${GROK_SESSION_ENV}" \\}`));
+  assert.match(toml, /\[models\]/);
+  assert.match(toml, new RegExp(`default = "${GROK_MODEL_ID}"`));
+  assert.ok(!toml.includes("secret"), "the endpoint key rides env_key by name, never its value");
+  assert.ok(!toml.includes(input.apiKey));
 });

@@ -18,7 +18,7 @@ export const CHUNK_BYTES = 24 * 1024 * 1024;
 export const MANIFEST_VERSION = 1;
 
 export type RootKind = "repo" | "folder";
-export type HarnessKind = "claude-code" | "codex" | "none";
+export type HarnessKind = "claude-code" | "codex" | "grok" | "none";
 /** Tar compression used for worktree and harness captures; detected from the bytes on restore. */
 export type Compression = "zstd" | "gzip";
 

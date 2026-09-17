@@ -1,8 +1,8 @@
 /** Shared types for the coding-agent launchers. Pure data, no I/O. */
 
-export type Harness = "claude" | "codex";
+export type Harness = "claude" | "codex" | "grok";
 
-export const HARNESSES: readonly Harness[] = ["claude", "codex"];
+export const HARNESSES: readonly Harness[] = ["claude", "codex", "grok"];
 
 export const KEY_EXPIRIES = [
   "1h",

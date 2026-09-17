@@ -22,6 +22,11 @@ function codexHome(): string {
   return process.env.CODEX_HOME?.trim() || path.join(os.homedir(), ".codex");
 }
 
+/** grokHome: the launch-scoped GROK_HOME (set by the launcher) or the user's. */
+function grokHome(): string {
+  return process.env.GROK_HOME?.trim() || path.join(os.homedir(), ".grok");
+}
+
 /**
  * Claude Code 2.1.x builtins. `headless` is true only for the ones that are
  * prompt expansions (they work under `claude -p`); the rest drive the TUI.
@@ -77,6 +82,22 @@ const CODEX_BUILTINS: Array<[string, string, string?]> = [
   ["feedback", "send feedback"],
   ["logout", "log out of Codex"],
   ["quit", "exit Codex"],
+];
+
+/** Grok 1.0.x builtins (from `grok -h` and its bundled docs); prompt expansions only. */
+const GROK_BUILTINS: Array<[string, string, string?]> = [
+  ["model", "switch the session model", "[model]"],
+  ["compact", "compress conversation history to save context window", "[instructions]"],
+  ["always-approve", "toggle always-approve mode (skip all permission prompts)", "on|off"],
+  ["context", "show context window usage and session stats"],
+  ["session-info", "show session details (model, turns, context usage)"],
+  ["goal", "set, manage, or check an autonomous goal", "<objective>"],
+  ["workflow", "launch a saved workflow or manage runs", "[name]"],
+  ["config-agents", "manage agent configurations"],
+  ["personas", "manage subagent personas"],
+  ["hooks-trust", "grant hooks/MCP/LSP trust for this folder"],
+  ["privacy", "coding data, retention, and training settings"],
+  ["help", "show help and available commands"],
 ];
 
 /** `key: value` lines between the leading `---` fences; enough for command and skill files. */
@@ -213,6 +234,13 @@ export function catalogDirs(harness: Harness, cwd: string): string[] {
       path.join(claudeHome(), "plugins"),
     ];
   }
+  if (harness === "grok") {
+    return [
+      path.join(cwd, ".grok", "skills"),
+      path.join(grokHome(), "skills"),
+      path.join(grokHome(), "agents"),
+    ];
+  }
   return [
     path.join(codexHome(), "prompts"),
     path.join(codexHome(), "skills"),
@@ -248,6 +276,20 @@ export async function discoverCommands(harness: Harness, cwd: string): Promise<C
         source: "builtin" as const,
         ...(argsHint ? { argsHint } : {}),
         headless,
+      })),
+    );
+    return out;
+  }
+  if (harness === "grok") {
+    add(await skillDirs(path.join(cwd, ".grok", "skills"), "skill", "$"));
+    add(await skillDirs(path.join(grokHome(), "skills"), "skill", "$"));
+    add(
+      GROK_BUILTINS.map(([name, description, argsHint]) => ({
+        name,
+        description,
+        source: "builtin" as const,
+        ...(argsHint ? { argsHint } : {}),
+        headless: false,
       })),
     );
     return out;

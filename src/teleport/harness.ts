@@ -24,6 +24,10 @@ function codexHome(): string {
   return process.env.CODEX_HOME?.trim() || path.join(os.homedir(), ".codex");
 }
 
+function grokHome(): string {
+  return process.env.GROK_HOME?.trim() || path.join(os.homedir(), ".grok");
+}
+
 /**
  * The directory as Claude Code sees it: canonical (symlinks resolved, e.g.
  * macOS /tmp → /private/tmp) when it exists, else just absolute.
@@ -49,6 +53,18 @@ export async function locateClaude(sessionId: string, cwd: string): Promise<Harn
   return { kind: "claude-code", sessionId, files, keyDir: projectDir };
 }
 
+/** Locates a grok session directory (events/updates/chat history) by session id. */
+export async function locateGrok(sessionId: string): Promise<HarnessLocation | null> {
+  const sessions = path.join(grokHome(), "sessions");
+  if (!(await exists(sessions))) return null;
+  const matches: string[] = [];
+  for (const f of await walkFiles(sessions)) {
+    if (f.includes(`/${sessionId}/`) || f.includes(`/${sessionId}.`)) matches.push(f);
+  }
+  if (matches.length === 0) return null;
+  return { kind: "grok", sessionId, files: matches };
+}
+
 /** Locates a Codex rollout transcript by thread id. */
 export async function locateCodex(threadId: string): Promise<HarnessLocation | null> {
   const sessions = path.join(codexHome(), "sessions");
@@ -68,6 +84,7 @@ export async function locateHarness(
   if (!sessionId) return null;
   if (kind === "claude-code") return locateClaude(sessionId, cwd);
   if (kind === "codex") return locateCodex(sessionId);
+  if (kind === "grok") return locateGrok(sessionId);
   return null;
 }
 
