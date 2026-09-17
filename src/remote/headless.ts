@@ -23,6 +23,11 @@ export interface HeadlessTurnInput {
   resumeLast?: boolean;
   /** grok: the launch GROK_HOME the plan's env points at. */
   grokHome?: string;
+  /**
+   * grok: the grok session already exists on disk, so this turn must RESUME
+   * it rather than pin it again with -s (grok refuses a -s id it has seen).
+   */
+  grokResume?: boolean;
   cwd: string;
   /** Extra args (e.g. Codex `-c notify=…`, Claude `--settings …`). */
   extraArgs?: string[];
@@ -69,7 +74,7 @@ export function startHeadlessTurn(input: HeadlessTurnInput): HeadlessTurn {
   };
   const plan =
     input.harness === "claude" ? planClaude(planInput)
-    : input.harness === "grok" ? planGrok(planInput, input.grokHome ?? "")
+    : input.harness === "grok" ? planGrok(planInput, input.grokHome ?? "", input.grokResume)
     : planCodex(planInput);
   const args = withHookArgs(input.harness, plan.args, input.extraArgs ?? []);
   const child = spawn(plan.command, args, {

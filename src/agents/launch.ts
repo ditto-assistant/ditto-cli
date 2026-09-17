@@ -760,6 +760,7 @@ async function runHeadless(harness: Harness, ctx: HeadlessRunContext): Promise<n
       resumeId,
       resumeLast,
       grokHome: ctx.grokHome,
+      grokResume: harness === "grok" && grokStarted,
       cwd: ctx.cwd,
       extraArgs: harness === "codex" ? hookArgs(harness, hooks) : [],
       onProgress: (line) => process.stderr.write(`${c("dim", "  ›")} ${line}\n`),

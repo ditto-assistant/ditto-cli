@@ -119,13 +119,15 @@ export function grokHookConfig(server: { socketPath: string; scriptPath: string;
  * pinned with `-s` so grok's own wire header (x-grok-session-id) and on-disk
  * session match the Ditto thread; resume reopens that id.
  */
-export function planGrok(input: PlanInput, grokHome: string): HarnessPlan {
+export function planGrok(input: PlanInput, grokHome: string, grokResume = false): HarnessPlan {
   const args: string[] = [];
   // -s pins grok's session id (UUID only); --resume reopens one. They are
-  // mutually exclusive, like claude's --session-id/--resume.
+  // mutually exclusive, like claude's --session-id/--resume. A later turn in
+  // an existing session must RESUME: grok rejects -s with "Session ID … is
+  // already in use" when the launch home already holds that session.
   const uuidShaped = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   if (input.resumeId) args.push("--resume", input.resumeId);
-  else if (input.resumeLast) args.push("--resume");
+  else if (input.resumeLast || grokResume) args.push("--resume");
   else if (uuidShaped.test(input.sessionId)) args.push("-s", input.sessionId);
 
   if (input.model) args.push("-m", input.model);
