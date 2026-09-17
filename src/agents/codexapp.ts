@@ -285,6 +285,7 @@ export async function unsetCodexApp(): Promise<void> {
 
   const configRaw = await readMaybe(configPath);
   let configText = restoreKey(configRaw, "openai_base_url", record.baseUrl, record.previousBaseUrl) ?? configRaw;
+  configText = restoreKey(configText, "forced_login_method", record.forcedLogin ?? "api", record.previousForcedLogin ?? null) ?? configText;
   if (record.model !== undefined) {
     configText = restoreKey(configText, "model", record.model, record.previousModel) ?? configText;
   }
@@ -349,12 +350,18 @@ export async function runCodexApp(options: CodexAppOptions): Promise<void> {
   const pinningModel = options.model !== undefined;
   const previousBaseUrl = previousValue(configRaw, "openai_base_url", record?.baseUrl, record?.previousBaseUrl);
   const previousModel = pinningModel ? previousValue(configRaw, "model", record?.model, record?.previousModel) : undefined;
+  const previousForcedLogin = previousValue(configRaw, "forced_login_method", record?.forcedLogin ?? "api", record?.previousForcedLogin ?? null);
 
   let newConfig = upsertTopLevelString(configRaw, "openai_base_url", baseUrl, CODEX_APP_MARKER);
+  // Force the API-key path: without this, a ChatGPT OAuth login (which can
+  // live outside auth.json, in the OS credential store) silently takes
+  // precedence and the app sends its OpenAI OAuth token to the Ditto
+  // gateway, which 401s it — the app breaks for its own OAuth usage.
+  newConfig = upsertTopLevelString(newConfig, "forced_login_method", "api");
   if (pinningModel) newConfig = upsertTopLevelString(newConfig, "model", options.model as string);
   try {
     const parsed = parseToml(newConfig) as Record<string, unknown>;
-    if (parsed.openai_base_url !== baseUrl || (pinningModel && parsed.model !== options.model)) {
+    if (parsed.openai_base_url !== baseUrl || parsed.forced_login_method !== "api" || (pinningModel && parsed.model !== options.model)) {
       throw new Error("the edited file does not carry the new values");
     }
   } catch (err) {
@@ -380,7 +387,7 @@ export async function runCodexApp(options: CodexAppOptions): Promise<void> {
           baseUrl,
           codexHome: home,
           write: {
-            [configPath]: { openai_base_url: baseUrl, ...(pinningModel ? { model: options.model } : {}) },
+            [configPath]: { openai_base_url: baseUrl, forced_login_method: "api", ...(pinningModel ? { model: options.model } : {}) },
             [authPath]: authKind === "absent" ? "{ OPENAI_API_KEY: <endpoint key> }" : `(replace the existing ${authKind === "chatgpt" ? "ChatGPT" : "API-key"} login; backup kept)`,
           },
           enableModelPicker: options.models !== false,
@@ -449,14 +456,17 @@ export async function runCodexApp(options: CodexAppOptions): Promise<void> {
       keyHint: key.keyHint,
       key: key.key,
       baseUrl,
+      forcedLogin: "api",
       ...(pinningModel ? { model: options.model as string, previousModel: previousModel ?? null } : {}),
       previousBaseUrl,
+      previousForcedLogin,
       wiredAt: new Date().toISOString(),
     },
   });
 
   log(`endpoint=${c(["bold", "cyan"], endpoint.slug)}  key=…${key.keyHint}  expires=${expiresIn}  codexHome=${home}`);
   log(`wrote ${c("bold", "openai_base_url")} into ${configPath}`);
+  log(`wrote ${c("bold", 'forced_login_method = "api"')} so the app uses this key instead of a ChatGPT OAuth login (which would 401 against the gateway)`);
   log(`wrote the endpoint key to ${authPath}${authBackupKept ? ` (backup: ${authBackupPath})` : ""}`);
   if (pickerEnabled) log(`enabled the model picker on ${endpoint.slug} — the app's /model lists its models`);
   log(`traces: ${c(["underline", "cyan"], endpointURL(endpoint.id))}`);

@@ -38,8 +38,10 @@ export interface StoredAuth {
     keyHint: string;
     key?: string;
     baseUrl: string;
+    forcedLogin?: "api";
     model?: string;
     previousBaseUrl?: string | null;
+    previousForcedLogin?: string | null;
     previousModel?: string | null;
     wiredAt: string;
   };

@@ -178,6 +178,7 @@ test("codex-app wires config.toml + auth.json, enables the picker, and --unset r
     assert.ok(first.stderr.includes(MINTED_PLAINTEXT), "--show-key prints the key");
     const config = readFileSync(configPath, "utf8");
     assert.match(config, /openai_base_url = "https:\/\/api\.example\.test\/v1"/);
+    assert.match(config, /forced_login_method = "api"/);
     assert.match(config, /# added by `heyditto codex-app`/);
     assert.ok(config.includes('model = "gpt-5.6-terra"'), "existing model untouched without --model");
     assert.ok(config.includes("[projects."), "existing tables preserved");
@@ -200,6 +201,7 @@ test("codex-app wires config.toml + auth.json, enables the picker, and --unset r
     assert.equal(unset.status, 0, unset.stderr);
     const restored = readFileSync(configPath, "utf8");
     assert.ok(!restored.includes("openai_base_url"), "openai_base_url removed");
+    assert.ok(!restored.includes("forced_login_method"), "forced_login_method removed");
     assert.ok(restored.includes('model = "gpt-5.6-terra"'), "model preserved");
     assert.ok(restored.includes("[projects."), "tables preserved");
     assert.equal(existsSync(authPath), false, "codex-app's auth.json removed");
@@ -257,6 +259,27 @@ test("codex-app --model pins it and --unset restores the previous model", async 
     assert.equal(unset.status, 0, unset.stderr);
     assert.match(readFileSync(configPath, "utf8"), /model = "gpt-5\.6-terra"/);
     assert.ok(!readFileSync(configPath, "utf8").includes("openai_base_url"));
+    assert.ok(!readFileSync(configPath, "utf8").includes("forced_login_method"));
+  } finally {
+    stub.close();
+  }
+});
+
+test("codex-app restores a pre-existing forced_login_method on --unset", async () => {
+  const stub = await startStub();
+  STUB_BASE = stub.base;
+  const codexDir = mkdtempSync(path.join(os.tmpdir(), "heyditto-codexapp-home-"));
+  const configDir = mkdtempSync(path.join(os.tmpdir(), "heyditto-codexapp-cfg-"));
+  const configPath = path.join(codexDir, "config.toml");
+  writeFileSync(configPath, 'forced_login_method = "chatgpt"\n');
+  try {
+    const wired = await run(["codex-app", "--yes"], codexDir, configDir);
+    assert.equal(wired.status, 0, wired.stderr);
+    assert.match(readFileSync(configPath, "utf8"), /forced_login_method = "api"/);
+
+    const unset = await run(["codex-app", "--unset"], codexDir, configDir);
+    assert.equal(unset.status, 0, unset.stderr);
+    assert.match(readFileSync(configPath, "utf8"), /forced_login_method = "chatgpt"/, "previous value restored");
   } finally {
     stub.close();
   }
