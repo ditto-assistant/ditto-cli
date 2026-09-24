@@ -12,6 +12,7 @@ const { discoverWorkspace, planCapture, offloadBlockers } = await import(path.jo
 const { detectTypes, PROJECT_TYPES } = await import(path.join(root, "dist/teleport/catalog.js"));
 const { isExcluded } = await import(path.join(root, "dist/teleport/types.js"));
 const { dirtyPaths } = await import(path.join(root, "dist/teleport/worktree.js"));
+const { disposableNodeModules } = await import(path.join(root, "dist/teleport/offload.js"));
 
 function git(args, cwd) {
   return execFileSync("git", args, { cwd, stdio: ["ignore", "pipe", "ignore"], env: { ...process.env, GIT_AUTHOR_NAME: "qa", GIT_AUTHOR_EMAIL: "qa@x", GIT_COMMITTER_NAME: "qa", GIT_COMMITTER_EMAIL: "qa@x" } }).toString();
@@ -161,6 +162,19 @@ test(".ditto include/exclude overrides adjust the plan and record the config dig
   assert.equal(web.dittoConfig.version, 1);
   assert.match(web.dittoConfig.digest, /^[0-9a-f]{64}$/);
   assert.deepEqual(web.dittoConfig.layers, ["repo"]);
+  assert.ok(!disposableNodeModules(plan).includes("web/node_modules"), "a force-included dependency tree is retained");
+});
+
+test("offload selects only confirmed, untracked Node dependency trees", async () => {
+  const parent = await fixture();
+  const plan = await planCapture(parent);
+  assert.deepEqual(disposableNodeModules(plan), ["web/node_modules"]);
+
+  const web = path.join(parent, "web");
+  git(["add", "-f", "node_modules/left-pad/index.js"], web);
+  git(["commit", "-qm", "track dependency intentionally"], web);
+  const tracked = await planCapture(parent);
+  assert.ok(!disposableNodeModules(tracked).includes("web/node_modules"), "tracked dependencies stay recoverable in Trash");
 });
 
 test("invalid .ditto is reported as a conflict, not silently ignored", async () => {

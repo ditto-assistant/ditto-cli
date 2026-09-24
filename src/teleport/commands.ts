@@ -9,7 +9,7 @@ import { launchHarness } from "../agents/launch.js";
 import * as tapi from "../teleport/api.js";
 import { detectCommitter, pushCapsule } from "../teleport/push.js";
 import { pullCapsule, readCachedManifest, writeCachedManifest } from "../teleport/pull.js";
-import { deleteLocalRoot, unpushedRepos, waitForOffloadReady } from "../teleport/offload.js";
+import { deleteLocalRoot, disposableNodeModules, unpushedRepos, waitForOffloadReady } from "../teleport/offload.js";
 import * as storage from "../teleport/storage.js";
 import { discoverRepos } from "../teleport/discover.js";
 import { offloadBlockers, planCapture } from "../teleport/workspace.js";
@@ -341,7 +341,7 @@ export async function resolveEndpoint(option: string | undefined): Promise<Infer
   throw new Error(`no inference endpoint matches "${wanted}"; available: ${slugs}. Create one in Settings → Developer → Inference endpoints.`);
 }
 
-export async function cmdOffload(pathArg: string | undefined, options: { yes?: boolean; allowUnpushed?: boolean; name?: string }): Promise<void> {
+export async function cmdOffload(pathArg: string | undefined, options: { yes?: boolean; allowUnpushed?: boolean; keepDependencies?: boolean; name?: string }): Promise<void> {
   const root = path.resolve(pathArg ?? process.cwd());
   const risky = await unpushedRepos(root);
   // Anything beneath the deletion root that a capture would not preserve blocks
@@ -378,13 +378,19 @@ export async function cmdOffload(pathArg: string | undefined, options: { yes?: b
     process.exitCode = 1;
     return;
   }
+  const dependencies = options.keepDependencies ? [] : disposableNodeModules(plan);
+  if (process.platform === "darwin" && dependencies.length > 0) {
+    err(`After moving the project to Trash, deleting ${dependencies.length} confirmed node_modules director${dependencies.length === 1 ? "y" : "ies"}. Use --keep-dependencies to retain them in Trash.`);
+  }
   if (!options.yes) {
-    const answer = await requireTty(`Verified on ${readiness.mirrors.filter((m) => m.verifiedAt).length} mirror(s). Delete ${root}? [y/N] `);
+    const answer = await requireTty(`Verified on ${readiness.mirrors.filter((m) => m.verifiedAt).length} mirror(s). Offload ${root}? [y/N] `);
     if (answer.toLowerCase() !== "y") return err("Aborted; capsule kept, local files untouched.");
   }
-  const del = await deleteLocalRoot(root);
+  const del = await deleteLocalRoot(root, dependencies);
   await tapi.updateCapsule(capsule.id, { status: "offloaded" });
   out(`Offloaded ${root}.${del.location ? ` Moved to ${del.location}.` : ""}`);
+  if (del.deletedDependencies.length > 0) out(`Deleted ${del.deletedDependencies.length} node_modules director${del.deletedDependencies.length === 1 ? "y" : "ies"} from Trash.`);
+  if (del.retainedDependencies.length > 0) err(`Could not delete ${del.retainedDependencies.join(", ")} from Trash; project files remain recoverable there.`);
   out(`Recover it with: heyditto teleport pull ${capsule.name} ${root}`);
 }
 
@@ -560,6 +566,7 @@ export function registerTeleportCommands(program: Command, addExamples: (c: Comm
       .summary("free disk: back up then remove a local project")
       .option("--yes", "skip the delete confirmation")
       .option("--allow-unpushed", "offload even when a repo has commits no remote has")
+      .option("--keep-dependencies", "retain recognized node_modules directories in macOS Trash")
       .option("--name <name>", "capsule name (default: the directory name)")
       .action(cmdOffload),
     `  heyditto offload ~/code/old-project

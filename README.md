@@ -786,14 +786,19 @@ session.
 
 ## Offload
 
-`offload` is the safe "back it up, then delete it" command. It pushes the
-project, waits until the capsule is verified on a redundant mirror, then removes
-the local copy (into the Trash on macOS). It refuses when a repo holds commits
-no remote has, unless you pass `--allow-unpushed`.
+`offload` pushes the project, waits until the capsule is verified on redundant
+mirrors, then removes the local copy. On macOS, project files move to Trash.
+Recognized, excluded, untracked `node_modules` directories are deleted from
+that Trash copy by default, so dependency bytes actually leave the disk.
+`--keep-dependencies` retains them in Trash. Other caches remain in Trash until
+their cleanup patterns have been confirmed. If the move to Trash fails, offload
+stops without deleting the project. It refuses when a repo holds commits no
+remote has, unless you pass `--allow-unpushed`.
 
 ```bash
 heyditto offload ~/code/old-project      # verify, confirm, delete
 heyditto offload --yes                   # skip the confirmation
+heyditto offload --keep-dependencies     # preserve node_modules in Trash
 ```
 
 Recover any time with `heyditto teleport pull <capsule> <path>`.
