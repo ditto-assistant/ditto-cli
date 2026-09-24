@@ -1,4 +1,4 @@
-import { lstat, rename, rm, stat } from "node:fs/promises";
+import { lstat, rename, rm } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
@@ -103,7 +103,7 @@ export interface LocalRemoval {
  */
 export async function deleteLocalRoot(root: string, dependencies: string[] = []): Promise<LocalRemoval> {
   const resolved = path.resolve(root);
-  await stat(resolved); // throws if already gone
+  await assertRealDirectory(resolved);
   if (process.platform === "darwin") {
     return moveLocalRootToTrash(resolved, path.join(os.homedir(), ".Trash"), dependencies);
   }
@@ -114,6 +114,7 @@ export async function deleteLocalRoot(root: string, dependencies: string[] = [])
 /** Exported separately so the macOS move and cleanup can be exercised in a temporary Trash. */
 export async function moveLocalRootToTrash(root: string, trashDir: string, dependencies: string[] = []): Promise<LocalRemoval> {
   const resolved = path.resolve(root);
+  await assertRealDirectory(resolved);
   const trash = path.join(trashDir, `${path.basename(resolved)}-teleport-${Date.now()}-${randomUUID().slice(0, 8)}`);
   await rename(resolved, trash);
   const deletedDependencies: string[] = [];
@@ -135,6 +136,13 @@ export async function moveLocalRootToTrash(root: string, trashDir: string, depen
     }
   }
   return { method: "trash", location: trash, deletedDependencies, retainedDependencies };
+}
+
+export async function assertRealDirectory(root: string): Promise<void> {
+  const info = await lstat(root);
+  if (!info.isDirectory() || info.isSymbolicLink()) {
+    throw new Error(`offload requires a real directory, not a symlink: ${root}`);
+  }
 }
 
 async function dependencyDirectoryState(root: string, rel: string): Promise<"safe" | "missing" | "unsafe"> {

@@ -9,7 +9,7 @@ import { launchHarness } from "../agents/launch.js";
 import * as tapi from "../teleport/api.js";
 import { detectCommitter, pushCapsule } from "../teleport/push.js";
 import { pullCapsule, readCachedManifest, writeCachedManifest } from "../teleport/pull.js";
-import { deleteLocalRoot, disposableNodeModules, unpushedRepos, waitForOffloadReady } from "../teleport/offload.js";
+import { assertRealDirectory, deleteLocalRoot, disposableNodeModules, unpushedRepos, waitForOffloadReady } from "../teleport/offload.js";
 import * as storage from "../teleport/storage.js";
 import { discoverRepos } from "../teleport/discover.js";
 import { offloadBlockers, planCapture } from "../teleport/workspace.js";
@@ -343,6 +343,7 @@ export async function resolveEndpoint(option: string | undefined): Promise<Infer
 
 export async function cmdOffload(pathArg: string | undefined, options: { yes?: boolean; allowUnpushed?: boolean; keepDependencies?: boolean; name?: string }): Promise<void> {
   const root = path.resolve(pathArg ?? process.cwd());
+  await assertRealDirectory(root);
   const risky = await unpushedRepos(root);
   // Anything beneath the deletion root that a capture would not preserve blocks
   // the offload outright: unselected projects, documents, unknown files,

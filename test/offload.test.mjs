@@ -58,3 +58,16 @@ test("dependency cleanup does not follow symlinks inside Trash", async () => {
   assert.deepEqual(result.retainedDependencies, ["node_modules"]);
   assert.equal(await readFile(path.join(outside, "important.txt"), "utf8"), "keep");
 });
+
+test("a symlinked offload root is rejected before moving or deleting its target", async () => {
+  const parent = await mkdtemp(path.join(os.tmpdir(), "heyditto-offload-"));
+  const source = path.join(parent, "project");
+  const link = path.join(parent, "project-link");
+  const trash = path.join(parent, "Trash");
+  await mkdir(path.join(source, "node_modules"), { recursive: true });
+  await mkdir(trash);
+  await writeFile(path.join(source, "node_modules", "package.js"), "dependency");
+  await symlink(source, link);
+  await assert.rejects(moveLocalRootToTrash(link, trash, ["node_modules"]), /real directory, not a symlink/);
+  assert.equal(await readFile(path.join(source, "node_modules", "package.js"), "utf8"), "dependency");
+});
