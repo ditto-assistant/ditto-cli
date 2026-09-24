@@ -802,6 +802,8 @@ heyditto offload --keep-dependencies     # preserve node_modules in Trash
 ```
 
 Recover any time with `heyditto teleport pull <capsule> <path>`.
+After pulling, reinstall Node dependencies that were removed during offload;
+`node_modules` is not stored in the capsule.
 
 ## Storage mirrors
 

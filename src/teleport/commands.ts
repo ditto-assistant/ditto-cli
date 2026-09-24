@@ -393,6 +393,7 @@ export async function cmdOffload(pathArg: string | undefined, options: { yes?: b
   if (del.deletedDependencies.length > 0) out(`Deleted ${del.deletedDependencies.length} node_modules director${del.deletedDependencies.length === 1 ? "y" : "ies"} from Trash.`);
   if (del.retainedDependencies.length > 0) err(`Could not delete ${del.retainedDependencies.join(", ")} from Trash; project files remain recoverable there.`);
   out(`Recover it with: heyditto teleport pull ${capsule.name} ${root}`);
+  if (del.deletedDependencies.length > 0) out("Reinstall Node dependencies after pulling; they are not stored in the capsule.");
 }
 
 // ===== storage =====
