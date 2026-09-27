@@ -38,13 +38,13 @@ function run(args, env = {}) {
 }
 
 /** One `keys create` run against the API stub with only fake platform CLIs on PATH. */
-async function mint(args, { bins = BINS, fail } = {}) {
+async function mint(args, { bins = BINS, fail, env = {} } = {}) {
   const stub = await startStub();
   const fakes = createFakeCLIs(bins);
   try {
     const result = await run(["endpoints", "keys", "create", "alpha", ...args, "--yes"], {
       DITTO_API_BASE: stub.base,
-      ...fakes.env(fail ? { FAKE_CLI_FAIL: fail } : {}),
+      ...fakes.env({ ...(fail ? { FAKE_CLI_FAIL: fail } : {}), ...env }),
     });
     return { result, stub, fakes };
   } finally {
@@ -272,6 +272,32 @@ test("--output json reports the store and target without the key", async () => {
   assert.equal(payload.secret.project, "my-gcp");
   assert.equal(payload.key.keyHint, "zz99");
   assert.ok(!result.stdout.includes(MINTED_PLAINTEXT));
+});
+
+test("reports whether the store created the secret or added a version", async () => {
+  const gcp = ["--gcp-secret", "ditto-key", "--project", "my-gcp", "--output", "json"];
+  const created = await mint(gcp);
+  assert.equal(created.result.status, 0, created.result.stderr);
+  assert.equal(JSON.parse(created.result.stdout).secret.effect, "created");
+
+  const updated = await mint(gcp, { fail: "secrets create" });
+  assert.equal(updated.result.status, 0, updated.result.stderr);
+  assert.equal(JSON.parse(updated.result.stdout).secret.effect, "updated");
+
+  // gh secret set is an upsert; it cannot say which one happened.
+  const upsert = await mint(["--gh-secret", "DITTO_KEY", "--repo", "acme/app", "--output", "json"]);
+  assert.equal(upsert.result.status, 0, upsert.result.stderr);
+  assert.equal(JSON.parse(upsert.result.stdout).secret.effect, null);
+
+  const human = await mint(["--gcp-secret", "ditto-key", "--project", "my-gcp"], { fail: "secrets create" });
+  assert.match(human.result.stdout, /via gcloud \(new version of the existing secret\)/);
+});
+
+test("HEYDITTO_DEBUG=stores traces the platform CLI calls without the key", async () => {
+  const { result } = await mint(["--gh-secret", "DITTO_KEY", "--repo", "acme/app"], { env: { HEYDITTO_DEBUG: "stores" } });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /\[heyditto\] gh secret set DITTO_KEY --repo acme\/app \(stdin\) <<< <\d+ bytes>/);
+  assert.ok(!result.stderr.includes(MINTED_PLAINTEXT), "plaintext leaked into the trace");
 });
 
 test("keys stores lists every destination and what is installed here", async () => {

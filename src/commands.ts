@@ -5,6 +5,7 @@ import { launchHarness, pickEndpoint } from "./agents/launch.js";
 import { listSessions, removeSession } from "./agents/sessions.js";
 import { DEFAULT_LAUNCH_EXPIRY, HARNESSES, type Harness, KEY_EXPIRIES, type KeyExpiry, apiRootOf } from "./agents/types.js";
 import {
+  ApiError,
   BILLING_MODES,
   CONTEXT_COMPACTION_LEVELS,
   type ChatAgent,
@@ -43,12 +44,14 @@ import { openInBrowser } from "./browser.js";
 import { endpointURL } from "./config.js";
 import { activationLink, formatActivation } from "./endpoint-format.js";
 import {
+  type DeliveryEffect,
   STORE_IDS,
   type SecretStore,
   type StoreId,
   type StoreTarget,
   VERCEL_TARGETS,
   deliver,
+  describeFailures,
   probeStores,
   selectStore,
 } from "./secret-stores/index.js";
@@ -840,6 +843,33 @@ function parseKeyExpiry(raw: string | undefined): KeyExpiry {
   throw new Error(`--expires must be one of: ${KEY_EXPIRIES.join(", ")}`);
 }
 
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/** A dropped connection or a gateway 5xx is worth another try; a 4xx is the API's answer. */
+function isTransient(err: unknown): boolean {
+  if (err instanceof ApiError) return err.status >= 500;
+  return err instanceof TypeError;
+}
+
+/** Runs `fn`, retrying transient API failures with a short backoff (0.5s, then 1s). */
+async function withRetry<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (attempt >= attempts || !isTransient(err)) throw err;
+      await sleep(500 * 2 ** (attempt - 1));
+    }
+  }
+}
+
+/** The success line's note on what the store did, when its attempts tell create from update. */
+function effectNote(effect: DeliveryEffect | undefined): string {
+  if (effect === "created") return " (new secret)";
+  if (effect === "updated") return " (new version of the existing secret)";
+  return "";
+}
+
 /**
  * Mints a key on an endpoint and hands the plaintext straight to the platform
  * CLI over stdin (`gh secret set`, `gcloud secrets create --data-file=-`, …).
@@ -858,21 +888,26 @@ export async function cmdEndpointKeysCreate(ref: string, options: KeysCreateOpti
   // and the operator confirmed.
   store.preflight();
   const target = store.resolveTarget(options);
-  const { endpoint, catalog } = await getEndpoint(ref);
+  const { endpoint, catalog } = await withRetry(() => getEndpoint(ref));
   const keyName = options.name?.trim() || defaultKeyName(store, target, secretName);
   const plan = `Will mint key "${keyName}" on ${endpoint.slug} (expires ${expiresIn}${budget !== undefined ? `, budget ${budget.toLocaleString()} tokens ${spendPeriod}` : ""}) and store ${secretName} in ${target.describe}.`;
   await confirmTyped({ action: `mint a key on ${endpoint.slug} and store ${secretName} in ${store.label}`, expected: secretName, label: `the ${store.nameLabel.toLowerCase()}`, yes: options.yes, preview: plan });
 
-  const minted = await createKey(endpoint.id, {
-    name: keyName,
-    expiresIn,
-    ...(budget !== undefined ? { spendLimitTokens: budget, spendPeriod } : {}),
-  });
+  const minted = await withRetry(() =>
+    createKey(endpoint.id, {
+      name: keyName,
+      expiresIn,
+      ...(budget !== undefined ? { spendLimitTokens: budget, spendPeriod } : {}),
+    }),
+  );
   // Split the plaintext off immediately; only `plaintext` may reach the
   // platform CLI's stdin.
   const { key: plaintext, ...key } = minted;
+  let effect: DeliveryEffect | undefined;
   try {
-    deliver(store, secretName, store.deliveries(secretName, target), plaintext ?? "");
+    const report = deliver(store, secretName, store.deliveries(secretName, target), plaintext ?? "");
+    if (!report.stored) throw new Error(describeFailures(store, secretName, report));
+    effect = report.effect;
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
     try {
@@ -908,6 +943,7 @@ export async function cmdEndpointKeysCreate(ref: string, options: KeysCreateOpti
             name: secretName,
             ...target.fields,
             describe: target.describe,
+            effect: effect ?? null,
             ...(store.snippet ? { snippet: store.snippet(secretName, target) } : {}),
           },
           gateway: { baseUrl: catalog.baseUrl, anthropicBaseUrl, openaiBaseUrl },
@@ -921,7 +957,7 @@ export async function cmdEndpointKeysCreate(ref: string, options: KeysCreateOpti
   process.stdout.write(
     [
       `Minted key …${key.keyHint} (${key.name ?? keyName}) on ${endpoint.slug}: expires ${expiresIn}${budget !== undefined ? `, budget ${budget.toLocaleString()} tokens ${spendPeriod}` : ", no spend cap"}.`,
-      `Stored ${secretName} in ${target.describe} via ${store.bin}. The key was not printed and is not kept locally.`,
+      `Stored ${secretName} in ${target.describe} via ${store.bin}${effectNote(effect)}. The key was not printed and is not kept locally.`,
       "",
       ...store.usage(secretName, target, gateway),
       "",

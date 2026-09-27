@@ -69,13 +69,18 @@ export interface StoreTarget {
  *   substitutes its path for the `{}` placeholder.
  *
  * `note` explains what the attempt does, for the error message when every
- * attempt fails.
+ * attempt fails. `effect` says what a success means on the platform, for
+ * stores whose attempts separate creating a secret from adding a version.
  */
 export type Delivery = {
   note: string;
   /** Wraps the plaintext (a JSON template, a KEY=VALUE line) before it is sent. */
   payload?: (value: string) => string;
+  effect?: DeliveryEffect;
 } & ({ kind: "stdin"; args: string[] } | { kind: "path"; args: string[] });
+
+/** What a successful attempt did: stored a new secret, or a new version of an existing one. */
+export type DeliveryEffect = "created" | "updated";
 
 export interface Gateway {
   /** OpenAI-compatible base, e.g. https://inference.heyditto.ai/v1 */

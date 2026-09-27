@@ -13,11 +13,12 @@ import { vault } from "./vault.js";
 import { vercel } from "./vercel.js";
 import { type SecretStore, STORE_IDS, type StoreId, type StoreOptionKey, type StoreOptions } from "./types.js";
 
-export { deliver, installed, resolveBin } from "./exec.js";
+export { deliver, describeFailures, installed, resolveBin } from "./exec.js";
+export type { DeliveryReport } from "./exec.js";
 export { GH_INSTALL_HINT, resolveRepoFromCwd } from "./github.js";
 export { validateRepo, validateSecretName } from "./naming.js";
 export { STORE_IDS } from "./types.js";
-export type { Delivery, Gateway, SecretStore, StoreId, StoreOptions, StoreTarget } from "./types.js";
+export type { Delivery, DeliveryEffect, Gateway, SecretStore, StoreId, StoreOptions, StoreTarget } from "./types.js";
 export { VERCEL_TARGETS } from "./vercel.js";
 
 /** Every store, in the order they are listed to the operator. */

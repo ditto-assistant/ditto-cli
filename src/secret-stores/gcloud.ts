@@ -51,11 +51,13 @@ export const gcloud: SecretStore = {
     return [
       {
         note: "gcloud secrets create",
+        effect: "created",
         kind: "stdin",
         args: ["secrets", "create", name, "--data-file=-", "--replication-policy=automatic", ...project],
       },
       {
         note: "gcloud secrets versions add",
+        effect: "updated",
         kind: "stdin",
         args: ["secrets", "versions", "add", name, "--data-file=-", ...project],
       },

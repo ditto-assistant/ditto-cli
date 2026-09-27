@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Delivery, SecretStore } from "./types.js";
+import type { Delivery, DeliveryEffect, SecretStore } from "./types.js";
 
 /**
  * Subprocess plumbing shared by every store. Generalized from the original
@@ -117,28 +117,56 @@ function substitute(args: string[], path: string): string[] {
   return args.map((arg) => arg.split(PATH_PLACEHOLDER).join(path));
 }
 
+/** What `deliver` did with the value. */
+export interface DeliveryReport {
+  /** The attempt that stored the value; undefined when every attempt failed. */
+  stored?: Delivery;
+  /** Whether that attempt created the secret or added a version, when the store says. */
+  effect?: DeliveryEffect;
+  /** `note: reason` for every attempt that failed, in order. */
+  failures: string[];
+}
+
+/** The operator-facing error for a report whose attempts all failed. */
+export function describeFailures(store: SecretStore, name: string, report: DeliveryReport): string {
+  return `${store.bin} could not store ${name} — ${report.failures.join("; ")}`;
+}
+
 /**
- * Hands `value` to the store's CLI, trying each attempt in order. Throws with
- * every attempt's own last stderr lines when all of them fail, so the caller
- * can revoke the key it just minted and the operator can see why.
+ * Hands `value` to the store's CLI, trying each attempt in order, and reports
+ * which one stored it. When every attempt fails, `stored` is undefined and
+ * `failures` carries each attempt's own last stderr lines, so the caller can
+ * revoke the key it just minted and the operator can see why.
  *
  * `path` delivery uses `/dev/stdin` wherever it exists, keeping the plaintext
  * off disk. Only on Windows does it fall back to a 0600 file in a private
  * temp directory, which is overwritten and removed before returning.
  */
-export function deliver(store: SecretStore, name: string, attempts: Delivery[], value: string): void {
+export function deliver(store: SecretStore, name: string, attempts: Delivery[], value: string): DeliveryReport {
   const failures: string[] = [];
   for (const attempt of attempts) {
     const payload = attempt.payload ? attempt.payload(value) : value;
+    trace(store, attempt, payload);
     const res = attempt.kind === "stdin" ? runStdin(store, attempt, payload) : runPath(store, attempt, payload);
     if (res.missing) {
       throw new Error(`${store.bin} disappeared from PATH while storing the secret; ${store.installHint}`);
     }
-    if (res.status === 0) return;
+    if (res.status === 0) return { stored: attempt, effect: attempt.effect, failures };
     const detail = trimmedStderr(res);
     failures.push(`${attempt.note}: ${detail || `exit ${res.status}`}`);
   }
-  throw new Error(`${store.bin} could not store ${name} — ${failures.join("; ")}`);
+  return { failures };
+}
+
+/**
+ * `HEYDITTO_DEBUG=stores` prints every platform CLI call `deliver` makes to
+ * stderr, for working out why a store rejected an attempt.
+ */
+function trace(store: SecretStore, attempt: Delivery, payload: string): void {
+  if (!/(^|,)stores(,|$)/.test(process.env.HEYDITTO_DEBUG ?? "")) return;
+  // Templates are shown so a malformed patch or env line can be spotted; a bare value only by length.
+  const body = attempt.payload ? payload.trimEnd() : `<${payload.length} bytes>`;
+  process.stderr.write(`[heyditto] ${resolveBin(store)} ${attempt.args.join(" ")} (${attempt.kind}) <<< ${body}\n`);
 }
 
 function runStdin(store: SecretStore, attempt: Delivery & { kind: "stdin" }, payload: string): RunResult {
