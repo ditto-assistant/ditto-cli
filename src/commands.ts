@@ -1203,7 +1203,7 @@ export async function cmdSessions(options: SessionsOptions): Promise<void> {
   if (!options.all && records.length > shown.length) {
     process.stdout.write(`\n…and ${records.length - shown.length} more (use --all)\n`);
   }
-  process.stdout.write(`\nResume: heyditto <claude|codex|grok> --resume <id>\n`);
+  process.stdout.write(`\nResume: heyditto <claude|codex|grok> --resume <id>  (claude: also a title, or no value to pick)\n`);
 }
 
 export async function cmdSessionsRm(id: string): Promise<void> {
@@ -1238,7 +1238,12 @@ export function registerHarnessCommands(program: Command, addExamples: (c: Comma
       )
       .option("--keep-key", "do not revoke the key when the agent exits")
       .option("--session <id>", "reuse a Ditto session id (X-Ditto-Session-Id) for the traces thread")
-      .option("--resume [id]", "resume a local session (default: the most recent one); mints a fresh key")
+      .option(
+        harness === "claude" ? "--resume [id|title]" : "--resume [id]",
+        harness === "claude"
+          ? "resume by Ditto id, Claude session id or title (Claude Desktop sessions too); no value: pick from a searchable list"
+          : "resume a local session (default: the most recent one); mints a fresh key",
+      )
       .option("-c, --continue", `continue the most recent ${harness} conversation in this directory`)
       .option("--yolo", `bypass all permission prompts (${harness === "claude" ? "--dangerously-skip-permissions" : harness === "grok" ? "--always-approve" : "--dangerously-bypass-approvals-and-sandbox"})`)
       .option("--yellow", `auto-accept edits (${harness === "claude" ? "--permission-mode acceptEdits" : harness === "grok" ? "--permission-mode auto" : "-a on-request -s workspace-write"})`)
@@ -1268,7 +1273,8 @@ export function registerHarnessCommands(program: Command, addExamples: (c: Comma
   heyditto ${harness} --endpoint my-endpoint --budget 500000
   heyditto ${harness} --yellow --worktree feature-x
   heyditto ${harness} -p "summarize this repo" ${harness === "claude" ? "--output-format json" : "--json"}
-  heyditto  --resume                 reopen the last session in its thread
+  heyditto ${harness} --resume              ${harness === "claude" ? "pick a session to reopen (type words to search)" : "reopen the last session in its thread"}${harness === "claude" ? `
+  heyditto claude --resume "Ditto Review quality and UX"   resume by title, as claude --resume prints it` : ""}
   heyditto ${harness} --headless               keep the session reachable from the app without a terminal UI
   heyditto ${harness} --no-remote-control      keep this session local only
   heyditto ${harness} -- --verbose             forward flags to ${harness}

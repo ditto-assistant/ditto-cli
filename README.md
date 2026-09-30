@@ -410,7 +410,8 @@ heyditto codex --yellow                        # Codex, auto-accept edits
 heyditto claude --yolo --worktree fix-login    # bypass prompts in <repo>/.worktrees/fix-login
 heyditto codex -p "summarize this repo" --json # headless (codex exec)
 heyditto claude -p "list TODOs" --output-format json --max-turns 3
-heyditto claude --resume                       # reopen the last session in the same thread
+heyditto claude --resume                       # pick a session (type words to search every project)
+heyditto claude --resume "Fix login bug"       # resume by title, as `claude --resume` prints it
 heyditto claude -- --verbose                   # anything after -- goes to the agent
 ```
 
@@ -422,7 +423,7 @@ Options shared by both commands:
 | `--budget <tokens>` | spend cap for this session's key, in Ditto tokens |
 | `--expires <1h…never>` | server-side key expiry; the key is still revoked on exit unless `--keep-key` |
 | `--session <id>` | reuse a Ditto session id so traces land in an existing thread |
-| `--resume [id]` / `-c, --continue` | resume a local session (`heyditto sessions`) / the agent's most recent conversation |
+| `--resume [id]` / `-c, --continue` | resume a local session (`heyditto sessions`) / the agent's most recent conversation. Claude also takes a Claude session id or title here, including sessions started in Claude Desktop or plain `claude`, and runs in the directory that session ran in; with no value, a terminal gets a searchable picker. Claude's own `-r` / `--resume` / `-c` after `--` do the same. |
 | `--yolo` / `--yellow` / `--plan` | bypass permissions / auto-accept edits / plan mode (Claude only) |
 | `-p, --prompt <text>` | headless run: `claude -p` or `codex exec` |
 | `-m, --model <id>` | model to request (default: the agent's own model id passes through and the endpoint routes it) |

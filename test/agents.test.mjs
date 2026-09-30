@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { planClaude } from "../dist/agents/claude.js";
+import { liftResumeFlags, planClaude } from "../dist/agents/claude.js";
+import { searchTranscripts } from "../dist/agents/claude-transcripts.js";
 import { planCodex, tomlString } from "../dist/agents/codex.js";
 import { GROK_MODEL_ID, GROK_SESSION_ENV, grokModelConfig, planGrok } from "../dist/agents/grok.js";
 import { listEndpointsStubHandler } from "./helpers/stub-api.mjs";
@@ -75,6 +76,8 @@ function childEnvFor(env) {
     ...parent,
     DITTO_API_KEY: "",
     DITTO_CONFIG_DIR: mkdtempSync(path.join(os.tmpdir(), "heyditto-agents-")),
+    // Never read the developer's own Claude Code sessions.
+    CLAUDE_CONFIG_DIR: mkdtempSync(path.join(os.tmpdir(), "heyditto-claude-home-")),
     ...env,
   };
 }
@@ -84,9 +87,9 @@ function run(args, env = {}) {
 }
 
 /** Async variant for tests that host the stub API in this process (spawnSync would block it). */
-function runAsync(args, env = {}) {
+function runAsync(args, env = {}, cwd = undefined) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [cliPath, ...args], { env: childEnvFor(env), stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(process.execPath, [cliPath, ...args], { env: childEnvFor(env), cwd, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (c) => (stdout += c));
@@ -169,22 +172,39 @@ function fakeClaude() {
   return { log, env: (extra = {}) => ({ PATH: `${dir}${path.delimiter}${process.env.PATH}`, FAKE_CLAUDE_LOG: log, ...extra }) };
 }
 
+/** Writes a Claude Code transcript the way Claude stores one under CLAUDE_CONFIG_DIR. */
+function writeTranscript(claudeHome, cwd, id, { title, prompt = "hello there", entrypoint = "claude-desktop", recordedCwd = realpathSync(cwd) } = {}) {
+  const dir = path.join(claudeHome, "projects", recordedCwd.replace(/[^A-Za-z0-9]/g, "-"));
+  mkdirSync(dir, { recursive: true });
+  const lines = [
+    { type: "user", message: { role: "user", content: [{ type: "text", text: prompt }] }, cwd: recordedCwd, entrypoint, sessionId: id, gitBranch: "main" },
+    { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "hi" }] }, cwd: recordedCwd, sessionId: id },
+    { type: "last-prompt", lastPrompt: prompt, sessionId: id },
+    ...(title ? [{ type: "custom-title", customTitle: title, sessionId: id }] : []),
+  ];
+  writeFileSync(path.join(dir, `${id}.jsonl`), lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+}
+
 test("a real launch mints a 1mo key, revokes it on exit and prints a copyable resume line", async () => {
   const stub = await startStub();
   const claude = fakeClaude();
+  const claudeHome = mkdtempSync(path.join(os.tmpdir(), "heyditto-claude-home-"));
+  const id = "5a1b0e0c-7f39-4c47-9a53-1f0b8c2d9e10";
+  // Claude writes the transcript on the first prompt; the fake binary does not.
+  writeTranscript(claudeHome, process.cwd(), id);
   try {
     const result = await runAsync(
-      ["claude", "--endpoint", "alpha", "--session", "sess-copy"],
-      claude.env({ DITTO_API_BASE: stub.base, DITTO_API_KEY: "ditto_mcp_test", NO_COLOR: "1" }),
+      ["claude", "--endpoint", "alpha", "--session", id],
+      claude.env({ DITTO_API_BASE: stub.base, DITTO_API_KEY: "ditto_mcp_test", NO_COLOR: "1", CLAUDE_CONFIG_DIR: claudeHome }),
     );
     assert.equal(result.status, 0, result.stderr);
     const post = stub.calls.find((c) => c.method === "POST" && /\/keys$/.test(c.url));
     assert.ok(post, "a key was minted");
     assert.equal(JSON.parse(post.body).expiresIn, "1mo");
     assert.ok(stub.calls.some((c) => c.method === "DELETE" && /\/keys\/key-1$/.test(c.url)), "the key was revoked on exit");
-    assert.match(readFileSync(claude.log, "utf8"), /--session-id\nsess-copy/);
+    assert.match(readFileSync(claude.log, "utf8"), new RegExp(`--session-id\\n${id}`));
     // The resume command sits alone on its own line so it can be copied whole.
-    assert.match(result.stderr, /^  heyditto claude --resume sess-copy$/m);
+    assert.match(result.stderr, new RegExp(`^  heyditto claude --resume ${id}$`, "m"));
     assert.match(result.stderr, /revoked session key …ab12/);
     assert.doesNotMatch(result.stderr, /\u001b\[/, "NO_COLOR output carries no escape codes");
   } finally {
@@ -273,7 +293,10 @@ test("--resume falls back to the original directory when the worktree is gone", 
     launches: 4,
   };
   writeFileSync(path.join(configDir, "sessions", `${id}.json`), JSON.stringify(record));
-  const env = { DITTO_API_BASE: stub.base, DITTO_API_KEY: "ditto_mcp_test", DITTO_CONFIG_DIR: configDir };
+  const claudeHome = mkdtempSync(path.join(os.tmpdir(), "heyditto-claude-home-"));
+  const canonicalWorktree = path.join(realpathSync(repoDir), ".worktrees", "claude-gone");
+  writeTranscript(claudeHome, repoDir, id, { recordedCwd: canonicalWorktree });
+  const env = { DITTO_API_BASE: stub.base, DITTO_API_KEY: "ditto_mcp_test", DITTO_CONFIG_DIR: configDir, CLAUDE_CONFIG_DIR: claudeHome };
   try {
     const gone = await runAsync(["claude", "--dry-run", "--resume", id, "--yolo"], env);
     assert.equal(gone.status, 0, gone.stderr);
@@ -288,7 +311,7 @@ test("--resume falls back to the original directory when the worktree is gone", 
     mkdirSync(goneWorktree, { recursive: true });
     const present = await runAsync(["claude", "--dry-run", "--resume", id], env);
     assert.equal(present.status, 0, present.stderr);
-    assert.equal(JSON.parse(present.stdout).cwd, goneWorktree);
+    assert.equal(JSON.parse(present.stdout).cwd, canonicalWorktree);
     assert.doesNotMatch(present.stderr, /no longer exists/);
   } finally {
     stub.close();
@@ -455,4 +478,170 @@ test("grokModelConfig: routes at the gateway without secrets on disk", () => {
   assert.match(toml, new RegExp(`default = "${GROK_MODEL_ID}"`));
   assert.ok(!toml.includes("secret"), "the endpoint key rides env_key by name, never its value");
   assert.ok(!toml.includes(input.apiKey));
+});
+
+// ---------------------------------------------------------------------------
+// Resuming Claude Code sessions: by title, by Claude id, from `-- -r`, and
+// sessions that never recorded a conversation.
+
+test("a launch that sent nothing does not promise a resume that cannot work", async () => {
+  // Regression: `heyditto claude` exited before the first prompt, printed
+  // "resume this session with: heyditto claude --resume <id>", and that command
+  // then failed with "No conversation found with session ID".
+  const stub = await startStub();
+  const claude = fakeClaude();
+  try {
+    const result = await runAsync(["claude", "--endpoint", "alpha"], claude.env({ DITTO_API_BASE: stub.base, DITTO_API_KEY: "ditto_mcp_test", NO_COLOR: "1" }));
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(result.stderr, /resume this session/);
+    assert.match(result.stderr, /nothing was sent, so there is no conversation to resume/);
+  } finally {
+    stub.close();
+  }
+});
+
+function resumeFixture() {
+  const configDir = mkdtempSync(path.join(os.tmpdir(), "heyditto-resume-"));
+  const claudeHome = mkdtempSync(path.join(os.tmpdir(), "heyditto-claude-home-"));
+  const project = mkdtempSync(path.join(os.tmpdir(), "heyditto-project-"));
+  const elsewhere = mkdtempSync(path.join(os.tmpdir(), "heyditto-elsewhere-"));
+  return { configDir, claudeHome, project, elsewhere };
+}
+
+test("--resume takes a Claude session title and runs where that session ran", async () => {
+  const stub = await startStub();
+  const f = resumeFixture();
+  const id = "b8bc76fa-ec25-4948-ba7e-f2bf3c077233";
+  writeTranscript(f.claudeHome, f.project, id, { title: "Ditto Review quality and UX" });
+  writeTranscript(f.claudeHome, f.project, "11111111-2222-4333-8444-555555555555", { title: "Something else" });
+  const env = { DITTO_API_BASE: stub.base, DITTO_API_KEY: "ditto_mcp_test", DITTO_CONFIG_DIR: f.configDir, CLAUDE_CONFIG_DIR: f.claudeHome, NO_COLOR: "1" };
+  try {
+    // Exactly what `claude --resume` prints for a renamed session, run from another directory.
+    const byTitle = await runAsync(["claude", "--dry-run", "--endpoint", "alpha", "--yolo", "--resume", "Ditto Review quality and UX"], env, f.elsewhere);
+    assert.equal(byTitle.status, 0, byTitle.stderr);
+    const plan = JSON.parse(byTitle.stdout);
+    assert.deepEqual(plan.args, ["--dangerously-skip-permissions", "--resume", id]);
+    assert.equal(plan.cwd, realpathSync(f.project));
+    assert.equal(plan.sessionId, id, "a session first seen here keeps its Claude id as the Ditto session id");
+    assert.match(byTitle.stderr, /resuming in .*, where this session ran/);
+
+    // Case-insensitive words from the title work too, and so does the bare Claude id.
+    const byWords = await runAsync(["claude", "--dry-run", "--endpoint", "alpha", "--resume", "review quality"], env, f.elsewhere);
+    assert.deepEqual(JSON.parse(byWords.stdout).args, ["--resume", id]);
+    const byId = await runAsync(["claude", "--dry-run", "--endpoint", "alpha", "--resume", id], env, f.elsewhere);
+    assert.deepEqual(JSON.parse(byId.stdout).args, ["--resume", id]);
+
+    const none = await runAsync(["claude", "--dry-run", "--endpoint", "alpha", "--resume", "no such title"], env, f.elsewhere);
+    assert.equal(none.status, 1);
+    assert.match(none.stderr, /no Claude Code session matches "no such title"/);
+    assert.match(none.stderr, /--resume` with no value to pick from a list/);
+    assert.doesNotMatch(none.stderr, /invalid session id/);
+  } finally {
+    stub.close();
+  }
+});
+
+test("an ambiguous --resume lists the candidates when there is no terminal to pick in", async () => {
+  const stub = await startStub();
+  const f = resumeFixture();
+  writeTranscript(f.claudeHome, f.project, "aaaaaaaa-0000-4000-8000-000000000001", { title: "Fix login bug" });
+  writeTranscript(f.claudeHome, f.project, "aaaaaaaa-0000-4000-8000-000000000002", { title: "Login page redesign" });
+  const env = { DITTO_API_BASE: stub.base, DITTO_API_KEY: "ditto_mcp_test", DITTO_CONFIG_DIR: f.configDir, CLAUDE_CONFIG_DIR: f.claudeHome };
+  try {
+    const result = await runAsync(["claude", "--dry-run", "--endpoint", "alpha", "--resume", "login"], env, f.project);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /"login" matches 2 sessions; pass one id:/);
+    assert.match(result.stderr, /aaaaaaaa-0000-4000-8000-000000000001 {2}Fix login bug/);
+  } finally {
+    stub.close();
+  }
+});
+
+test("claude's own -r / --resume / -c after -- resume instead of clashing with --session-id", async () => {
+  // Regression: `heyditto claude -- -r` ran `claude --session-id <id> -r` and
+  // Claude refused: "--session-id can only be used with --continue or --resume
+  // if --fork-session is also specified".
+  const stub = await startStub();
+  const f = resumeFixture();
+  const older = "cccccccc-0000-4000-8000-000000000001";
+  const newer = "cccccccc-0000-4000-8000-000000000002";
+  writeTranscript(f.claudeHome, f.project, older, { title: "Older" });
+  await new Promise((r) => setTimeout(r, 20));
+  writeTranscript(f.claudeHome, f.project, newer, { title: "Newer" });
+  const env = { DITTO_API_BASE: stub.base, DITTO_API_KEY: "ditto_mcp_test", DITTO_CONFIG_DIR: f.configDir, CLAUDE_CONFIG_DIR: f.claudeHome };
+  try {
+    for (const tail of [["-r"], ["--resume"], ["-c"], ["--continue"]]) {
+      const result = await runAsync(["claude", "--dry-run", "--endpoint", "alpha", "--yolo", "--", ...tail], env, f.project);
+      assert.equal(result.status, 0, `${tail}: ${result.stderr}`);
+      const { args } = JSON.parse(result.stdout);
+      assert.deepEqual(args, ["--dangerously-skip-permissions", "--resume", newer], `${tail.join(" ")} resumes the newest conversation here`);
+      assert.ok(!args.includes("--session-id"));
+    }
+    const withTitle = await runAsync(["claude", "--dry-run", "--endpoint", "alpha", "--", "-r", "Older", "--verbose"], env, f.project);
+    assert.deepEqual(JSON.parse(withTitle.stdout).args, ["--resume", older, "--verbose"]);
+    const eq = await runAsync(["claude", "--dry-run", "--endpoint", "alpha", "--", `--resume=${older}`], env, f.project);
+    assert.deepEqual(JSON.parse(eq.stdout).args, ["--resume", older]);
+  } finally {
+    stub.close();
+  }
+});
+
+test("--resume of a session that never sent anything starts it fresh under the same id", async () => {
+  const stub = await startStub();
+  const f = resumeFixture();
+  const id = "8202b237-c51e-4b30-8a6a-eeb1f67c8257";
+  mkdirSync(path.join(f.configDir, "sessions"), { recursive: true });
+  writeFileSync(
+    path.join(f.configDir, "sessions", `${id}.json`),
+    JSON.stringify({ id, harness: "claude", endpointId: ENDPOINTS.endpoints[0].id, endpointSlug: "alpha", harnessSessionId: id, cwd: f.project, createdAt: "2026-09-30T00:00:00Z", lastLaunchedAt: "2026-09-30T00:00:00Z", launches: 1 }),
+  );
+  const env = { DITTO_API_BASE: stub.base, DITTO_API_KEY: "ditto_mcp_test", DITTO_CONFIG_DIR: f.configDir, CLAUDE_CONFIG_DIR: f.claudeHome };
+  try {
+    const result = await runAsync(["claude", "--dry-run", "--resume", id], env, f.elsewhere);
+    assert.equal(result.status, 0, result.stderr);
+    const plan = JSON.parse(result.stdout);
+    // Not `--resume <id>`, which Claude answers with "No conversation found".
+    assert.deepEqual(plan.args, ["--session-id", id]);
+    assert.equal(plan.sessionId, id);
+    assert.equal(plan.cwd, f.project);
+    assert.match(result.stderr, /never recorded a conversation \(nothing was sent\), so it starts fresh under the same id/);
+
+    // A bare --resume prefers a real conversation here over that empty launch.
+    const real = "dddddddd-0000-4000-8000-000000000001";
+    writeTranscript(f.claudeHome, f.project, real, { title: "Real work" });
+    const bare = await runAsync(["claude", "--dry-run", "--endpoint", "alpha", "--resume"], env, f.project);
+    assert.equal(bare.status, 0, bare.stderr);
+    assert.deepEqual(JSON.parse(bare.stdout).args, ["--resume", real]);
+  } finally {
+    stub.close();
+  }
+});
+
+test("liftResumeFlags pulls claude's resume flags out of the passthrough", () => {
+  assert.deepEqual(liftResumeFlags(["-r"]), { args: [], resume: true });
+  assert.deepEqual(liftResumeFlags(["--resume", "My title", "--verbose"]), { args: ["--verbose"], resume: "My title" });
+  assert.deepEqual(liftResumeFlags(["--resume", "--verbose"]), { args: ["--verbose"], resume: true });
+  assert.deepEqual(liftResumeFlags(["--resume=abc"]), { args: [], resume: "abc" });
+  assert.deepEqual(liftResumeFlags(["-c", "--verbose"]), { args: ["--verbose"], continue: true });
+  assert.deepEqual(liftResumeFlags(["--verbose"]), { args: ["--verbose"] });
+});
+
+test("planClaude leaves the session id to --from-pr or a forwarded --session-id", () => {
+  const base = { baseUrl: "https://x/v1", apiKey: "k", sessionId: "s", env: {} };
+  assert.deepEqual(planClaude({ ...base, passthrough: ["--from-pr", "12"] }).args, ["--from-pr", "12"]);
+  assert.deepEqual(planClaude({ ...base, passthrough: ["--session-id", "u"] }).args, ["--session-id", "u"]);
+  assert.deepEqual(planClaude({ ...base, passthrough: [] }).args, ["--session-id", "s"]);
+});
+
+test("searchTranscripts: exact title wins, then title words, then prompts; this directory first", () => {
+  const t = (id, title, cwd, lastPrompt) => ({ id, title, cwd, lastPrompt, file: "", modifiedAt: new Date() });
+  const all = [
+    t("1", "Deploy notes", "/b", "review the deploy"),
+    t("2", "Ditto Review quality and UX", "/b"),
+    t("3", "ditto review quality and ux", "/a"),
+    t("4", "Review queue", "/a"),
+  ];
+  assert.deepEqual(searchTranscripts(all, "DITTO REVIEW QUALITY AND UX", "/a").map((x) => x.id), ["3", "2"]);
+  assert.deepEqual(searchTranscripts(all, "review", "/a").map((x) => x.id), ["3", "4", "2", "1"]);
+  assert.deepEqual(searchTranscripts(all, "", "/a").length, 4);
 });
