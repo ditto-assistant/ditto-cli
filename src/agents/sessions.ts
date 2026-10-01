@@ -24,8 +24,13 @@ export interface SessionRecord {
   launches: number;
 }
 
+/** Whether a string can name a local record (anything else is a title or a typo). */
+export function isSessionId(id: string): boolean {
+  return /^[A-Za-z0-9._:@-]{1,128}$/.test(id);
+}
+
 function fileFor(id: string): string {
-  if (!/^[A-Za-z0-9._:@-]{1,128}$/.test(id)) throw new Error(`invalid session id: ${id}`);
+  if (!isSessionId(id)) throw new Error(`invalid session id: ${id}`);
   return path.join(sessionsDir(), `${id}.json`);
 }
 
@@ -35,6 +40,7 @@ export async function writeSession(record: SessionRecord): Promise<void> {
 }
 
 export async function readSession(id: string): Promise<SessionRecord | undefined> {
+  if (!isSessionId(id)) return undefined;
   try {
     return JSON.parse(await readFile(fileFor(id), "utf8")) as SessionRecord;
   } catch (err) {
@@ -78,4 +84,9 @@ export async function listSessions(): Promise<SessionRecord[]> {
 export async function latestSession(harness: Harness, cwd: string): Promise<SessionRecord | undefined> {
   const all = (await listSessions()).filter((s) => s.harness === harness);
   return all.find((s) => s.cwd === cwd || s.worktree === cwd) ?? all[0];
+}
+
+/** The record that launched a harness-native session (e.g. a Claude session id), if any. */
+export async function sessionForHarnessId(harness: Harness, harnessSessionId: string): Promise<SessionRecord | undefined> {
+  return (await listSessions()).find((s) => s.harness === harness && s.harnessSessionId === harnessSessionId);
 }

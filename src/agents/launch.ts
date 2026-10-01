@@ -23,10 +23,13 @@ import { formatActivation } from "../endpoint-format.js";
 import { readStoredAuth, saveLogin, updateStoredAuth } from "../store.js";
 import { err as c } from "../ui.js";
 import { holdNotesForTui, releaseNotes, writeNote } from "../terminal-note.js";
-import { planClaude } from "./claude.js";
+import { liftResumeFlags, planClaude } from "./claude.js";
+import { resolveClaudeResume, transcriptCwd } from "./claude-resume.js";
+import { type ClaudeTranscript, findTranscriptById, listTranscriptsIn } from "./claude-transcripts.js";
 import { planCodex } from "./codex.js";
 import { ensureGrokHome, planGrok } from "./grok.js";
-import { type SessionRecord, latestSession, readSession, writeSession } from "./sessions.js";
+import { type SessionRecord, latestSession, readSession, sessionForHarnessId, writeSession } from "./sessions.js";
+import { canonicalCwd } from "../teleport/harness.js";
 import {
   DEFAULT_LAUNCH_EXPIRY,
   type Harness,
@@ -323,7 +326,16 @@ function waitForExit(child: ChildProcess, command: string, cwd: string): Promise
 
 /** Launches a coding harness against a Ditto inference endpoint with a temporary key. */
 export async function launchHarness(harness: Harness, rawArgs: string[], options: LaunchOptions): Promise<void> {
-  const passthrough = stripSeparator(rawArgs);
+  let passthrough = stripSeparator(rawArgs);
+  if (harness === "claude") {
+    const lifted = liftResumeFlags(passthrough);
+    passthrough = lifted.args;
+    if (lifted.resume !== undefined) {
+      if (options.resume !== undefined) throw new Error("--resume given twice (once after --)");
+      options = { ...options, resume: lifted.resume };
+    }
+    if (lifted.continue) options = { ...options, continue: true };
+  }
   const budget = parseBudget(options.budget);
   const expiresIn = parseExpiry(options.expires);
   if (options.plan && harness !== "claude") throw new Error("--plan is only supported for claude");
@@ -347,8 +359,31 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   // Resume: reuse the local record's Ditto session id so the traces stay in
   // the same thread; a fresh key is minted every launch.
   let record: SessionRecord | undefined;
+  // Claude: the conversation being resumed, read from Claude's own store.
+  let transcript: ClaudeTranscript | undefined;
   let resumeLast = Boolean(options.continue);
-  if (options.resume !== undefined) {
+  if (harness === "claude" && options.continue) {
+    // Resolve "most recent here" ourselves so the Ditto thread follows it.
+    const [newest] = await listTranscriptsIn(process.cwd());
+    if (newest) {
+      transcript = newest;
+      record = await sessionForHarnessId("claude", newest.id);
+      resumeLast = false;
+    }
+  } else if (harness === "claude" && options.resume !== undefined) {
+    const target = await resolveClaudeResume(typeof options.resume === "string" ? options.resume : true, {
+      cwd: process.cwd(),
+      interactive: interactive(),
+      log,
+    });
+    ({ record, transcript } = target);
+    if (record && record.harness !== harness) throw new Error(`session ${record.id} was a ${record.harness} session`);
+    if (!transcript && record) {
+      if (record.harnessSessionId) {
+        log(`session ${record.id} never recorded a conversation (nothing was sent), so it starts fresh under the same id`);
+      } else resumeLast = true;
+    }
+  } else if (options.resume !== undefined) {
     record =
       typeof options.resume === "string"
         ? await readSession(options.resume)
@@ -392,6 +427,11 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
       record.cwd = cwd;
       delete record.worktree;
     }
+  } else if (transcript && (await transcriptCwd(transcript))) {
+    // `claude --resume <id>` only finds a session from the directory it ran in.
+    cwd = (await transcriptCwd(transcript)) as string;
+    if (record?.worktree && canonicalCwd(record.worktree) === canonicalCwd(cwd)) worktreePath = record.worktree;
+    if (canonicalCwd(cwd) !== canonicalCwd(process.cwd())) log(`resuming in ${c("bold", cwd)}, where this session ran`);
   } else if (record) ({ cwd, worktree: worktreePath } = await resolveResumeCwd(record));
   if (options.worktree !== undefined && options.worktree !== false) {
     const name = typeof options.worktree === "string" ? options.worktree : defaultWorktreeName(harness);
@@ -405,11 +445,17 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     }
   }
 
-  const sessionId = record?.id ?? options.session?.trim() ?? randomUUID();
+  // A Claude session first seen here keeps its own id as the Ditto session id,
+  // so `--resume <that id>` finds this record next time.
+  const sessionId = record?.id ?? options.session?.trim() ?? transcript?.id ?? randomUUID();
   if (!/^[A-Za-z0-9._:@-]{1,128}$/.test(sessionId)) {
     throw new Error("--session must match ^[A-Za-z0-9._:@-]{1,128}$");
   }
-  const harnessSessionId = record?.harnessSessionId ?? (harness === "claude" && !resumeLast ? sessionId : undefined);
+  // Claude: the resumed conversation, or the id a fresh one is created under.
+  const harnessSessionId = harness === "claude"
+    ? (transcript?.id ?? (resumeLast ? undefined : sessionId))
+    : record?.harnessSessionId;
+  const resumeId = harness === "claude" ? transcript?.id : record?.harnessSessionId;
   // No model flag means the harness's own model choice passes through and the
   // endpoint routes it (Codex's default gpt-* id normalizes like Claude's
   // claude-* ids). Earlier releases pinned Codex sessions to the endpoint
@@ -439,7 +485,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
         apiKey: key?.key ?? DRY_RUN_KEY,
         sessionId,
         model,
-        resumeId: record ? record.harnessSessionId : undefined,
+        resumeId,
         resumeLast,
         prompt: options.prompt,
         yolo: options.yolo,
@@ -455,7 +501,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     apiKey: key?.key ?? DRY_RUN_KEY,
     sessionId,
     model,
-    resumeId: record ? record.harnessSessionId : undefined,
+    resumeId,
     resumeLast,
     prompt: options.prompt,
     yolo: options.yolo,
@@ -512,7 +558,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     keyId: key.id,
     keyHint: key.keyHint,
     harnessSessionId,
-    cwd: record?.cwd ?? process.cwd(),
+    cwd: record?.cwd ?? (transcript ? cwd : process.cwd()),
     worktree: worktreePath,
     model,
     createdAt: record?.createdAt ?? now,
@@ -535,6 +581,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
         options,
         record: nextRecord,
         grokHome,
+        claudeStarted: harness === "claude" && !resumeLast ? Boolean(transcript) : undefined,
       });
     } else if (remote === "tui") {
       exitCode = await runInTerminalWithRemote(harness, plan, { cwd, sessionId, harnessSessionId, record: nextRecord });
@@ -560,7 +607,15 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     }
     // Headless runs (-p / codex exec) are scripted, and a launch whose spawn
     // failed has no conversation to reopen; neither wants the resume epilogue.
-    if (options.prompt === undefined && exitCode !== null) logResumeHint(harness, sessionId);
+    if (options.prompt === undefined && exitCode !== null) {
+      // Claude writes no transcript until the first prompt; promising a resume
+      // then only earns "No conversation found with session ID".
+      // (Only when this launch pinned the id; --from-pr lets Claude choose one.)
+      const empty = harness === "claude" && harnessSessionId !== undefined && plan.args.includes(harnessSessionId) &&
+        !(await findTranscriptById(harnessSessionId, cwd));
+      if (empty) log(`nothing was sent, so there is no conversation to resume ${c("dim", "(heyditto claude --resume lists the ones there are)")}`);
+      else logResumeHint(harness, sessionId);
+    }
     await writeSession({ ...nextRecord, endedAt: new Date().toISOString(), exitCode });
   }
   process.exitCode = exitCode ?? 1;
@@ -704,6 +759,8 @@ interface HeadlessRunContext extends RemoteRunContext {
   options: LaunchOptions;
   /** grok: the launch GROK_HOME reused by every headless turn. */
   grokHome?: string;
+  /** claude: the session already has a conversation, so the first turn resumes it. */
+  claudeStarted?: boolean;
 }
 
 /**
@@ -728,7 +785,7 @@ async function runHeadless(harness: Harness, ctx: HeadlessRunContext): Promise<n
     }, { socketPath: hooks.socketPath, scriptPath: hookScriptPath(), nodePath: process.execPath });
   }
   // Claude's first turn creates the session under our id; later turns resume it.
-  let claudeStarted = ctx.record.launches > 1;
+  let claudeStarted = ctx.claudeStarted ?? ctx.record.launches > 1;
   let codexStarted = ctx.record.launches > 1;
   // grok always pins its session id with -s, so every headless turn lands in
   // the same grok session without resume bookkeeping.
