@@ -28,6 +28,7 @@ import { type ActiveSession, markSessionUsed, resolveActiveSession, sessionHeade
 import { NO_KEY_MESSAGE } from "./api.js";
 import { openInBrowser } from "./browser.js";
 import { registerOrgCommands } from "./org-commands.js";
+import { registerReviewCommands } from "./review-commands.js";
 import { registerTeleportCommands } from "./teleport/commands.js";
 import { registerForkCommand } from "./remote/fork-command.js";
 import { registerCodexAppCommand } from "./agents/codexapp.js";
@@ -1243,6 +1244,7 @@ your own workspace or an app workspace.`,
   registerEndpointCommands(program, addExamples, outputOption);
   registerAppCommands(program, addExamples, outputOption);
   registerOrgCommands(program, addExamples, outputOption, orgOption);
+  registerReviewCommands(program, addExamples, outputOption, orgOption);
   registerHarnessCommands(program, addExamples);
   registerCodexAppCommand(program, addExamples);
   registerSessionCommands(program, addExamples);
