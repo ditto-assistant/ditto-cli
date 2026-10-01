@@ -296,3 +296,25 @@ test("setting a prompt without a mode leaves the mode alone", async () => {
     stub.close();
   }
 });
+
+test("--exclude-provider merges a sorted deny list onto providerOptions", async () => {
+  const stub = await startStub({ ...ENDPOINT, providerOptions: { codex_models: true } });
+  try {
+    const out = await run(stub.base, ["endpoints", "set", "alpha", "--exclude-provider", "GM, chutes,gm"]);
+    assert.equal(out.status, 0, out.stderr);
+    assert.deepEqual(patchOf(stub).providerOptions, { codex_models: true, ditto_excluded_providers: ["chutes", "gm"] });
+  } finally {
+    stub.close();
+  }
+});
+
+test("--exclude-provider none removes the deny list", async () => {
+  const stub = await startStub({ ...ENDPOINT, providerOptions: { ditto_excluded_providers: ["gm"], codex_models: true } });
+  try {
+    const out = await run(stub.base, ["endpoints", "set", "alpha", "--exclude-provider", "none"]);
+    assert.equal(out.status, 0, out.stderr);
+    assert.deepEqual(patchOf(stub).providerOptions, { codex_models: true });
+  } finally {
+    stub.close();
+  }
+});

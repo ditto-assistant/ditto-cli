@@ -279,6 +279,21 @@ function mapWord(map: Record<string, string> | undefined): string {
     .join(", ");
 }
 
+/** providerOptions key of the endpoint's provider deny list (backend inference). */
+const EXCLUDED_PROVIDERS_OPTION = "ditto_excluded_providers";
+
+/**
+ * Parses `--exclude-provider`: comma-separated provider ids, or `none` to
+ * clear the list. The server checks each id against its provider registry.
+ */
+function excludedProviders(value: string): string[] | null {
+  const trimmed = value.trim();
+  if (trimmed.toLowerCase() === "none") return null;
+  const ids = [...new Set(trimmed.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean))].sort();
+  if (ids.length === 0) throw new Error("--exclude-provider needs provider ids (e.g. gm,chutes) or none");
+  return ids;
+}
+
 /**
  * Renders the endpoint's coding-agent settings. Only the harnesses that were
  * configured are shown, so an untouched endpoint stays quiet — but once a
@@ -288,6 +303,8 @@ function mapWord(map: Record<string, string> | undefined): string {
 function codingAgentLines(endpoint: InferenceEndpoint): string[] {
   const options = endpoint.providerOptions ?? {};
   const lines: string[] = [];
+  const excluded = options[EXCLUDED_PROVIDERS_OPTION];
+  if (Array.isArray(excluded) && excluded.length > 0) lines.push(`excluded:      ${excluded.join(", ")}`);
   if (options.codex_models === true) {
     const extras: string[] = [];
     if (options.codex_catalog === true) {
@@ -387,6 +404,7 @@ interface EndpointSetOptions {
   claudePrompt?: string;
   claudePromptMode?: string;
   claudePromptAutoupdate?: string;
+  excludeProvider?: string;
   yes?: boolean;
 }
 
@@ -613,6 +631,10 @@ export async function cmdEndpointSet(ref: string, options: EndpointSetOptions): 
   if (options.claudePromptMode !== undefined) agent.claude_prompt_mode = promptMode("--claude-prompt-mode", options.claudePromptMode);
   const claudeAuto = onOff("--claude-prompt-autoupdate", options.claudePromptAutoupdate);
   if (claudeAuto !== undefined) agent.claude_prompt_autoupdate = claudeAuto;
+  // The provider deny list is endpoint policy the Router applies before
+  // ranking, so a routing mode can never pick an excluded provider. It lives
+  // in providerOptions beside the coding-agent settings; `none` removes it.
+  if (options.excludeProvider !== undefined) agent[EXCLUDED_PROVIDERS_OPTION] = excludedProviders(options.excludeProvider);
 
   if (Object.keys(patch).length === 0 && Object.keys(agent).length === 0 && !touchesMaps) {
     throw new Error("nothing to change; pass at least one --flag (see `heyditto endpoints set --help`)");
@@ -1048,6 +1070,7 @@ through the gh CLI; the plaintext never reaches your terminal.`,
       .option("--claude-prompt <text|@file|reset>", "Claude Code system prompt; reset restores the vendored baseline")
       .option("--claude-prompt-mode <append|replace>", "add the prompt to Claude Code's own, or replace it (default replace)")
       .option("--claude-prompt-autoupdate <on|off>", "track new Claude Code baselines (default on)")
+      .option("--exclude-provider <ids|none>", "never route to these providers (comma-separated, e.g. gm,chutes); none clears the list")
       .option("--spend-limit <tokens|none>", "spend cap in Ditto tokens, or none")
       .addOption(new Option("--spend-period <period>", "window the spend cap resets on").choices(["daily", "weekly", "monthly", "yearly", "never"]))
       .option("--record-trace <on|off>", "store raw request/response traces")
@@ -1083,6 +1106,7 @@ through the gh CLI; the plaintext never reaches your terminal.`,
   heyditto endpoints set my-endpoint --kind-route aside=openai/gpt-5.6-nano --kind-route probe=openai/gpt-5.6-nano
   heyditto endpoints set my-endpoint --alias fast=openai/gpt-5.6-nano --model-route gpt-4o=openai/gpt-5.6-luna
   heyditto endpoints set my-endpoint --codex-models on --codex-catalog on
+  heyditto endpoints set my-endpoint --exclude-provider gm   # never route to GM; --exclude-provider none clears
   heyditto endpoints set my-endpoint --codex-prompt @prompt.md
   heyditto endpoints set my-endpoint --codex-prompt reset --codex-prompt-autoupdate off`,
   );
