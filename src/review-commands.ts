@@ -385,7 +385,7 @@ export function registerReviewCommands(
       .option("--watch", "follow the requested run until it finishes"))).action(cmdReviewStart),
     `  heyditto review start ditto-assistant/console 88 --org omniaura --watch`,
   );
-  scoped(review.command("status").description("show a run, results, and prior attempts")
+  scoped(review.command("status").description("show run status; JSON includes results and prior attempts")
     .argument("<run-id>", "review run UUID")).action(cmdReviewStatus);
   watched(scoped(review.command("watch").description("follow a review until it finishes; does not start or retry it")
     .argument("<run-id>", "review run UUID"))).action(cmdReviewWatch);

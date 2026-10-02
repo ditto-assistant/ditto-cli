@@ -220,7 +220,7 @@ retries can spend a new per-run budget. It does not raise any budget or enable
 a paused repository. `cancel` requests cancellation; a running review stops
 asynchronously, and a review already being published may refuse cancellation.
 
-`runs` lists the API's recent workspace runs; `status` includes findings and
+`runs` lists the API's recent workspace runs; `status --output json` includes findings and
 prior attempts. `watch` polls without starting, retrying, or cancelling the run.
 It stops on completion, partial coverage, failure, cancellation, skip, or
 supersession. Failed runs and timeouts return a nonzero exit code. A partial
