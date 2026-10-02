@@ -1,5 +1,7 @@
 import os from "node:os";
 import { packageName, packageVersion, resolveApiKey } from "./config.js";
+import { formatQuotaNotice, parseQuotaNoticeText } from "./quota.js";
+import { readStoredAuth } from "./store.js";
 
 /** Minimal authenticated REST client for the Ditto management API. */
 
@@ -11,6 +13,14 @@ export class ApiError extends Error {
     this.name = "ApiError";
     this.status = status;
     this.body = body;
+  }
+}
+
+/** A plan-limit denial; the message is the instruction an agent should follow. */
+export class QuotaError extends ApiError {
+  constructor(message: string, status: number, body: string) {
+    super(message, status, body);
+    this.name = "QuotaError";
   }
 }
 
@@ -52,6 +62,13 @@ export async function apiFetch<T>(
   });
   if (!response.ok) {
     const text = await response.text().catch(() => "");
+    if (response.status === 429 || response.status === 402) {
+      const notice = parseQuotaNoticeText(text);
+      if (notice) {
+        const stored = await readStoredAuth().catch(() => undefined);
+        throw new QuotaError(formatQuotaNotice(notice, stored?.claimURL), response.status, text);
+      }
+    }
     let detail = text;
     try {
       const parsed = JSON.parse(text) as { message?: string; error?: string };

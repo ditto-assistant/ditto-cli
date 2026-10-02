@@ -15,6 +15,7 @@ import {
   packageVersion,
   resolveApiKey,
 } from "./config.js";
+import { formatQuotaNotice, parseQuotaNoticeText } from "./quota.js";
 import { clearStoredKey, readStoredAuth, saveLogin, writeStoredAuth } from "./store.js";
 import {
   cmdAgents,
@@ -289,6 +290,15 @@ async function callAndPrint(
   const client = await getClient();
   try {
     const result = await client.callTool({ name, arguments: args });
+    if ((result as { isError?: boolean }).isError) {
+      const notice = parseQuotaNoticeText(extractTextBlock(result));
+      if (notice) {
+        const stored = await readStoredAuth().catch(() => undefined);
+        process.stderr.write(`error: ${formatQuotaNotice(notice, stored?.claimURL)}\n`);
+        process.exitCode = 1;
+        return;
+      }
+    }
     process.stdout.write(`${formatToolResult(result, format)}\n`);
   } finally {
     await client.close();
