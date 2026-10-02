@@ -2,10 +2,16 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { Command, Option } from "commander";
 import {
+  type AppAccess,
+  type AppClientType,
   type AppEndpoint,
   type AppPatch,
+  type AppShare,
+  type AppVisibility,
   type DeveloperApp,
+  EXTERNAL_SHARE_CODE,
   apiBase,
+  apiErrorCode,
   attachAppEndpoint,
   createApp,
   detachAppEndpoint,
@@ -13,10 +19,13 @@ import {
   getConsentProfile,
   getEndpoint,
   listAppEndpoints,
+  listAppShares,
   listApps,
   listReceipts,
+  revokeAppShare,
   rotateAppSecret,
   setAppEndpointBilling,
+  shareApp,
   updateApp,
   uploadAppIcon,
   verifyCallbackOrigin,
@@ -35,6 +44,8 @@ import { STORE_IDS, VERCEL_TARGETS, deliver, selectStore } from "./secret-stores
  *   heyditto apps secret rotate dittobench-3f9a --gh-secret DITTO_OIDC_CLIENT_SECRET --repo ditto-assistant/ditto-subnet
  *   heyditto apps oidc dittobench-3f9a --output env
  *   heyditto apps endpoints attach dittobench-3f9a screener --billing user
+ *   heyditto apps access set acme-tool --visibility internal --trusted
+ *   heyditto apps share acme-tool pat@partner.com --external
  *
  * The client secret follows the same rule as endpoint keys: it is forwarded
  * straight into a secret store over the store CLI's stdin and never printed.
@@ -44,6 +55,8 @@ const ADVERTISED_SCOPES = [
   "openid",
   "email",
   "profile",
+  "org",
+  "operator",
   "credits:spend",
   "memory:read",
   "memory:write",
@@ -207,6 +220,9 @@ export async function cmdAppsShow(ref: string, options: ScopeOptions): Promise<v
   if (isJSON(options)) return writeJSON({ app, endpoints, baseUrl, onBehalfOfHeader, consentProfile: profile ?? null, oidc: oidcConfig(app) });
   process.stdout.write(`${app.name} (${app.appID}) — ${app.enabled ? "enabled" : "disabled"}${app.archived ? ", archived" : ""}\n`);
   if (app.metadata?.description) process.stdout.write(`  ${app.metadata.description}\n`);
+  if (app.access) {
+    process.stdout.write(`  who can sign in: ${app.access.visibility}${app.access.trusted ? " (trusted: members skip consent)" : ""}, ${app.access.clientType} client — heyditto apps access ${app.appID}\n`);
+  }
   if (profile?.iconUrl) process.stdout.write(`  icon: ${profile.iconUrl}\n`);
   const origins = profile?.callbackOrigins ?? [];
   process.stdout.write(`  verified callback origins: ${origins.length ? origins.join(", ") : "(none — run: heyditto apps origins verify)"}\n`);
@@ -236,6 +252,155 @@ export async function cmdAppsUpdate(
   const updated = await updateApp(app.appID, patch);
   if (isJSON(options)) return writeJSON({ app: updated });
   process.stdout.write(`Updated ${updated.appID}.\n`);
+}
+
+// ----- access: who may sign in, and how the app authenticates -----
+
+const VISIBILITIES: readonly AppVisibility[] = ["internal", "shared", "public"];
+const CLIENT_TYPES: readonly AppClientType[] = ["server", "public"];
+const VISIBILITY_RANK: Record<AppVisibility, number> = { internal: 0, shared: 1, public: 2 };
+
+function accessOf(app: DeveloperApp): AppAccess {
+  return app.access ?? { visibility: "public", clientType: "server", trusted: false };
+}
+
+export function visibilityHint(visibility: AppVisibility): string {
+  switch (visibility) {
+    case "internal":
+      return "only members of the owning organization can sign in";
+    case "shared":
+      return "members, plus the people and organizations it is shared with";
+    case "public":
+      return "anyone with a Ditto account can sign in";
+  }
+}
+
+function shareLabel(share: AppShare): string {
+  return share.subjectType === "company" ? share.companyName || share.subjectId : share.email || share.subjectId;
+}
+
+export async function cmdAppsAccessShow(ref: string, options: ScopeOptions): Promise<void> {
+  const app = await findApp(ref, options.company);
+  const access = accessOf(app);
+  const shares = access.visibility === "public" ? undefined : await listAppShares(app.appID);
+  if (isJSON(options)) return writeJSON({ appID: app.appID, access, shares: shares ?? null });
+  process.stdout.write(`${app.name} (${app.appID})\n`);
+  process.stdout.write(`  who can sign in: ${access.visibility} — ${visibilityHint(access.visibility)}\n`);
+  process.stdout.write(`  client type:     ${access.clientType === "server" ? "server (sends the app secret to /token)" : "public (PKCE only, never sends a secret)"}\n`);
+  process.stdout.write(`  trusted:         ${access.trusted ? "yes — members skip the consent screen; external people never do" : "no"}\n`);
+  if (!shares) return;
+  if (shares.shares.length === 0) {
+    process.stdout.write("  shared with:     nobody\n");
+    return;
+  }
+  if (access.visibility === "internal") {
+    process.stdout.write("  shared with (paused while the app is internal — make it shared to let them in):\n");
+  } else {
+    process.stdout.write(`  shared with${shares.externalCount ? ` (${shares.externalCount} outside the organization)` : ""}:\n`);
+  }
+  printTable(
+    ["WHO", "KIND", "EXTERNAL", "SINCE"],
+    shares.shares.map((s) => [shareLabel(s), s.subjectType === "company" ? "organization" : "person", s.external ? "yes" : "", s.createdAt.slice(0, 10)]),
+  );
+}
+
+export async function cmdAppsAccessSet(
+  ref: string,
+  options: ScopeOptions & { visibility?: string; clientType?: string; trusted?: boolean; yes?: boolean },
+): Promise<void> {
+  const app = await findApp(ref, options.company);
+  const current = accessOf(app);
+  const patch: AppPatch = {};
+  if (options.visibility !== undefined) {
+    const v = options.visibility as AppVisibility;
+    if (!VISIBILITIES.includes(v)) throw new Error(`--visibility must be one of ${VISIBILITIES.join(", ")}`);
+    if (v !== current.visibility) patch.visibility = v;
+  }
+  if (options.clientType !== undefined) {
+    const c = options.clientType as AppClientType;
+    if (!CLIENT_TYPES.includes(c)) throw new Error(`--client-type must be one of ${CLIENT_TYPES.join(", ")}`);
+    if (c !== current.clientType) patch.clientType = c;
+  }
+  if (options.trusted !== undefined && options.trusted !== current.trusted) patch.trusted = options.trusted;
+  if (Object.keys(patch).length === 0) {
+    if (options.visibility === undefined && options.clientType === undefined && options.trusted === undefined) {
+      throw new Error("nothing to change; pass --visibility, --client-type, --trusted or --no-trusted");
+    }
+    if (isJSON(options)) return writeJSON({ appID: app.appID, access: current, changed: false });
+    process.stdout.write(`${app.appID} already has that access.\n`);
+    return;
+  }
+
+  // Narrowing the audience signs people out, going public widens it to
+  // everyone, and switching client type breaks sign-in until the app's
+  // token requests change: each is confirmed by typing the app id.
+  const warnings: string[] = [];
+  if (patch.visibility && VISIBILITY_RANK[patch.visibility] < VISIBILITY_RANK[current.visibility]) {
+    warnings.push(`Making it ${patch.visibility} signs out everyone it no longer covers (${visibilityHint(patch.visibility)}).`);
+  }
+  if (patch.visibility === "public") warnings.push("Making it public lets anyone with a Ditto account sign in. Shares are kept for later.");
+  if (patch.clientType === "public") warnings.push("A public client must stop sending the app secret to /token, or sign-in fails.");
+  if (patch.clientType === "server") warnings.push("A server client must send the app secret with every token request from now on.");
+  if (warnings.length) {
+    await confirmTyped({ action: "change access", expected: app.appID, label: "the app id", yes: options.yes, preview: warnings.join("\n") });
+  }
+  const updated = await updateApp(app.appID, patch);
+  if (isJSON(options)) return writeJSON({ appID: updated.appID, access: updated.access ?? null, changed: true });
+  const next = accessOf(updated);
+  process.stdout.write(`Updated ${updated.appID}: ${next.visibility}, ${next.clientType} client${next.trusted ? ", trusted" : ""}.\n`);
+}
+
+/** "pat@x.com" shares with a person; "@acme" or "acme" with an organization. */
+export function shareTarget(who: string): { email: string } | { companySlug: string } {
+  const value = who.trim();
+  if (value.length < 2) throw new Error("pass an email address or an organization handle like @acme");
+  return value.includes("@") && !value.startsWith("@") ? { email: value } : { companySlug: value.replace(/^@/, "") };
+}
+
+export async function cmdAppsShare(ref: string, who: string, options: ScopeOptions & { external?: boolean }): Promise<void> {
+  const app = await findApp(ref, options.company);
+  const target = shareTarget(who);
+  let result;
+  try {
+    result = await shareApp(app.appID, target, Boolean(options.external));
+  } catch (err) {
+    if (apiErrorCode(err) === EXTERNAL_SHARE_CODE) {
+      throw new Error(
+        `${who} is outside the organization that owns ${app.appID}. They would sign in with their own Ditto account and always see the consent screen.\n` +
+          `Re-run with --external to share it anyway: heyditto apps share ${app.appID} ${who} --external`,
+      );
+    }
+    throw err;
+  }
+  if (isJSON(options)) return writeJSON({ appID: app.appID, shares: result });
+  const becameShared = accessOf(app).visibility === "internal" && result.visibility === "shared";
+  process.stdout.write(`Shared ${app.appID} with ${who}.${becameShared ? " The app is now shared." : ""}\n`);
+  if (result.visibility === "internal") process.stdout.write("The app is internal, so this share is paused until you make it shared.\n");
+}
+
+export async function cmdAppsUnshare(ref: string, who: string, options: ScopeOptions & { yes?: boolean }): Promise<void> {
+  const app = await findApp(ref, options.company);
+  const wanted = who.trim().replace(/^@/, "").toLowerCase();
+  const { shares } = await listAppShares(app.appID);
+  const matches = shares.filter(
+    (s) => s.subjectId.toLowerCase() === wanted || (s.email ?? "").toLowerCase() === wanted || (s.companyName ?? "").toLowerCase() === wanted,
+  );
+  if (matches.length === 0) {
+    const known = shares.map(shareLabel).join(", ") || "(nobody)";
+    throw new Error(`${app.appID} is not shared with "${who}". Shared with: ${known}`);
+  }
+  if (matches.length > 1) throw new Error(`"${who}" matches several shares; pass the subject id (${matches.map((s) => s.subjectId).join(", ")})`);
+  const share = matches[0];
+  await confirmTyped({
+    action: "remove the share",
+    expected: app.appID,
+    label: "the app id",
+    yes: options.yes,
+    preview: `${shareLabel(share)} is signed out of ${app.name} now and can no longer sign in${share.external ? "." : " unless they are a member of the owning organization."}`,
+  });
+  await revokeAppShare(app.appID, share.subjectType, share.subjectId);
+  if (isJSON(options)) return writeJSON({ appID: app.appID, removed: share });
+  process.stdout.write(`Removed the share for ${shareLabel(share)}.\n`);
 }
 
 export async function cmdAppsConsentShow(ref: string, options: ScopeOptions): Promise<void> {
@@ -460,6 +625,52 @@ export function registerAppCommands(program: Command, addExamples: (command: Com
     .addOption(companyOption())
     .addOption(outputOption())
     .action(cmdAppsUpdate);
+
+  const access = apps.command("access").description("who may sign in (internal, shared or public), trust, and client type");
+  addExamples(
+    access.command("show", { isDefault: true }).description("visibility, client type, trust and the share list").argument("<app>", "app id, slug or name").addOption(companyOption()).addOption(outputOption()).action(cmdAppsAccessShow),
+    `  heyditto apps access acme-tool
+  heyditto apps access show acme-tool --output json`,
+  );
+  addExamples(
+    access
+      .command("set")
+      .description("change who may sign in, whether members skip consent, or how the app authenticates")
+      .argument("<app>", "app id, slug or name")
+      .addOption(new Option("--visibility <visibility>", "internal | shared | public").choices([...VISIBILITIES]))
+      .addOption(new Option("--client-type <type>", "server (sends the app secret) | public (PKCE only)").choices([...CLIENT_TYPES]))
+      .option("--trusted", "members of the owning organization skip the consent screen")
+      .option("--no-trusted", "everyone sees the consent screen")
+      .option("--yes", "skip the confirmation for changes that sign people out or break sign-in")
+      .addOption(companyOption())
+      .addOption(outputOption())
+      .action(cmdAppsAccessSet),
+    `  heyditto apps access set acme-tool --visibility internal --trusted
+  heyditto apps access set acme-tool --client-type public --yes`,
+  );
+  addExamples(
+    apps
+      .command("share")
+      .description("let a person (email) or an organization (@handle) sign in; makes an internal app shared")
+      .argument("<app>", "app id, slug or name")
+      .argument("<who>", "email address or @organization-handle")
+      .option("--external", "confirm sharing with someone outside the owning organization")
+      .addOption(companyOption())
+      .addOption(outputOption())
+      .action(cmdAppsShare),
+    `  heyditto apps share acme-tool sam@acme.com
+  heyditto apps share acme-tool pat@partner.com --external
+  heyditto apps share acme-tool @partner --external`,
+  );
+  apps
+    .command("unshare")
+    .description("remove a share; that person or organization is signed out now")
+    .argument("<app>", "app id, slug or name")
+    .argument("<who>", "email, organization name or subject id")
+    .option("--yes", "skip the confirmation")
+    .addOption(companyOption())
+    .addOption(outputOption())
+    .action(cmdAppsUnshare);
 
   const consent = apps.command("consent").description("what the consent screen says about this app");
   consent.command("show").description("the public consent profile (name, icon, rationale per scope)").argument("<app>").addOption(companyOption()).addOption(outputOption()).action(cmdAppsConsentShow);
