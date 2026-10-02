@@ -553,6 +553,51 @@ export interface DeveloperApp {
     linkedinURL?: string;
   };
   consentRationale?: Record<string, string>;
+  /** Who may sign in and how the app authenticates (absent on old backends). */
+  access?: AppAccess;
+}
+
+/** internal: owning org's members only; shared: plus the people and orgs it is
+ * shared with; public: anyone with a Ditto account. */
+export type AppVisibility = "internal" | "shared" | "public";
+/** server: keeps the app secret and sends it to /token; public: PKCE only. */
+export type AppClientType = "server" | "public";
+
+export interface AppAccess {
+  visibility: AppVisibility;
+  clientType: AppClientType;
+  trusted: boolean;
+  trustedAt?: string;
+}
+
+export interface AppShare {
+  subjectType: "user" | "company";
+  subjectId: string;
+  email?: string;
+  companyName?: string;
+  /** Outside the owning organization. */
+  external: boolean;
+  createdAt: string;
+}
+
+export interface AppShares {
+  visibility: AppVisibility;
+  externalCount: number;
+  shares: AppShare[];
+}
+
+/** The 409 a share outside the owning organization gets until acknowledged. */
+export const EXTERNAL_SHARE_CODE = "app_share_external_unacknowledged";
+
+/** The machine-readable `code` of a failed request, when the body has one. */
+export function apiErrorCode(err: unknown): string | undefined {
+  if (!(err instanceof ApiError)) return undefined;
+  try {
+    const parsed = JSON.parse(err.body) as { code?: unknown };
+    return typeof parsed.code === "string" ? parsed.code : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export interface AppEndpoint extends InferenceEndpoint {
@@ -612,10 +657,29 @@ export interface AppPatch {
   instagramURL?: string;
   linkedinURL?: string;
   consentRationale?: Record<string, string>;
+  visibility?: AppVisibility;
+  clientType?: AppClientType;
+  trusted?: boolean;
 }
 
 export function updateApp(appId: string, patch: AppPatch): Promise<DeveloperApp> {
   return apiFetch<DeveloperApp>(`${APPS}/${encodeURIComponent(appId)}`, { method: "PATCH", body: patch });
+}
+
+export function listAppShares(appId: string): Promise<AppShares> {
+  return apiFetch<AppShares>(`${APPS}/${encodeURIComponent(appId)}/shares`);
+}
+
+/** Share by email (a person) or organization handle (every active member). */
+export function shareApp(appId: string, target: { email: string } | { companySlug: string }, acknowledgeExternal: boolean): Promise<AppShares> {
+  return apiFetch<AppShares>(`${APPS}/${encodeURIComponent(appId)}/shares`, {
+    method: "POST",
+    body: { ...target, ...(acknowledgeExternal ? { acknowledgeExternal: true } : {}) },
+  });
+}
+
+export function revokeAppShare(appId: string, subjectType: AppShare["subjectType"], subjectId: string): Promise<void> {
+  return apiFetch<void>(`${APPS}/${encodeURIComponent(appId)}/shares/${subjectType}/${encodeURIComponent(subjectId)}`, { method: "DELETE" });
 }
 
 /** Mints a fresh app secret. The response is the ONLY copy. */
