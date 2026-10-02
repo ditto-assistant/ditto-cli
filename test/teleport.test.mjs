@@ -626,7 +626,7 @@ test("pull restores per-branch upstreams tracking different remotes", async () =
 /** A repo whose branch is `ahead` commits past a real bare origin, with `behind` commits only on origin. */
 function makeTrackedRepo({ ahead = 0, behind = 0 } = {}) {
   const origin = tmp("teleport-origin-");
-  git(["init", "--bare", "-q", origin], os.tmpdir());
+  git(["init", "--bare", "-q", "-b", "main", origin], os.tmpdir());
   const src = tmp("teleport-src-");
   git(["init", "-q", "-b", "main"], src);
   git(["config", "user.email", "t@example.test"], src);
