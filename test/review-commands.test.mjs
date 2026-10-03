@@ -22,6 +22,17 @@ const RUN = { id: "55555555-5555-5555-5555-555555555555", repositoryId: REPO.id,
   status: "completed", headSha: "a".repeat(40), attempts: 0, summary: { posted: 1 },
   reviewUrl: "https://github.com/ditto-assistant/console/pull/88#pullrequestreview-1" };
 
+
+const FRUN = { id: "66666666-6666-6666-6666-666666666666", prNumber: 12, headSha: "abcdef1234567890", status: "completed", reviewUrl: "https://github.com/ditto-assistant/console/pull/12#pullrequestreview-1", prTitle: "feat: thing" };
+const FINDING_OPEN = {
+  id: "f_6eb378e97faaaf48", path: "pkg/a.go", line: 358, severity: "medium", category: "bug", title: "Preserve precision when canonicalizing numeric arguments",
+  status: "posted", confidence: 96, commentUrl: "https://github.com/ditto-assistant/console/pull/12#discussion_r4171976534", feedback: { mine: null }, canFeedback: true, canDismiss: true,
+};
+const FINDING_DISMISSED = { id: "f_0a073e36dfb26698", path: "pkg/b.go", line: 7, severity: "low", title: "Old one", status: "withheld", withheldReason: "dismissed", dismissed: true, dismissReason: "no", feedback: { mine: "wrong" } };
+const DETAIL = { run: FRUN, result: { findings: [FINDING_OPEN, FINDING_DISMISSED] }, repository: { id: REPO.id, fullName: REPO.fullName } };
+const LATEST = `/api/v5/review/runs/latest?repository=${encodeURIComponent(REPO.fullName)}&pr=12`;
+const FINDING_BASE = `/api/v5/review/runs/${FRUN.id}/findings/${FINDING_OPEN.id}`;
+
 function startStub({ statuses = ["completed"], refusal, detailDelay = 0 } = {}) {
   let detailReads = 0;
   const calls = [];
@@ -51,6 +62,19 @@ function startStub({ statuses = ["completed"], refusal, detailDelay = 0 } = {}) 
       }
       if (req.url === runRoute + "/retry" + query && req.method === "POST") return json(202, { status: "queued", reusedResult: true });
       if (req.url === runRoute + "/cancel" + query && req.method === "POST") return json(200, { runId: RUN.id, status: "running", cancelRequested: true });
+      // The PR's newest run: 404 in the personal workspace, found in the organization.
+      if (req.url === LATEST && req.method === "GET") return json(404, { message: "not found" });
+      if (req.url === `${LATEST}&company=${COMPANY.id}` && req.method === "GET") return json(200, DETAIL);
+      if (req.url === `/api/v5/review/runs/${FRUN.id}?company=${COMPANY.id}` && req.method === "GET") return json(200, DETAIL);
+      if (req.url === `${FINDING_BASE}/dismiss?company=${COMPANY.id}` && req.method === "POST") {
+        return json(200, { runId: FRUN.id, findingId: FINDING_OPEN.id, githubStatus: "updated", githubUpdated: true, threadResolved: true, alreadyDismissed: false, replyUrl: `${FINDING_OPEN.commentUrl}0`, dismissal: { id: "d1", reason: JSON.parse(body).reason } });
+      }
+      if (req.url === `${FINDING_BASE}/dismiss?company=${COMPANY.id}` && req.method === "DELETE") {
+        return json(200, { runId: FRUN.id, findingId: FINDING_OPEN.id, wasDismissed: true, dismissed: false, githubNote: "Ditto does not reopen the review thread on GitHub." });
+      }
+      if (req.url === `${FINDING_BASE}/feedback?company=${COMPANY.id}` && req.method === "POST") {
+        return json(200, { runId: FRUN.id, findingId: FINDING_OPEN.id, attempt: 1, feedback: { mine: JSON.parse(body).verdict, counts: {} } });
+      }
       json(404, { message: "no route" });
     });
   });
@@ -234,4 +258,112 @@ test("review actions keep server semantics; start propagates manager refusal wit
     assert.match(out.stderr, /HTTP 403.*only managers/);
     assert.equal(stub.calls.filter(c => c.method === "POST").length, before + 1);
   } finally { stub.close(); }
+});
+
+test("review findings finds the PR's newest run across workspaces and lists open findings with their GitHub comments", async () => {
+  const stub = await startStub();
+  try {
+    const out = await run(stub.base, ["review", "findings", "https://github.com/ditto-assistant/console/pull/12"]);
+    assert.equal(out.status, 0, out.stderr);
+    // Personal workspace first (404), then the organization.
+    assert.deepEqual(stub.calls.filter((c) => c.url.startsWith("/api/v5/review/runs/latest")).map((c) => c.url), [LATEST, `${LATEST}&company=${COMPANY.id}`]);
+    assert.match(out.stdout, /ditto-assistant\/console#12 feat: thing/);
+    assert.match(out.stdout, /f_6eb378e97faaaf48\s+medium\s+96%\s+posted\s+pkg\/a\.go:358\s+Preserve precision/);
+    assert.doesNotMatch(out.stdout, /f_0a073e36dfb26698/, "dismissed findings are hidden without --all");
+    assert.match(out.stdout, /f_6eb378e97faaaf48\s+https:\/\/github\.com\/ditto-assistant\/console\/pull\/12#discussion_r4171976534/);
+  } finally {
+    stub.close();
+  }
+});
+
+test("review findings --all --output json includes dismissed findings and the workspace", async () => {
+  const stub = await startStub();
+  try {
+    const out = await run(stub.base, ["review", "findings", "ditto-assistant/console#12", "--all", "--org", "omni-aura", "--output", "json"]);
+    assert.equal(out.status, 0, out.stderr);
+    const parsed = JSON.parse(out.stdout);
+    assert.equal(parsed.company, "omni-aura");
+    assert.equal(parsed.run.id, FRUN.id);
+    assert.deepEqual(parsed.findings.map((f) => f.id), [FINDING_OPEN.id, FINDING_DISMISSED.id]);
+    // --org asks only that workspace.
+    assert.deepEqual(stub.calls.map((c) => c.url), ["/api/v5/companies", `${LATEST}&company=${COMPANY.id}`]);
+  } finally {
+    stub.close();
+  }
+});
+
+test("review dismiss by review-comment URL posts the reason and reports the GitHub outcome", async () => {
+  const stub = await startStub();
+  try {
+    const out = await run(stub.base, ["review", "dismiss", FINDING_OPEN.commentUrl, "--reason", "Theoretical: tool arguments never carry integers above 2^53."]);
+    assert.equal(out.status, 0, out.stderr);
+    const post = stub.calls.find((c) => c.method === "POST");
+    assert.equal(post.url, `${FINDING_BASE}/dismiss?company=${COMPANY.id}`);
+    assert.deepEqual(post.body, { reason: "Theoretical: tool arguments never carry integers above 2^53." });
+    assert.match(out.stdout, /Dismissed f_6eb378e97faaaf48 \(medium, pkg\/a\.go:358\): Preserve precision/);
+    assert.match(out.stdout, /GitHub: replied and resolved the thread/);
+    assert.match(out.stdout, new RegExp(`Undo: heyditto review undismiss ${FRUN.id}:f_6eb378e97faaaf48 --org omni-aura`));
+  } finally {
+    stub.close();
+  }
+});
+
+test("review dismiss needs a reason and a finding, before any request", async () => {
+  const stub = await startStub();
+  try {
+    const noReason = await run(stub.base, ["review", "dismiss", FINDING_OPEN.commentUrl]);
+    assert.notEqual(noReason.status, 0);
+    assert.match(noReason.stderr, /--reason/);
+    const prOnly = await run(stub.base, ["review", "dismiss", "https://github.com/ditto-assistant/console/pull/12", "--reason", "x"]);
+    assert.notEqual(prOnly.status, 0);
+    assert.match(prOnly.stderr, /names a pull request, not a finding/);
+    const bareId = await run(stub.base, ["review", "dismiss", "f_6eb378e97faaaf48", "--reason", "x"]);
+    assert.notEqual(bareId.status, 0);
+    assert.match(bareId.stderr, /needs --pr/);
+    assert.equal(stub.calls.length, 0);
+  } finally {
+    stub.close();
+  }
+});
+
+test("review dismiss reports a comment that is not in the newest run", async () => {
+  const stub = await startStub();
+  try {
+    const out = await run(stub.base, ["review", "dismiss", "https://github.com/ditto-assistant/console/pull/12#discussion_r999", "--reason", "x", "--org", "omni-aura"]);
+    assert.notEqual(out.status, 0);
+    assert.match(out.stderr, /discussion_r999 is not in the newest Ditto Review run of ditto-assistant\/console#12/);
+    assert.equal(stub.calls.some((c) => c.method === "POST"), false);
+  } finally {
+    stub.close();
+  }
+});
+
+test("review feedback with a bare finding id and --pr posts the verdict and note", async () => {
+  const stub = await startStub();
+  try {
+    const out = await run(stub.base, ["review", "feedback", FINDING_OPEN.id, "not-useful", "--pr", "ditto-assistant/console#12", "--note", "Cosmetic.", "--org", "omni-aura"]);
+    assert.equal(out.status, 0, out.stderr);
+    const post = stub.calls.find((c) => c.method === "POST");
+    assert.equal(post.url, `${FINDING_BASE}/feedback?company=${COMPANY.id}`);
+    assert.deepEqual(post.body, { verdict: "not_useful", note: "Cosmetic." });
+    assert.match(out.stdout, /Recorded "not_useful" on f_6eb378e97faaaf48/);
+    const bad = await run(stub.base, ["review", "feedback", FINDING_OPEN.commentUrl, "meh"]);
+    assert.notEqual(bad.status, 0);
+    assert.match(bad.stderr, /verdict must be one of useful, wrong, not_useful/);
+  } finally {
+    stub.close();
+  }
+});
+
+test("review undismiss by run:finding sends the DELETE and relays the GitHub note", async () => {
+  const stub = await startStub();
+  try {
+    const out = await run(stub.base, ["review", "undismiss", `${FRUN.id}:${FINDING_OPEN.id}`, "--org", "omni-aura"]);
+    assert.equal(out.status, 0, out.stderr);
+    const del = stub.calls.find((c) => c.method === "DELETE");
+    assert.equal(del.url, `${FINDING_BASE}/dismiss?company=${COMPANY.id}`);
+    assert.match(out.stdout, /Undismissed f_6eb378e97faaaf48 \(pkg\/a\.go:358\)\.\n  Ditto does not reopen the review thread on GitHub\./);
+  } finally {
+    stub.close();
+  }
 });

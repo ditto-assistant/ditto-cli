@@ -686,6 +686,41 @@ List your Ditto agents (`GET /api/v5/chat-agents`): id, kind (`main`, `chat`,
 `inference_endpoint`, `mcp`, `connector`), name, thread count, last activity and
 the live connections (API keys, OAuth grants, endpoints) writing into each.
 
+### `review` — Ditto Review from the shell
+
+The developer console's Review pages, as commands. Repository settings:
+
+```bash
+heyditto review repos --org omniaura                       # repositories set up for Ditto Review
+heyditto review set ditto-assistant/console --max-minutes 20 --org omniaura
+```
+
+Findings on a pull request (its newest run), and acting on one. A finding is
+named the way you meet it: by the GitHub review comment's URL
+(`…/pull/12#discussion_r<id>`), by `<run-id>:<finding-id>`, or by a bare
+finding id with `--pr`. Without `--org` the PR's repository is looked up in
+your personal workspace and then in each organization you belong to.
+
+```bash
+heyditto review findings https://github.com/ditto-assistant/backend/pull/3158
+heyditto review findings ditto-assistant/ditto-app#3163 --all --output json   # include dismissed
+
+# Managers: dismiss with a reason. Ditto replies on the GitHub thread, resolves
+# it, and keeps the same issue off this PR on later reviews.
+heyditto review dismiss "https://github.com/ditto-assistant/backend/pull/3112#discussion_r4171976544" \
+  --reason "Retrying with different arguments is the documented design (trace_test.go:106-115)."
+heyditto review undismiss <run-id>:<finding-id>
+
+# Any member: say whether a finding was useful, wrong or not useful.
+heyditto review feedback "<comment-url>" wrong --note "The retry test covers different arguments."
+```
+
+Every action is recorded as the same signal the console records
+(`review_finding_feedback`, `review_finding_dismissals`), so it feeds
+false-positive learning; a plain GitHub reply does not. The key reaches the run
+detail, feedback and dismiss routes only — not cancel, retry, the event stream
+or posting a withheld finding.
+
 ## Remote Control
 
 Every `heyditto claude` / `heyditto codex` session is reachable from the Ditto
