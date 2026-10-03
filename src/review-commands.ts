@@ -1,3 +1,4 @@
+import { setTimeout as delay } from "node:timers/promises";
 import type { Command, Option } from "commander";
 import { apiFetch, type Company, resolveCompany } from "./api.js";
 import { readStoredAuth } from "./store.js";
@@ -76,6 +77,175 @@ function scopeQuery(company: Company | undefined): string {
 export async function listReviewRepositories(company: Company | undefined): Promise<ReviewRepository[]> {
   const out = await apiFetch<{ repositories?: ReviewRepository[] }>(`/api/v5/review${scopeQuery(company)}`);
   return out.repositories ?? [];
+}
+
+export interface ReviewRun {
+  id: string;
+  repositoryId: string;
+  prNumber: number;
+  status: string;
+  headSha: string;
+  attempts: number;
+  reviewUrl?: string;
+  error?: string;
+  cancelRequested?: boolean;
+  chargedCredits?: number;
+  creditsPerDollar?: number;
+  summary?: unknown;
+}
+
+interface ReviewList {
+  repositories: ReviewRepository[];
+  runs: ReviewRun[];
+}
+
+interface ReviewDetail {
+  run: ReviewRun;
+  repository: ReviewRepository;
+  result?: unknown;
+  attempts?: unknown[];
+}
+
+interface WatchOptions extends ScopeOptions {
+  interval?: string;
+  timeout?: string;
+  watch?: boolean;
+}
+
+const TERMINAL_REVIEW_STATUSES = new Set(["completed", "partial", "failed", "cancelled", "skipped", "superseded"]);
+const ACTIVE_REVIEW_STATUSES = new Set(["queued", "running", "publishing"]);
+
+function runPath(id: string): string {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+    throw new Error("run id must be a UUID (see `heyditto review runs`)");
+  }
+  return `/api/v5/review/runs/${encodeURIComponent(id)}`;
+}
+
+async function findReviewRepository(fullName: string, company: Company | undefined): Promise<ReviewRepository> {
+  const repos = await listReviewRepositories(company);
+  const repo = repos.find((r) => r.fullName.toLowerCase() === fullName.trim().toLowerCase());
+  if (!repo) throw new Error(`${fullName} is not set up in this workspace (see \`heyditto review repos --org <organization>\`).`);
+  return repo;
+}
+
+function writeJSON(value: unknown): void {
+  process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+}
+
+function printRun(detail: ReviewDetail, options: ScopeOptions): void {
+  if (isJSON(options)) return writeJSON(detail);
+  const r = detail.run;
+  process.stdout.write(`${detail.repository.fullName} #${r.prNumber}: ${r.status}${r.cancelRequested ? " (cancellation requested)" : ""}\n`);
+  process.stdout.write(`Run: ${r.id}\nHead: ${r.headSha}\n`);
+  if (r.reviewUrl) process.stdout.write(`Review: ${r.reviewUrl}\n`);
+  if (r.summary) process.stdout.write(`Summary: ${JSON.stringify(r.summary)}\n`);
+  if (r.error) process.stdout.write(`Error: ${r.error}\n`);
+}
+
+export async function cmdReviewRuns(fullName: string | undefined, options: ScopeOptions): Promise<void> {
+  const company = await resolveScope(options);
+  const out = await apiFetch<ReviewList>(`/api/v5/review${scopeQuery(company)}`);
+  let runs = out.runs ?? [];
+  if (fullName) {
+    const repo = out.repositories.find((r) => r.fullName.toLowerCase() === fullName.trim().toLowerCase());
+    if (!repo) throw new Error(`${fullName} is not set up in this workspace`);
+    runs = runs.filter((r) => r.repositoryId === repo.id);
+  }
+  if (isJSON(options)) return writeJSON({ runs });
+  const names = new Map(out.repositories.map((r) => [r.id, r.fullName]));
+  if (!runs.length) process.stdout.write("No recent review runs in this workspace.\n");
+  for (const r of runs) process.stdout.write(`${r.id}  ${r.status}  ${names.get(r.repositoryId) ?? r.repositoryId} #${r.prNumber}  ${r.headSha.slice(0, 7)}\n`);
+}
+
+export async function cmdReviewPulls(fullName: string, options: ScopeOptions): Promise<void> {
+  const company = await resolveScope(options);
+  const repo = await findReviewRepository(fullName, company);
+  const out = await apiFetch<{ pulls: { number: number; title: string; draft: boolean; url: string }[] }>(
+    `/api/v5/review/repositories/${encodeURIComponent(repo.id)}/pulls${scopeQuery(company)}`,
+  );
+  if (isJSON(options)) return writeJSON(out);
+  if (!out.pulls.length) process.stdout.write(`No open pull requests in ${repo.fullName}.\n`);
+  for (const p of out.pulls) process.stdout.write(`#${p.number}${p.draft ? " (draft)" : ""}  ${p.title}\n  ${p.url}\n`);
+}
+
+export async function cmdReviewStatus(id: string, options: ScopeOptions): Promise<void> {
+  const route = runPath(id);
+  const company = await resolveScope(options);
+  printRun(await apiFetch<ReviewDetail>(`${route}${scopeQuery(company)}`), options);
+}
+
+function watchLimits(options: WatchOptions): { intervalMs: number; timeoutMs: number } {
+  return {
+    intervalMs: intFlag("--interval", options.interval ?? "10", 1, 60) * 1000,
+    timeoutMs: intFlag("--timeout", options.timeout ?? "3600", 1, 86400) * 1000,
+  };
+}
+
+async function watchReview(id: string, company: Company | undefined, options: WatchOptions): Promise<void> {
+  const route = runPath(id);
+  const { intervalMs, timeoutMs } = watchLimits(options);
+  const deadline = performance.now() + timeoutMs;
+  let prior = "";
+  for (;;) {
+    const remaining = deadline - performance.now();
+    if (remaining <= 0) throw new Error(`timed out waiting for review ${id}; the review continues on the server`);
+    let detail: ReviewDetail;
+    try {
+      detail = await apiFetch<ReviewDetail>(`${route}${scopeQuery(company)}`, { signal: AbortSignal.timeout(Math.ceil(remaining)) });
+    } catch (error) {
+      if (performance.now() >= deadline) throw new Error(`timed out waiting for review ${id}; the review continues on the server`);
+      throw error;
+    }
+    const status = detail.run.status;
+    if (status !== prior) {
+      process.stderr.write(`Review ${id}: ${status}\n`);
+      prior = status;
+    }
+    if (TERMINAL_REVIEW_STATUSES.has(status)) {
+      printRun(detail, options);
+      if (status === "failed") process.exitCode = 1;
+      return;
+    }
+    if (!ACTIVE_REVIEW_STATUSES.has(status)) throw new Error(`unknown review status: ${status}`);
+    await delay(Math.max(1, Math.min(intervalMs, deadline - performance.now())));
+  }
+}
+
+export async function cmdReviewWatch(id: string, options: WatchOptions): Promise<void> {
+  runPath(id);
+  watchLimits(options);
+  const company = await resolveScope(options);
+  await watchReview(id, company, options);
+}
+
+export async function cmdReviewStart(fullName: string, prNumber: string, options: WatchOptions): Promise<void> {
+  const number = intFlag("pr-number", prNumber, 1, 2_147_483_647);
+  if (options.watch) watchLimits(options);
+  const company = await resolveScope(options);
+  const repo = await findReviewRepository(fullName, company);
+  const out = await apiFetch<{ runId: string; status: string; alreadyReviewed?: unknown }>(
+    `/api/v5/review/repositories/${encodeURIComponent(repo.id)}/pulls/${number}/review${scopeQuery(company)}`,
+    { method: "POST" },
+  );
+  if (options.watch) {
+    process.stderr.write(`Review requested for ${repo.fullName} #${number}: ${out.runId}\n`);
+    if (out.alreadyReviewed) process.stderr.write("This head was already reviewed; this request starts a new attempt within the repository's budget.\n");
+    return watchReview(out.runId, company, options);
+  }
+  if (isJSON(options)) return writeJSON(out);
+  process.stdout.write(`${repo.fullName} #${number}: ${out.status}\nRun: ${out.runId}\n`);
+  if (out.alreadyReviewed) process.stdout.write("This head was already reviewed; a new attempt was requested.\n");
+}
+
+export async function cmdReviewAction(id: string, action: "retry" | "cancel", options: ScopeOptions): Promise<void> {
+  const route = runPath(id);
+  const company = await resolveScope(options);
+  const out = await apiFetch<{ status: string; cancelRequested?: boolean; reusedResult?: boolean; watchCancelled?: boolean }>(
+    `${route}/${action}${scopeQuery(company)}`, { method: "POST" },
+  );
+  if (isJSON(options)) return writeJSON(out);
+  process.stdout.write(`${id}: ${out.status}${out.cancelRequested ? " (cancellation requested)" : ""}${out.reusedResult ? " (reusing stored result)" : ""}${out.watchCancelled ? " (CI watch cancelled)" : ""}\n`);
 }
 
 function money(cents: number): string {
@@ -189,8 +359,8 @@ export function registerReviewCommands(
 ): void {
   const review = program
     .command("review")
-    .description("Ditto Review repositories and their settings")
-    .summary("Ditto Review settings");
+    .description("Ditto Review repositories, settings, and review runs")
+    .summary("manage and follow Ditto Review");
   addExamples(
     review
       .command("repos", { isDefault: true })
@@ -201,6 +371,30 @@ export function registerReviewCommands(
     `  heyditto review repos --org omni-aura
   heyditto review repos --output json`,
   );
+  const scoped = (command: Command): Command => command.addOption(orgOption()).addOption(outputOption());
+  const watched = (command: Command): Command => command
+    .option("--interval <seconds>", "poll interval (1-60 seconds)", "10")
+    .option("--timeout <seconds>", "stop waiting after this many seconds (review continues)", "3600");
+  scoped(review.command("runs").description("list recent review runs in this workspace")
+    .argument("[repository]", "filter by owner/name")).action(cmdReviewRuns);
+  scoped(review.command("pulls").description("list open pull requests available to review")
+    .argument("<repository>", "owner/name")).action(cmdReviewPulls);
+  addExamples(
+    watched(scoped(review.command("start").description("request a review of the current PR head (uses the repository's budget; re-reviews cost a new attempt)")
+      .argument("<repository>", "owner/name").argument("<pr-number>", "open pull request number")
+      .option("--watch", "follow the requested run until it finishes"))).action(cmdReviewStart),
+    `  heyditto review start ditto-assistant/console 88 --org omniaura --watch`,
+  );
+  scoped(review.command("status").description("show run status; JSON includes results and prior attempts")
+    .argument("<run-id>", "review run UUID")).action(cmdReviewStatus);
+  watched(scoped(review.command("watch").description("follow a review until it finishes; does not start or retry it")
+    .argument("<run-id>", "review run UUID"))).action(cmdReviewWatch);
+  for (const action of ["retry", "cancel"] as const) {
+    scoped(review.command(action).description(action === "retry"
+      ? "retry an eligible run (may spend a new budget; publication retries reuse stored results)"
+      : "request cancellation of a queued/running review or its CI watch")
+      .argument("<run-id>", "review run UUID")).action((id: string, options: ScopeOptions) => cmdReviewAction(id, action, options));
+  }
   addExamples(
     review
       .command("set")

@@ -194,6 +194,44 @@ heyditto search "typescript" "language choices"
 heyditto search "launch notes" --include-public --filter-username peyton
 ```
 
+### `review`
+
+Manage Ditto Review and follow reviews from either `ditto` or `heyditto`.
+Commands use your selected organization (`orgs use`) or `--org`; without one,
+they use your personal workspace. Repositories must already be set up for
+Review. Workspace membership and manager permissions are enforced by the API.
+
+```bash
+heyditto review repos --org omniaura
+heyditto review set ditto-assistant/console --max-minutes 20 --org omniaura
+heyditto review pulls ditto-assistant/console --org omniaura
+heyditto review start ditto-assistant/console 88 --org omniaura --watch
+heyditto review runs ditto-assistant/console --org omniaura --output json
+heyditto review status <run-id> --org omniaura --output json
+heyditto review watch <run-id> --org omniaura --interval 10 --timeout 3600
+heyditto review retry <run-id> --org omniaura
+heyditto review cancel <run-id> --org omniaura
+```
+
+`start` reviews the PR's current head using the repository's saved budget and
+settings. Starting a previously completed head requests another paid attempt.
+`retry` can reuse a stored result after publication failure; other eligible
+retries can spend a new per-run budget. It does not raise any budget or enable
+a paused repository. `cancel` requests cancellation; a running review stops
+asynchronously, and a review already being published may refuse cancellation.
+
+`runs` lists the API's recent workspace runs; `status --output json` includes findings and
+prior attempts. `watch` polls without starting, retrying, or cancelling the run.
+It stops on completion, partial coverage, failure, cancellation, skip, or
+supersession. Failed runs and timeouts return a nonzero exit code. A partial
+review remains partial even though the command succeeds. A timeout or Ctrl-C
+only stops the local watcher; use `cancel` to stop the server review.
+`--output json` prints one final JSON document, with watch progress on stderr.
+
+The lifecycle commands require a backend with CLI-key access to Review run
+and PR routes. On an older backend they return an authentication refusal;
+upgrading the CLI alone cannot enable those routes.
+
 ### `fetch`
 
 Fetch memory content for private pair ids or public share ids. The default

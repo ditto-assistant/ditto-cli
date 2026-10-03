@@ -37,7 +37,7 @@ async function requireKey(): Promise<string> {
 
 export async function apiFetch<T>(
   path: string,
-  init: { method?: string; body?: unknown; auth?: boolean } = {},
+  init: { method?: string; body?: unknown; auth?: boolean; signal?: AbortSignal } = {},
 ): Promise<T> {
   const headers: Record<string, string> = {
     Accept: "application/json",
@@ -49,6 +49,7 @@ export async function apiFetch<T>(
     method: init.method ?? "GET",
     headers,
     body: init.body === undefined ? undefined : JSON.stringify(init.body),
+    signal: init.signal,
   });
   if (!response.ok) {
     const text = await response.text().catch(() => "");

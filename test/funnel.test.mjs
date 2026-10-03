@@ -468,14 +468,25 @@ test("a pending_plan endpoint blocks launch and prints the activation notice wit
 
 test("claude/codex without a key and without a TTY still fail fast (no device flow)", async () => {
   const stub = await startStub();
+  const binDir = mkdtempSync(path.join(os.tmpdir(), "heyditto-auth-harness-"));
+  const launched = path.join(binDir, "launched");
+  for (const harness of ["claude", "codex"]) {
+    const executable = path.join(binDir, harness);
+    writeFileSync(executable, `#!/bin/sh\ntouch "${launched}"\nexit 99\n`);
+    chmodSync(executable, 0o755);
+  }
   try {
     for (const harness of ["claude", "codex"]) {
-      const result = await runAsync([harness, "--endpoint", "alpha"], { DITTO_API_BASE: stub.base });
+      const result = await runAsync([harness, "--endpoint", "alpha"], {
+        DITTO_API_BASE: stub.base,
+        PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      });
       assert.equal(result.status, 1, harness);
       assert.match(result.stderr, /no Ditto API key configured/);
       assert.match(result.stderr, /heyditto login/);
     }
     assert.ok(!stub.calls.some((c) => c.url === "/api/v2/mcp/device-code"), "non-interactive runs must not start a device flow");
+    assert.ok(!existsSync(launched), "authentication must fail before launching either harness");
   } finally {
     stub.close();
   }
