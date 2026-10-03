@@ -1,6 +1,7 @@
 import { setTimeout as delay } from "node:timers/promises";
 import type { Command, Option } from "commander";
 import { apiFetch, type Company, resolveCompany } from "./api.js";
+import { registerReviewFindingCommands } from "./review-findings.js";
 import { readStoredAuth } from "./store.js";
 
 /**
@@ -409,4 +410,5 @@ export function registerReviewCommands(
     `  heyditto review set ditto-assistant/console --max-minutes 20 --org omni-aura
   heyditto review set acme/api --budget-cents 300 --enabled on`,
   );
+  registerReviewFindingCommands(review, addExamples, outputOption, orgOption);
 }
