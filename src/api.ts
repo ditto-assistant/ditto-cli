@@ -206,6 +206,7 @@ export const MAX_TRACE_RETENTION_DAYS = 3650;
  * prompt; turning it off pins the endpoint where it is.
  */
 export const CODING_AGENT_OPTION_KEYS = [
+  "prompt_enhancement",
   "codex_models",
   "codex_catalog",
   "codex_catalog_limit",
