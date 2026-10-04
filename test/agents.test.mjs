@@ -138,6 +138,7 @@ test("--dry-run claude resolves the endpoint and prints the plan (no key minted)
     assert.equal(plan.env.ANTHROPIC_BASE_URL, "https://api.example.test");
     assert.equal(plan.env.ANTHROPIC_AUTH_TOKEN, "<key>");
     assert.equal(plan.env.ANTHROPIC_CUSTOM_HEADERS, "X-Ditto-Session-Id: sess-1");
+    assert.equal(plan.env.CLAUDE_CODE_AUTO_MODE_SERVER, "0");
     assert.deepEqual(plan.unsetEnv, ["ANTHROPIC_API_KEY"]);
     assert.equal(plan.endpoint.slug, "alpha");
     assert.equal(plan.key.spendLimitTokens, 500000);

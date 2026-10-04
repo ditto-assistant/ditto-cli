@@ -37,6 +37,10 @@ export function planClaude(input: PlanInput): HarnessPlan {
     ANTHROPIC_CUSTOM_HEADERS: headers,
   };
   if (input.model) envSet.ANTHROPIC_MODEL = input.model;
+  // Claude Code's server-side auto-mode classifier needs the dangerous-tool-use
+  // beta and `safeguards` field, which the router does not forward; a rejection
+  // denies every auto-mode tool use. Decide locally unless the caller chose.
+  if (input.env.CLAUDE_CODE_AUTO_MODE_SERVER === undefined) envSet.CLAUDE_CODE_AUTO_MODE_SERVER = "0";
 
   return {
     command: "claude",
