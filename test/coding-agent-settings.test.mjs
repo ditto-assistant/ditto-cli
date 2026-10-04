@@ -318,3 +318,25 @@ test("--exclude-provider none removes the deny list", async () => {
     stub.close();
   }
 });
+
+test("--prompt-enhancement writes the gateway option and keeps the others", async () => {
+  const stub = await startStub({ ...ENDPOINT, providerOptions: { codex_models: true } });
+  try {
+    const out = await run(stub.base, ["endpoints", "set", "alpha", "--prompt-enhancement", "on"]);
+    assert.equal(out.status, 0, out.stderr);
+    assert.deepEqual(patchOf(stub).providerOptions, { codex_models: true, prompt_enhancement: true });
+  } finally {
+    stub.close();
+  }
+});
+
+test("--prompt-enhancement off keeps the key as false rather than dropping it", async () => {
+  const stub = await startStub({ ...ENDPOINT, providerOptions: { prompt_enhancement: true } });
+  try {
+    const out = await run(stub.base, ["endpoints", "set", "alpha", "--prompt-enhancement", "off"]);
+    assert.equal(out.status, 0, out.stderr);
+    assert.deepEqual(patchOf(stub).providerOptions, { prompt_enhancement: false });
+  } finally {
+    stub.close();
+  }
+});

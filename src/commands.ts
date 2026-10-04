@@ -397,6 +397,7 @@ interface EndpointSetOptions {
   clearAliases?: boolean;
   codexModels?: string;
   codexCatalog?: string;
+  promptEnhancement?: string;
   codexCatalogLimit?: string;
   codexPrompt?: string;
   codexPromptMode?: string;
@@ -604,6 +605,10 @@ export async function cmdEndpointSet(ref: string, options: EndpointSetOptions): 
   const agent: Record<string, unknown> = {};
   const codexModels = onOff("--codex-models", options.codexModels);
   if (codexModels !== undefined) agent.codex_models = codexModels;
+  // Gate memory per turn instead of injecting it on every one; the gateway
+  // reads this option and never forwards it to a provider.
+  const promptEnhancement = onOff("--prompt-enhancement", options.promptEnhancement);
+  if (promptEnhancement !== undefined) agent.prompt_enhancement = promptEnhancement;
   const codexCatalog = onOff("--codex-catalog", options.codexCatalog);
   if (codexCatalog !== undefined) agent.codex_catalog = codexCatalog;
   if (options.codexCatalogLimit !== undefined) {
@@ -1061,6 +1066,7 @@ through the gh CLI; the plaintext never reaches your terminal.`,
       .option("--name <name>", "display name")
       .option("--model <id>", "default model id")
       .option("--system-prompt <text>", "system prompt prepended to every request")
+      .option("--prompt-enhancement <on|off>", "recall memory only for turns that would benefit, compaction summaries first")
       .option("--codex-models <on|off>", "list this endpoint's models in Codex's /model picker")
       .option("--codex-catalog <on|off>", "also list the provider catalog (Claude, Gemini, …) in Codex")
       .option("--codex-catalog-limit <n>", "how many catalog models to list in Codex (default 40)")
