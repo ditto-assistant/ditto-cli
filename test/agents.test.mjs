@@ -71,7 +71,7 @@ function childEnvFor(env) {
   // The launchers merge inherited harness env (e.g. ANTHROPIC_CUSTOM_HEADERS
   // when this test itself runs under a Ditto-launched Claude Code), so drop it.
   // Likewise the developer's color settings: each test opts into color explicitly.
-  const { ANTHROPIC_CUSTOM_HEADERS: _headers, ANTHROPIC_API_KEY: _key, NO_COLOR: _nc, NODE_DISABLE_COLORS: _ndc, FORCE_COLOR: _fc, ...parent } = process.env;
+  const { ANTHROPIC_CUSTOM_HEADERS: _headers, ANTHROPIC_API_KEY: _key, CLAUDE_CODE_AUTO_MODE_SERVER: _ams, NO_COLOR: _nc, NODE_DISABLE_COLORS: _ndc, FORCE_COLOR: _fc, ...parent } = process.env;
   return {
     ...parent,
     DITTO_API_KEY: "",
@@ -144,6 +144,22 @@ test("--dry-run claude resolves the endpoint and prints the plan (no key minted)
     assert.equal(plan.key.spendLimitTokens, 500000);
     assert.match(result.stderr, /endpoint=alpha/);
     assert.ok(stub.calls.every((c) => c.method === "GET"), "dry run must not POST keys");
+  } finally {
+    stub.close();
+  }
+});
+
+test("claude keeps a caller's CLAUDE_CODE_AUTO_MODE_SERVER choice", async () => {
+  const stub = await startStub();
+  try {
+    const result = await runAsync(["claude", "--dry-run", "--endpoint", "alpha"], {
+      DITTO_API_BASE: stub.base,
+      DITTO_API_KEY: "ditto_mcp_test",
+      CLAUDE_CODE_AUTO_MODE_SERVER: "1",
+    });
+    assert.equal(result.status, 0, result.stderr);
+    // Not overridden: the inherited value reaches Claude Code untouched.
+    assert.equal(JSON.parse(result.stdout).env.CLAUDE_CODE_AUTO_MODE_SERVER, undefined);
   } finally {
     stub.close();
   }
