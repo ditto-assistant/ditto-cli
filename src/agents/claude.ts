@@ -41,6 +41,10 @@ export function planClaude(input: PlanInput): HarnessPlan {
   // beta and `safeguards` field, which the router does not forward; a rejection
   // denies every auto-mode tool use. Decide locally unless the caller chose.
   if (input.env.CLAUDE_CODE_AUTO_MODE_SERVER === undefined) envSet.CLAUDE_CODE_AUTO_MODE_SERVER = "0";
+  // Claude Code only labels requests (x-claude-code-request-class: main,
+  // subagent, auxiliary) for gateways when asked. The router uses the label to
+  // skip memory recall on housekeeping calls such as the auto-mode classifier.
+  if (input.env.CLAUDE_CODE_GATEWAY_HINT_HEADERS === undefined) envSet.CLAUDE_CODE_GATEWAY_HINT_HEADERS = "1";
 
   return {
     command: "claude",
