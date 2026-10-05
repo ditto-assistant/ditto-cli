@@ -39,6 +39,8 @@ Rebase merging is allowed but only if every individual commit on the branch is c
 
 The `Release` workflow uses the repository Actions secret `RELEASE_TOKEN` for both checkout and semantic-release, matching `ditto-subnet`. Use a token owned by an existing organization or repository admin authorized by the `main protection` bypass list. A fine-grained PAT needs access to this repository with Contents, Issues, and Pull requests read/write. Keep npm trusted publishing via OIDC enabled. Never store the token in source or logs.
 
+An expired token publishes nothing, and the merged change sits unreleased. The `Release` workflow checks the token first and fails by name if it is rejected. The weekly `Release token expiry` workflow fails two weeks before the token expires. When either one fires, create a new token, store it with `gh secret set RELEASE_TOKEN -R ditto-assistant/ditto-cli`, then re-run the failed `Release` run (`gh run rerun <id>`). A later conventional commit on `main` also releases everything merged since the last tag.
+
 The built-in `GITHUB_TOKEN` cannot push the generated version commit through the required-pull-request rule. Do not fall back to it or weaken branch protection. Release commits retain `[skip ci]` to prevent a token-authenticated push from starting another release.
 
 ## Local development
