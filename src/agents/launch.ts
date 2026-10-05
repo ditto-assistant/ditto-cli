@@ -22,7 +22,7 @@ import { deviceLogin } from "../device-login.js";
 import { formatActivation } from "../endpoint-format.js";
 import { readStoredAuth, saveLogin, updateStoredAuth } from "../store.js";
 import { err as c } from "../ui.js";
-import { holdNotesForTui, releaseNotes, writeNote } from "../terminal-note.js";
+import { holdNotesForTui, type NoteOptions, releaseNotes, writeNote } from "../terminal-note.js";
 import { liftResumeFlags, planClaude } from "./claude.js";
 import { resolveClaudeResume, transcriptCwd } from "./claude-resume.js";
 import { type ClaudeTranscript, findTranscriptById, listTranscriptsIn } from "./claude-transcripts.js";
@@ -85,8 +85,8 @@ export interface LaunchOptions {
 
 const DRY_RUN_KEY = "ditto_inf_<minted-at-launch>";
 
-function log(line: string): void {
-  writeNote(`${c("dim", "ditto:")} ${line}\n`);
+function log(line: string, options?: NoteOptions): void {
+  writeNote(`${c("dim", "ditto:")} ${line}\n`, options);
 }
 
 /**
@@ -732,13 +732,13 @@ async function runInTerminalWithRemote(harness: Harness, plan: HarnessPlan, ctx:
   const onTerm = () => pty.kill();
   process.on("SIGTERM", onTerm);
   process.on("SIGHUP", onTerm);
-  // The harness now owns the screen: status notes wait for a quiet beat in its
-  // painting and then write wrapped in save/restore-cursor, instead of pasting
-  // over the agent's text mid-frame (issue #61).
-  holdNotesForTui(() => pty.quietFor());
+  // The harness now owns the screen: status notes go to the notes log and are
+  // replayed after it exits, instead of painting into its prompt box (issue
+  // #61, DITTO-249).
+  holdNotesForTui();
   // Announce in the background; the harness is already on screen.
   void session.start().then((ok) => {
-    if (ok) log(`${c("green", "remote control on")} — send prompts from the Ditto app to session ${c("bold", ctx.sessionId)}`);
+    if (ok) log(`${c("green", "remote control on")} — send prompts from the Ditto app to session ${c("bold", ctx.sessionId)}`, { transient: true });
     else log("remote control: backend not reachable yet; retrying in the background");
   });
   try {
