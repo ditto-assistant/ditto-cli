@@ -47,7 +47,7 @@ The built-in `GITHUB_TOKEN` cannot push the generated version commit through the
 
 `.depot/workflows/ci.yml` runs `npm run verify` (typecheck, build, tests, and pack dry-run) on pull requests and pushes to `main`. Before pushing affected changes, run `depot ci run --workflow .depot/workflows/ci.yml --job verify`. After pushing, inspect GitHub checks at the current PR head and use `depot ci diagnose` and `depot ci logs` for Depot failures.
 
-The existing GitHub `CLI verification` workflow stays enabled during migration: Depot registers automatic triggers only after its workflow lands on the default branch. Retire `.github/workflows/ci.yml` in a follow-up after observing a successful automatic Depot run on the landed commit and confirming the required check contexts. Keep the `Release` workflow on GitHub-hosted runners for npm trusted publishing; do not duplicate publishing in Depot or copy `RELEASE_TOKEN` there.
+The existing GitHub `CLI verification` workflow stays enabled during migration so its results can be compared with Depot. Retire `.github/workflows/ci.yml` in a follow-up after observing a successful automatic Depot run on the landed commit and confirming the required check contexts. Keep the `Release` workflow on GitHub-hosted runners for npm trusted publishing; do not duplicate publishing in Depot or copy `RELEASE_TOKEN` there.
 
 ## Local development
 
