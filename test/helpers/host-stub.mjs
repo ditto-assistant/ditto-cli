@@ -14,6 +14,7 @@ export function startHostStub({ apiKey = "ditto_mcp_test", endpoints = [ALPHA] }
   const sockets = [];
   const attachments = new Map();
   const waiters = [];
+  let refusing = false;
 
   const notify = () => {
     for (const w of [...waiters]) {
@@ -68,6 +69,11 @@ export function startHostStub({ apiKey = "ditto_mcp_test", endpoints = [ALPHA] }
   const wss = new WebSocketServer({ noServer: true });
   server.on("upgrade", (req, socket, head) => {
     if (req.url !== "/api/v5/hosts/ws") {
+      socket.destroy();
+      return;
+    }
+    if (refusing) {
+      socket.write("HTTP/1.1 503 Service Unavailable\r\n\r\n");
       socket.destroy();
       return;
     }
@@ -131,6 +137,10 @@ export function startHostStub({ apiKey = "ditto_mcp_test", endpoints = [ALPHA] }
             };
             waiters.push({ pred, from, resolve: done });
           });
+        },
+        /** While true, new host connections are refused with a 503 (a backend that is down). */
+        refuseConnections(on) {
+          refusing = on;
         },
         /** Closes every host connection server-side (simulates a backend restart). */
         dropClients() {

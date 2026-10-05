@@ -41,6 +41,12 @@ export interface HostClientOptions {
   name?: string;
   /** Called for status lines; defaults to silence. */
   log?: (line: string) => void;
+  /**
+   * How long a dropped connection may stay down before it is reported. The
+   * backend drops every host socket on deploy and they are back within a
+   * couple of seconds, so a blip that recovers inside this window says nothing.
+   */
+  quietReconnectMs?: number;
   /** Overrides for tests. */
   heartbeatSeconds?: number;
   reconnectBaseMs?: number;
@@ -71,6 +77,10 @@ export class HostClient {
   private readonly seenTurns: string[] = [];
   private readonly seenSet = new Set<string>();
   private welcomeWaiters: Array<() => void> = [];
+  /** Pending report of a drop, cancelled if the connection comes back first. */
+  private outageTimer?: NodeJS.Timeout;
+  /** True once a drop has been reported, until the next welcome. */
+  private outageReported = false;
 
   constructor(options: HostClientOptions) {
     this.options = options;
@@ -98,7 +108,11 @@ export class HostClient {
       try {
         await this.connectOnce();
       } catch (err) {
-        this.options.log?.(`remote control: ${err instanceof Error ? err.message : String(err)}`);
+        // While a drop is pending or already reported, every retry fails the
+        // same way; one line about the outage is enough.
+        if (!this.outageTimer && !this.outageReported) {
+          this.options.log?.(`remote control: ${err instanceof Error ? err.message : String(err)}`);
+        }
       }
       if (this.closing) return;
       const base = this.options.reconnectBaseMs ?? 1000;
@@ -156,7 +170,7 @@ export class HostClient {
         this.stopHeartbeat();
         const wasConnected = this.connected;
         this.connected = false;
-        if (wasConnected && !this.closing) this.options.log?.(`remote control: disconnected (${event.code}); reconnecting`);
+        if (wasConnected && !this.closing) this.noteDrop(event.code);
         if (welcomed) {
           if (!settled) {
             settled = true;
@@ -169,7 +183,27 @@ export class HostClient {
     });
   }
 
+  /** Reports a drop only if it outlasts quietReconnectMs. */
+  private noteDrop(code: number): void {
+    if (this.outageTimer || this.outageReported) return;
+    this.outageTimer = setTimeout(() => {
+      this.outageTimer = undefined;
+      if (this.closing || this.connected) return;
+      this.outageReported = true;
+      this.options.log?.(`remote control: disconnected (${code}); reconnecting in the background`);
+    }, this.options.quietReconnectMs ?? 15_000);
+    this.outageTimer.unref?.();
+  }
+
+  private clearOutage(): void {
+    if (this.outageTimer) clearTimeout(this.outageTimer);
+    this.outageTimer = undefined;
+    this.outageReported = false;
+  }
+
   private onWelcome(frame: WelcomeFrame): void {
+    if (this.outageReported) this.options.log?.("remote control: reconnected");
+    this.clearOutage();
     this.connected = true;
     this.attempt = 0;
     this.missedPongs = 0;
@@ -231,7 +265,7 @@ export class HostClient {
     this.stopHeartbeat();
     this.heartbeat = setInterval(() => {
       if (this.missedPongs >= 3) {
-        this.options.log?.("remote control: heartbeat lost; reconnecting");
+        // Reported through the close handler, like any other drop.
         this.socket?.close(4000, "heartbeat lost");
         return;
       }
@@ -282,6 +316,7 @@ export class HostClient {
   close(): void {
     this.closing = true;
     this.stopHeartbeat();
+    this.clearOutage();
     for (const id of [...this.sessions.keys()]) this.closed(id);
     this.socket?.close(1000, "host exiting");
     this.socket = undefined;

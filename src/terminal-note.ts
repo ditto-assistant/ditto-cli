@@ -1,79 +1,73 @@
+import { appendFileSync, mkdirSync } from "node:fs";
+import path from "node:path";
+import { configDir } from "./config.js";
+
 /**
- * Writes a status note to stderr without garbling a full-screen TUI that is
- * redrawing on stdout. A terminal is one character grid: a note landing
- * between two of the harness's paint calls is pasted at the cursor position —
- * i.e. on top of the agent's text — and the next cursor-home repaint strands
- * the fragment (see issue #61).
+ * Writes a status note to stderr without painting over a full-screen TUI.
  *
- * While a TUI session is active, a note is held until the harness has been
- * quiet for a beat (between frames / between turns), then written wrapped in
- * save/restore cursor (DECSC/DECRC) so it leaves the cursor where the harness
- * left it. When nothing owns the screen the note is written straight through.
- * Anything still held when the harness exits flushes bare: nothing repaints
- * after exit, so the epilogue cannot collide with a frame.
+ * A terminal is one character grid, and a write lands wherever the cursor is.
+ * While Claude Code or Codex owns the screen that is the harness's own input
+ * caret, so a note shows up inside its prompt box, the harness's renderer does
+ * not know the characters are there and leaves them stranded until it redraws
+ * that line, and a trailing newline on the last row scrolls its whole frame
+ * up (issue #61, DITTO-249). No timing or save/restore-cursor trick fixes
+ * that, so while a TUI session is active nothing is written to the terminal:
+ * notes are appended to notesLogPath() and replayed on stderr when the harness
+ * exits and nothing repaints any more. When nothing owns the screen a note is
+ * written straight through.
  */
-const DECSC = "7";
-const DECRC = "8";
 
 let active = false;
 let pending: string[] = [];
-let timer: NodeJS.Timeout | undefined;
-/** Milliseconds of screen silence after which a note is safe to print. */
-let quietMs = 250;
-/** Reports how long the harness has not painted; null when no session. */
-let quietFor: (() => number) | null = null;
 
-function flushPending(): void {
-  if (timer) {
-    clearTimeout(timer);
-    timer = undefined;
+export interface NoteOptions {
+  /**
+   * Only meaningful while it is current ("remote control on"): logged, but not
+   * replayed after the harness exits, where it would read as stale news.
+   */
+  transient?: boolean;
+}
+
+/** Where notes go while a TUI owns the screen. */
+export function notesLogPath(): string {
+  return path.join(configDir(), "logs", "notes.log");
+}
+
+// Strips SGR colour codes for the log file.
+const SGR = /\u001b\[[0-9;]*m/g;
+
+function appendToLog(line: string): void {
+  try {
+    const file = notesLogPath();
+    mkdirSync(path.dirname(file), { recursive: true });
+    const text = line.replace(SGR, "").trimEnd();
+    if (text) appendFileSync(file, `${new Date().toISOString()} ${text}\n`);
+  } catch {
+    // A status note is never worth failing the session over.
   }
-  const lines = pending;
-  pending = [];
-  for (const line of lines) process.stderr.write(`${DECSC}${line}${DECRC}`);
 }
 
-function scheduleFlush(): void {
-  if (timer) return;
-  const tick = () => {
-    timer = undefined;
-    if (!active) return;
-    if (!quietFor || quietFor() >= quietMs) flushPending();
-    else scheduleFlush();
-  };
-  timer = setTimeout(tick, Math.max(20, quietMs / 5));
-  timer.unref?.();
-}
-
-/** Call when a TUI harness takes over the screen; notes defer until it is quiet. */
-export function holdNotesForTui(quietProbe: () => number, holdQuietMs = 250): void {
+/** Call when a TUI harness takes over the screen; notes go to the log until it exits. */
+export function holdNotesForTui(): void {
   active = true;
-  quietFor = quietProbe;
-  quietMs = holdQuietMs;
-  scheduleFlush();
 }
 
-/** Call when the harness exits; flushes anything still deferred, bare. */
+/** Call when the harness exits; replays the notes held while it ran. */
 export function releaseNotes(): void {
-  if (timer) {
-    clearTimeout(timer);
-    timer = undefined;
-  }
   if (!active) return;
   active = false;
-  quietFor = null;
   const lines = pending;
   pending = [];
   for (const line of lines) process.stderr.write(line);
 }
 
-export function writeNote(line: string): void {
+export function writeNote(line: string, options: NoteOptions = {}): void {
   if (!active) {
     process.stderr.write(line);
     return;
   }
-  pending.push(line);
-  scheduleFlush();
+  appendToLog(line);
+  if (!options.transient) pending.push(line);
 }
 
 /** Test hook. */
