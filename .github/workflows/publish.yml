@@ -15,14 +15,19 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Require release credentials
+      # The real checkout authenticates with RELEASE_TOKEN, so read the check
+      # with the built-in token first: an expired release token should fail
+      # here, by name, not at checkout with a git credential prompt error.
+      - uses: actions/checkout@v4
+        with:
+          path: .release-check
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+
+      - name: Require a working release token
         env:
           RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-        run: |
-          if [ -z "$RELEASE_TOKEN" ]; then
-            echo "::error::Configure RELEASE_TOKEN with an admin-owned token authorized to bypass main protection."
-            exit 1
-          fi
+        run: .release-check/.github/scripts/check-release-token.sh
 
       - uses: actions/checkout@v4
         with:

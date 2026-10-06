@@ -1,0 +1,27 @@
+name: Release token expiry
+
+# A lapsed RELEASE_TOKEN stops every release with no warning (DITTO-249 sat
+# merged but unpublished because of one). Check weekly and fail two weeks
+# ahead, so the failed run is the reminder to rotate it.
+on:
+  schedule:
+    - cron: "17 14 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+
+      - name: Fail if RELEASE_TOKEN is rejected or expires within 14 days
+        env:
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: .github/scripts/check-release-token.sh 14
