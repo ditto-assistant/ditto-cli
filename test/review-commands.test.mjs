@@ -31,6 +31,10 @@ const FINDING_OPEN = {
 const FINDING_DISMISSED = { id: "f_0a073e36dfb26698", path: "pkg/b.go", line: 7, severity: "low", title: "Old one", status: "withheld", withheldReason: "dismissed", dismissed: true, dismissReason: "no", feedback: { mine: "wrong" } };
 const DETAIL = { run: FRUN, result: { findings: [FINDING_OPEN, FINDING_DISMISSED] }, repository: { id: REPO.id, fullName: REPO.fullName } };
 const LATEST = `/api/v5/review/runs/latest?repository=${encodeURIComponent(REPO.fullName)}&pr=12`;
+// An earlier run of the same PR, whose thread a later push left behind (DITTO-690).
+const ORUN = { ...FRUN, id: "77777777-7777-7777-7777-777777777777", headSha: "1234567890abcdef" };
+const FINDING_EARLIER = { ...FINDING_OPEN, id: "f_earlier", title: "Raised on the earlier head", commentUrl: "https://github.com/ditto-assistant/console/pull/12#discussion_r777" };
+const EARLIER_DETAIL = { run: ORUN, result: { findings: [FINDING_EARLIER] }, repository: DETAIL.repository };
 const FINDING_BASE = `/api/v5/review/runs/${FRUN.id}/findings/${FINDING_OPEN.id}`;
 
 function startStub({ statuses = ["completed"], refusal, detailDelay = 0 } = {}) {
@@ -65,6 +69,12 @@ function startStub({ statuses = ["completed"], refusal, detailDelay = 0 } = {}) 
       // The PR's newest run: 404 in the personal workspace, found in the organization.
       if (req.url === LATEST && req.method === "GET") return json(404, { message: "not found" });
       if (req.url === `${LATEST}&company=${COMPANY.id}` && req.method === "GET") return json(200, DETAIL);
+      // The backend's comment lookup (backend#3352) knows only the earlier
+      // run's thread; any other comment is 404, as on an older backend.
+      if (req.url === `${LATEST}&comment=777&company=${COMPANY.id}` && req.method === "GET") return json(200, EARLIER_DETAIL);
+      if (req.url === `/api/v5/review/runs/${ORUN.id}/findings/f_earlier/dismiss?company=${COMPANY.id}` && req.method === "POST") {
+        return json(200, { runId: ORUN.id, findingId: "f_earlier", githubStatus: "updated", githubUpdated: true, threadResolved: true, alreadyDismissed: false, dismissal: { id: "d2", reason: JSON.parse(body).reason } });
+      }
       if (req.url === `/api/v5/review/runs/${FRUN.id}?company=${COMPANY.id}` && req.method === "GET") return json(200, DETAIL);
       if (req.url === `${FINDING_BASE}/dismiss?company=${COMPANY.id}` && req.method === "POST") {
         return json(200, { runId: FRUN.id, findingId: FINDING_OPEN.id, githubStatus: "updated", githubUpdated: true, threadResolved: true, alreadyDismissed: false, replyUrl: `${FINDING_OPEN.commentUrl}0`, dismissal: { id: "d1", reason: JSON.parse(body).reason } });
@@ -332,6 +342,7 @@ test("review dismiss reports a comment that is not in the newest run", async () 
     const out = await run(stub.base, ["review", "dismiss", "https://github.com/ditto-assistant/console/pull/12#discussion_r999", "--reason", "x", "--org", "omni-aura"]);
     assert.notEqual(out.status, 0);
     assert.match(out.stderr, /discussion_r999 is not in the newest Ditto Review run of ditto-assistant\/console#12/);
+    assert.match(out.stderr, /<run-id>:<finding-id>/);
     assert.equal(stub.calls.some((c) => c.method === "POST"), false);
   } finally {
     stub.close();
@@ -363,6 +374,37 @@ test("review undismiss by run:finding sends the DELETE and relays the GitHub not
     const del = stub.calls.find((c) => c.method === "DELETE");
     assert.equal(del.url, `${FINDING_BASE}/dismiss?company=${COMPANY.id}`);
     assert.match(out.stdout, /Undismissed f_6eb378e97faaaf48 \(pkg\/a\.go:358\)\.\n  Ditto does not reopen the review thread on GitHub\./);
+  } finally {
+    stub.close();
+  }
+});
+
+test("review dismiss by the URL of a thread an earlier run posted dismisses that run's finding", async () => {
+  const stub = await startStub();
+  try {
+    const out = await run(stub.base, ["review", "dismiss", FINDING_EARLIER.commentUrl, "--reason", "Declined: pinned by a test.", "--org", "omni-aura"]);
+    assert.equal(out.status, 0, out.stderr);
+    assert.ok(stub.calls.some((c) => c.url === `${LATEST}&comment=777&company=${COMPANY.id}`), "the comment lookup was not asked");
+    const post = stub.calls.find((c) => c.method === "POST");
+    assert.equal(post.url, `/api/v5/review/runs/${ORUN.id}/findings/f_earlier/dismiss?company=${COMPANY.id}`);
+    assert.deepEqual(post.body, { reason: "Declined: pinned by a test." });
+  } finally {
+    stub.close();
+  }
+});
+
+test("review set --fast on sends fastMode and reports the cost", async () => {
+  const stub = await startStub();
+  try {
+    const out = await run(stub.base, ["review", "set", "ditto-assistant/console", "--fast", "on", "--org", "omni-aura"]);
+    assert.equal(out.status, 0, out.stderr);
+    const put = stub.calls.find((c) => c.method === "PUT");
+    assert.equal(put.body.fastMode, true);
+    assert.equal(put.body.maxMinutes, REPO.maxMinutes, "other settings are sent back unchanged");
+    assert.match(out.stdout, /fast mode\s+off → on \(GLM-5\.3-FlashX: faster, about 2\.5× the per-token cost\)/);
+    const bad = await run(stub.base, ["review", "set", "ditto-assistant/console", "--fast", "yes", "--org", "omni-aura"]);
+    assert.notEqual(bad.status, 0);
+    assert.match(bad.stderr, /--fast must be on or off/);
   } finally {
     stub.close();
   }

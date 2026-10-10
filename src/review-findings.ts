@@ -160,11 +160,17 @@ async function chosenScope(options: ScopeOptions): Promise<Company | undefined> 
   return resolveCompany(wanted);
 }
 
-/** The run detail of a PR's newest run in one workspace; undefined on 404. */
-async function latestRunIn(company: Company | undefined, pull: PullRef): Promise<ReviewRunDetail | undefined> {
+/**
+ * The run detail of a PR's newest run in one workspace; undefined on 404.
+ * With commentId, the newest run whose findings link that review comment:
+ * the run that posted the thread, which later pushes may have followed with
+ * newer runs (backend#3352).
+ */
+async function latestRunIn(company: Company | undefined, pull: PullRef, commentId?: string): Promise<ReviewRunDetail | undefined> {
+  const comment = commentId ? `&comment=${encodeURIComponent(commentId)}` : "";
   try {
     return await apiFetch<ReviewRunDetail>(
-      `/api/v5/review/runs/latest?repository=${encodeURIComponent(pull.fullName)}&pr=${pull.number}${scopeSuffix(company)}`,
+      `/api/v5/review/runs/latest?repository=${encodeURIComponent(pull.fullName)}&pr=${pull.number}${comment}${scopeSuffix(company)}`,
     );
   } catch (error) {
     if (error instanceof ApiError && error.status === 404) return undefined;
@@ -179,19 +185,23 @@ async function latestRunIn(company: Company | undefined, pull: PullRef): Promise
  * URL already names the repository and nobody wants to look up which
  * organization reviews it.
  */
-export async function findLatestRun(options: ScopeOptions, pull: PullRef): Promise<{ company: Company | undefined; detail: ReviewRunDetail }> {
+export async function findLatestRun(
+  options: ScopeOptions,
+  pull: PullRef,
+  commentId?: string,
+): Promise<{ company: Company | undefined; detail: ReviewRunDetail }> {
   const chosen = await chosenScope(options);
   if (chosen || options.org) {
-    const detail = await latestRunIn(chosen, pull);
+    const detail = await latestRunIn(chosen, pull, commentId);
     if (!detail) throw new Error(`Ditto Review has no run for ${pull.fullName}#${pull.number} in ${chosen?.slug ?? "your personal workspace"}.`);
     return { company: chosen, detail };
   }
   const tried: string[] = [];
-  const personal = await latestRunIn(undefined, pull);
+  const personal = await latestRunIn(undefined, pull, commentId);
   if (personal) return { company: undefined, detail: personal };
   tried.push("your personal workspace");
   for (const company of await listCompanies()) {
-    const detail = await latestRunIn(company, pull);
+    const detail = await latestRunIn(company, pull, commentId);
     if (detail) return { company, detail };
     tried.push(company.slug);
   }
@@ -220,7 +230,11 @@ export async function resolveFinding(
     pull = parsePullRef(options.pr);
     if (!pull) throw new Error(`--pr ${options.pr} is not a pull request URL or owner/name#N`);
   }
-  const { company, detail } = await findLatestRun(options, pull);
+  // A comment URL names the run that posted it, which need not be the newest
+  // (DITTO-690). A backend without that lookup answers 404, as does a comment
+  // no run links: then the newest run is searched as before.
+  const byComment = ref.kind === "comment" ? await findLatestRun(options, pull, ref.commentId).catch(() => undefined) : undefined;
+  const { company, detail } = byComment ?? (await findLatestRun(options, pull));
   const finding =
     ref.kind === "comment"
       ? detail.result.findings.find((f) => f.commentUrl?.endsWith(`discussion_r${ref.commentId}`))
@@ -229,7 +243,7 @@ export async function resolveFinding(
     const what = ref.kind === "comment" ? `the review comment discussion_r${ref.commentId}` : `finding ${ref.findingId}`;
     throw new Error(
       `${what} is not in the newest Ditto Review run of ${pull.fullName}#${pull.number} (run ${detail.run.id}, head ${detail.run.headSha.slice(0, 8)}). ` +
-        `List it with: heyditto review findings ${pull.fullName}#${pull.number}`,
+        `List it with: heyditto review findings ${pull.fullName}#${pull.number}, or name it directly as <run-id>:<finding-id>.`,
     );
   }
   return { company, runId: detail.run.id, finding, detail };
