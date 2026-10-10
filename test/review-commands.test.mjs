@@ -409,3 +409,50 @@ test("review set --fast on sends fastMode and reports the cost", async () => {
     stub.close();
   }
 });
+
+test("review add sets a repository up with the workspace's review endpoint and the defaults", async () => {
+  const stub = await startStub();
+  try {
+    const out = await run(stub.base, ["review", "add", "ditto-assistant/ditto-cli", "--verdicts", "on", "--org", "omni-aura"]);
+    assert.equal(out.status, 0, out.stderr);
+    const put = stub.calls.find((c) => c.method === "PUT");
+    assert.ok(put, "no PUT was sent");
+    assert.equal(put.url, `/api/v5/review/repositories?company=${COMPANY.id}`);
+    assert.deepEqual(put.body, {
+      fullName: "ditto-assistant/ditto-cli", endpointId: REPO.endpointId, enabled: true, verify: true, reviewDrafts: false,
+      instructions: "", budgetCents: 100, maxMinutes: 30, reviewVerdicts: true,
+    });
+    assert.equal(put.body.ifRevision, undefined, "a new repository is not saved at a revision");
+    assert.match(out.stdout, /Added ditto-assistant\/ditto-cli to Ditto Review in omni-aura/);
+    assert.match(out.stdout, /verdicts\s+on \(approve or request changes\)/);
+  } finally {
+    stub.close();
+  }
+});
+
+test("review add takes --endpoint and the limits, and refuses before any write", async () => {
+  const stub = await startStub();
+  try {
+    const out = await run(stub.base, ["review", "add", "acme/api", "--endpoint", "99999999-9999-9999-9999-999999999999", "--max-minutes", "20", "--budget-cents", "300", "--fast", "on", "--org", "omni-aura"]);
+    assert.equal(out.status, 0, out.stderr);
+    const put = stub.calls.find((c) => c.method === "PUT");
+    assert.equal(put.body.endpointId, "99999999-9999-9999-9999-999999999999");
+    assert.equal(put.body.maxMinutes, 20);
+    assert.equal(put.body.budgetCents, 300);
+    assert.equal(put.body.fastMode, true);
+    assert.equal("reviewVerdicts" in put.body, false, "an unnamed setting is left to the backend's default");
+    const writes = () => stub.calls.filter((c) => c.method === "PUT").length;
+    const existing = await run(stub.base, ["review", "add", "Ditto-Assistant/Console", "--org", "omni-aura"]);
+    assert.notEqual(existing.status, 0);
+    assert.match(existing.stderr, /already set up for Ditto Review in omni-aura; change it with `heyditto review set/);
+    const badName = await run(stub.base, ["review", "add", "not-a-repo", "--org", "omni-aura"]);
+    assert.notEqual(badName.status, 0);
+    assert.match(badName.stderr, /pass owner\/name/);
+    const badFlag = await run(stub.base, ["review", "add", "acme/api", "--verdicts", "yes", "--org", "omni-aura"]);
+    assert.notEqual(badFlag.status, 0);
+    assert.match(badFlag.stderr, /--verdicts must be on or off/);
+    assert.equal(writes(), 1, "a refused add wrote nothing");
+  } finally {
+    stub.close();
+  }
+});

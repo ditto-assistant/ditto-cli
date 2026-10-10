@@ -366,6 +366,88 @@ export async function cmdReviewSet(fullName: string, options: SetOptions): Promi
   process.stdout.write(`${lines.join("\n")}\n`);
 }
 
+interface AddOptions extends ScopeOptions {
+  endpoint?: string;
+  maxMinutes?: string;
+  budgetCents?: string;
+  fast?: string;
+  verdicts?: string;
+}
+
+/** What a new repository starts with when a flag does not say (the console's defaults). */
+const ADD_DEFAULT_MAX_MINUTES = 30;
+const ADD_DEFAULT_BUDGET_CENTS = 100;
+
+function onOff(flag: string, value: string | undefined): boolean | undefined {
+  if (value === undefined) return undefined;
+  if (value !== "on" && value !== "off") throw new Error(`${flag} must be on or off`);
+  return value === "on";
+}
+
+/**
+ * Sets a GitHub repository up for Ditto Review in the workspace, as the
+ * console's "Add repository" does: one PUT of its settings. The backend
+ * links the repository through your GitHub connection (you must be an admin
+ * of it, with the Ditto Code app installed on it). Without --endpoint the
+ * review endpoint the workspace's repositories already use is reused.
+ */
+export async function cmdReviewAdd(fullName: string, options: AddOptions): Promise<void> {
+  const name = fullName.trim();
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(name)) throw new Error(`${fullName} is not a repository; pass owner/name`);
+  const maxMinutes =
+    options.maxMinutes === undefined ? ADD_DEFAULT_MAX_MINUTES : intFlag("--max-minutes", options.maxMinutes, MIN_MAX_MINUTES, MAX_MAX_MINUTES);
+  const budgetCents =
+    options.budgetCents === undefined ? ADD_DEFAULT_BUDGET_CENTS : intFlag("--budget-cents", options.budgetCents, 1, MAX_BUDGET_CENTS);
+  const fast = onOff("--fast", options.fast);
+  const verdicts = onOff("--verdicts", options.verdicts);
+  const company = await resolveScope(options);
+  const repos = await listReviewRepositories(company);
+  const where = company ? ` in ${company.slug}` : " in your personal workspace";
+  if (repos.some((r) => r.fullName.toLowerCase() === name.toLowerCase())) {
+    throw new Error(`${name} is already set up for Ditto Review${where}; change it with \`heyditto review set ${name} …\``);
+  }
+  let endpointId = options.endpoint?.trim();
+  if (!endpointId) {
+    const used = [...new Set(repos.map((r) => r.endpointId).filter(Boolean))];
+    if (used.length !== 1) {
+      throw new Error(
+        used.length === 0
+          ? `no repository${where} has a review endpoint to reuse; pass --endpoint <id>, or add the first repository from the console (developer.heyditto.ai/review)`
+          : `this workspace's repositories use ${used.length} review endpoints (${used.join(", ")}); pass --endpoint <id> to choose one`,
+      );
+    }
+    endpointId = used[0]!;
+  }
+  const body: Record<string, unknown> = {
+    fullName: name,
+    endpointId,
+    enabled: true,
+    verify: true,
+    reviewDrafts: false,
+    instructions: "",
+    budgetCents,
+    maxMinutes,
+    ...(fast !== undefined ? { fastMode: fast } : {}),
+    ...(verdicts !== undefined ? { reviewVerdicts: verdicts } : {}),
+  };
+  const saved = await apiFetch<ReviewRepository>(`/api/v5/review/repositories${scopeQuery(company)}`, { method: "PUT", body });
+  if (isJSON(options)) {
+    process.stdout.write(`${JSON.stringify(saved, null, 2)}\n`);
+    return;
+  }
+  const lines = [
+    `Added ${saved.fullName ?? name} to Ditto Review${where}:`,
+    `  reviews     ${saved.enabled === false ? "off" : "on"} (${saved.trigger ?? "auto"}, ${saved.mode ?? "suggest"})`,
+    `  time limit  ${saved.maxMinutes ?? maxMinutes} min`,
+    `  budget/run  ${money(saved.budgetCents ?? budgetCents)}`,
+    `  endpoint    ${saved.endpointId ?? endpointId}`,
+  ];
+  if (saved.reviewVerdicts !== undefined) lines.push(`  verdicts    ${saved.reviewVerdicts ? "on (approve or request changes)" : "off (comments only)"}`);
+  if (saved.fastMode !== undefined) lines.push(`  fast mode   ${saved.fastMode ? "on" : "off"}`);
+  lines.push(`Change any setting: heyditto review set ${saved.fullName ?? name} --help`);
+  process.stdout.write(`${lines.join("\n")}\n`);
+}
+
 export function registerReviewCommands(
   program: Command,
   addExamples: (c: Command, ex: string) => Command,
@@ -410,6 +492,22 @@ export function registerReviewCommands(
       : "request cancellation of a queued/running review or its CI watch")
       .argument("<run-id>", "review run UUID")).action((id: string, options: ScopeOptions) => cmdReviewAction(id, action, options));
   }
+  addExamples(
+    review
+      .command("add")
+      .description("set a GitHub repository up for Ditto Review (you must be an admin of it, with the Ditto Code app installed)")
+      .argument("<repository>", "owner/name")
+      .option("--endpoint <id>", "review endpoint to bill to (default: the one this workspace's repositories use)")
+      .option("--max-minutes <n>", `time limit of one review (${MIN_MAX_MINUTES}-${MAX_MAX_MINUTES}, default ${ADD_DEFAULT_MAX_MINUTES})`)
+      .option("--budget-cents <n>", `spend limit of one review, in cents (1-10000, default ${ADD_DEFAULT_BUDGET_CENTS})`)
+      .option("--verdicts <on|off>", "approve or request changes after each review (default off)")
+      .option("--fast <on|off>", "fast mode: review on GLM-5.3-FlashX (faster, about 2.5x the per-token cost)")
+      .addOption(orgOption())
+      .addOption(outputOption())
+      .action(cmdReviewAdd),
+    `  heyditto review add ditto-assistant/ditto-cli --org omniaura --verdicts on
+  heyditto review add acme/api --budget-cents 300 --max-minutes 20 --endpoint 44444444-…`,
+  );
   addExamples(
     review
       .command("set")
