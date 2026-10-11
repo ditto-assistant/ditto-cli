@@ -42,6 +42,8 @@ export interface ReviewRepository {
   maxComments: number;
   autofixMaxPushes: number;
   monthlyBudgetUsd: number | null;
+  /** Fast mode: the review runs on GLM-5.3-FlashX (backend#3351). Absent from older backends. */
+  fastMode?: boolean;
   lastError?: string;
 }
 
@@ -54,6 +56,7 @@ interface SetOptions extends ScopeOptions {
   maxMinutes?: string;
   budgetCents?: string;
   enabled?: string;
+  fast?: string;
 }
 
 /** The server's bounds (backend reviewLimits). */
@@ -323,6 +326,10 @@ export async function cmdReviewSet(fullName: string, options: SetOptions): Promi
     if (options.enabled !== "on" && options.enabled !== "off") throw new Error("--enabled must be on or off");
     changes.enabled = options.enabled === "on";
   }
+  if (options.fast !== undefined) {
+    if (options.fast !== "on" && options.fast !== "off") throw new Error("--fast must be on or off");
+    changes.fastMode = options.fast === "on";
+  }
   if (Object.keys(changes).length === 0) {
     throw new Error("nothing to change; pass at least one --flag (see `heyditto review set --help`)");
   }
@@ -349,6 +356,13 @@ export async function cmdReviewSet(fullName: string, options: SetOptions): Promi
   if ("maxMinutes" in changes) lines.push(`  time limit  ${repo.maxMinutes} → ${after.maxMinutes} min`);
   if ("budgetCents" in changes) lines.push(`  budget/run  ${money(repo.budgetCents)} → ${money(after.budgetCents)}`);
   if ("enabled" in changes) lines.push(`  enabled     ${repo.enabled ? "on" : "off"} → ${after.enabled ? "on" : "off"}`);
+  if ("fastMode" in changes) {
+    if (saved.fastMode === undefined) {
+      lines.push("  fast mode   not saved: this Ditto backend does not support fast mode yet");
+    } else {
+      lines.push(`  fast mode   ${repo.fastMode ? "on" : "off"} → ${saved.fastMode ? "on" : "off"}${saved.fastMode ? " (GLM-5.3-FlashX: faster, about 2.5× the per-token cost)" : ""}`);
+    }
+  }
   process.stdout.write(`${lines.join("\n")}\n`);
 }
 
@@ -404,11 +418,13 @@ export function registerReviewCommands(
       .option("--max-minutes <n>", `time limit of one review (${MIN_MAX_MINUTES}-${MAX_MAX_MINUTES})`)
       .option("--budget-cents <n>", "spend limit of one review, in cents (1-10000)")
       .option("--enabled <on|off>", "review this repository's pull requests")
+      .option("--fast <on|off>", "fast mode: review on GLM-5.3-FlashX (faster, about 2.5x the per-token cost)")
       .addOption(orgOption())
       .addOption(outputOption())
       .action(cmdReviewSet),
     `  heyditto review set ditto-assistant/console --max-minutes 20 --org omni-aura
-  heyditto review set acme/api --budget-cents 300 --enabled on`,
+  heyditto review set acme/api --budget-cents 300 --enabled on
+  heyditto review set acme/api --fast on --org omniaura`,
   );
   registerReviewFindingCommands(review, addExamples, outputOption, orgOption);
 }
