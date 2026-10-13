@@ -30,6 +30,14 @@ export const DEFAULT_LAUNCH_EXPIRY: KeyExpiry = "1mo";
 /** Header the Ditto gateway groups turns by; every launch sends one. */
 export const SESSION_HEADER = "X-Ditto-Session-Id";
 
+/**
+ * Headers naming the harness and its installed version on every inference
+ * request. The router reads these first to pick version-specific request
+ * shaping and falls back to parsing the User-Agent when they are absent.
+ */
+export const HARNESS_HEADER = "X-Ditto-Harness";
+export const HARNESS_VERSION_HEADER = "X-Ditto-Harness-Version";
+
 /** Env var the Codex provider reads the endpoint key from. */
 export const CODEX_KEY_ENV = "DITTO_INFERENCE_API_KEY";
 
@@ -41,6 +49,12 @@ export interface PlanInput {
   apiKey: string;
   /** Ditto session id sent as X-Ditto-Session-Id. */
   sessionId: string;
+  /**
+   * Installed harness version (X.Y.Z from `<harness> --version`), sent as
+   * X-Ditto-Harness-Version. Undefined when it could not be read: the header
+   * is then omitted rather than guessed.
+   */
+  harnessVersion?: string;
   /** Model id to request; undefined leaves the harness default (gateway routes it). */
   model?: string;
   /** Harness-native session/thread id to resume, when resuming. */

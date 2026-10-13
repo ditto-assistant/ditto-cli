@@ -476,11 +476,19 @@ How the wiring works:
 
 - **Claude Code** gets `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` (a bearer
   token, which skips Claude's "use this API key?" prompt) and
-  `ANTHROPIC_CUSTOM_HEADERS` with the session id. Any inherited
-  `ANTHROPIC_API_KEY` is removed from the child environment.
+  `ANTHROPIC_CUSTOM_HEADERS` with the session id and harness headers, merged
+  into any custom headers you already set. Any inherited `ANTHROPIC_API_KEY`
+  is removed from the child environment.
 - **Codex** speaks the Responses API only, so the endpoint is injected as a
   `ditto` model provider via `-c` overrides (nothing is written to
-  `~/.codex/config.toml`) with the key in `DITTO_INFERENCE_API_KEY`.
+  `~/.codex/config.toml`) with the key in `DITTO_INFERENCE_API_KEY` and the
+  session id and harness headers in the provider's `http_headers`.
+- Every inference request names its harness in `X-Ditto-Harness` (`claude` or
+  `codex`) and, when `claude --version` / `codex --version` reports one, the
+  installed version in `X-Ditto-Harness-Version` (for example `2.1.296`). The
+  version is read once per launch; if it cannot be read, that header is left
+  out rather than guessed. The router uses them to adapt requests to the
+  harness release.
 
 ### `codex-app`
 

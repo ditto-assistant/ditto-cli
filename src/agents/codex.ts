@@ -1,8 +1,14 @@
+import { harnessHeaders } from "./harness-headers.js";
 import { CODEX_KEY_ENV, type HarnessPlan, type PlanInput, SESSION_HEADER } from "./types.js";
 
 /** Quotes a string as a TOML basic string for `codex -c key=value`. */
 export function tomlString(value: string): string {
   return JSON.stringify(value);
+}
+
+/** A TOML inline table of string pairs: `{"A"="1","B"="2"}`. */
+export function tomlInlineTable(entries: Array<[string, string]>): string {
+  return `{${entries.map(([k, v]) => `${tomlString(k)}=${tomlString(v)}`).join(",")}}`;
 }
 
 /**
@@ -12,7 +18,8 @@ export function tomlString(value: string): string {
  * the Responses wire, so the endpoint is injected as a dedicated `ditto`
  * model provider through `-c` overrides (nothing is written to
  * ~/.codex/config.toml). The session header rides on the provider's
- * http_headers so every request lands in the same Ditto thread.
+ * http_headers so every request lands in the same Ditto thread, next to
+ * X-Ditto-Harness / X-Ditto-Harness-Version for the router.
  */
 export function planCodex(input: PlanInput): HarnessPlan {
   const args: string[] = [];
@@ -41,7 +48,7 @@ export function planCodex(input: PlanInput): HarnessPlan {
     "-c",
     `model_providers.ditto.wire_api=${tomlString("responses")}`,
     "-c",
-    `model_providers.ditto.http_headers={${tomlString(SESSION_HEADER)}=${tomlString(input.sessionId)}}`,
+    `model_providers.ditto.http_headers=${tomlInlineTable([[SESSION_HEADER, input.sessionId], ...harnessHeaders("codex", input.harnessVersion)])}`,
   );
   if (input.model) args.push("-m", input.model);
 
