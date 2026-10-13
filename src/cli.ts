@@ -19,6 +19,7 @@ import { clearStoredKey, readStoredAuth, saveLogin, writeStoredAuth } from "./st
 import {
   cmdAgents,
   cmdSessions,
+  cmdSessionsPrune,
   cmdSessionsRm,
   registerEndpointCommands,
   registerHarnessCommands,
@@ -1275,6 +1276,23 @@ your own workspace or an app workspace.`,
     .description("forget a local session record (threads and traces are kept)")
     .argument("<id>", "Ditto session id")
     .action(cmdSessionsRm);
+  addExamples(
+    sessions
+      .command("prune")
+      .description(
+        "forget session records not launched recently, revoke the keys of launches that never cleaned up, and (--keys) sweep this machine's stranded launch keys",
+      )
+      .option("--older-than <age>", "prune records whose last launch is older than this (30m, 12h, 7d, 2w, 3mo)", "7d")
+      .option("--keep <n>", "always keep this many of the most recent records", "10")
+      .option("--keys", "also revoke launch keys from this machine (cli:<harness>:<hostname>) that no remaining record names")
+      .option("--dry-run", "print what would be forgotten and revoked, change nothing")
+      .option("--yes", "skip the confirmation prompt")
+      .option("--json", "print machine-readable output")
+      .action(cmdSessionsPrune),
+    `  heyditto sessions prune --dry-run
+  heyditto sessions prune --older-than 1d --keys
+  heyditto sessions prune --keep 0 --older-than 30d --yes --json`,
+  );
 
   program
     .command("logout")
