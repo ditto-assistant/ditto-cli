@@ -265,7 +265,7 @@ async function resolveEndpoint(
  * flow with the harness as the intent so the web page can offer the endpoint
  * picker; the browser hands back the key and (optionally) the chosen endpoint.
  */
-async function ensureLoggedIn(harness: Harness): Promise<SelectedEndpoint | undefined> {
+async function ensureLoggedIn(harness: Harness, endpoint: string | undefined): Promise<SelectedEndpoint | undefined> {
   const { key } = await resolveApiKey();
   if (key) return undefined;
   if (!interactive()) {
@@ -274,13 +274,17 @@ async function ensureLoggedIn(harness: Harness): Promise<SelectedEndpoint | unde
     return undefined;
   }
   log(`no Ditto login yet — opening your browser to sign in and pick an endpoint for ${harness === "claude" ? "Claude Code" : "Codex"}.`);
-  return browserLogin(harness);
+  return browserLogin(harness, endpoint);
 }
 
-/** Runs the browser device flow for a harness and saves the result. */
-async function browserLogin(harness: Harness): Promise<SelectedEndpoint | undefined> {
+/**
+ * Runs the browser device flow for a harness and saves the result. An endpoint
+ * the command already names is shown locked in the browser instead of a picker.
+ */
+async function browserLogin(harness: Harness, endpoint: string | undefined): Promise<SelectedEndpoint | undefined> {
   const result = await deviceLogin({
     intent: harness,
+    endpoint,
     onCode: (userCode, url) => {
       process.stderr.write(`\n  ${url}\n\n  Code: ${userCode}\n\n`);
       openInBrowser(url);
@@ -399,7 +403,8 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     if (!record.harnessSessionId) resumeLast = true;
   }
 
-  let selected = options.dryRun ? undefined : await ensureLoggedIn(harness);
+  const requestedEndpoint = options.endpoint ?? record?.endpointSlug;
+  let selected = options.dryRun ? undefined : await ensureLoggedIn(harness, requestedEndpoint);
   let catalog: Awaited<ReturnType<typeof listEndpoints>>;
   try {
     catalog = await listEndpoints();
@@ -410,10 +415,10 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     const { source } = await resolveApiKey();
     if (source !== "config") throw err;
     log("your saved Ditto login is no longer valid — opening your browser to sign in again.");
-    selected = await browserLogin(harness);
+    selected = await browserLogin(harness, requestedEndpoint);
     catalog = await listEndpoints();
   }
-  const endpoint = await resolveEndpoint(options.endpoint ?? record?.endpointSlug, catalog.endpoints, selected);
+  const endpoint = await resolveEndpoint(requestedEndpoint, catalog.endpoints, selected);
   await assertEndpointActive(endpoint);
 
   let cwd = process.cwd();

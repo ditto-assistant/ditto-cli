@@ -242,7 +242,7 @@ async function resolveEndpointFor(options: CodexAppOptions, selected: SelectedEn
   return { endpoint: await pickEndpoint(endpoints, stored), catalog };
 }
 
-async function ensureLogin(): Promise<SelectedEndpoint | undefined> {
+async function ensureLogin(endpoint: string | undefined): Promise<SelectedEndpoint | undefined> {
   const { key } = await resolveApiKey();
   if (key) return undefined;
   if (!interactive()) {
@@ -252,6 +252,7 @@ async function ensureLogin(): Promise<SelectedEndpoint | undefined> {
   log("no Ditto login yet — opening your browser to sign in and pick an endpoint for the Codex app.");
   const result = await deviceLogin({
     intent: "codex",
+    endpoint,
     onCode: (userCode, url) => {
       process.stderr.write(`\n  ${url}\n\n  Code: ${userCode}\n\n`);
       openInBrowser(url);
@@ -327,7 +328,7 @@ export async function runCodexApp(options: CodexAppOptions): Promise<void> {
   const authBackupPath = `${authPath}.pre-ditto`;
   const configBackupPath = `${configPath}.pre-ditto`;
 
-  const selected = options.dryRun ? undefined : await ensureLogin();
+  const selected = options.dryRun ? undefined : await ensureLogin(options.endpoint);
   const { endpoint, catalog } = await resolveEndpointFor(options, selected);
   if (!options.dryRun) await assertEndpointActive(endpoint);
 
