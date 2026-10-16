@@ -5,6 +5,11 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 export interface DeviceLoginHooks {
   /** Why the browser is being opened; the web page specializes its copy on it. */
   intent: DeviceIntent;
+  /**
+   * Endpoint the command already names (`--endpoint`). The page then shows
+   * only that endpoint instead of a picker whose choice would be ignored.
+   */
+  endpoint?: string;
   /** Called with the code and the URL the user must visit. */
   onCode: (userCode: string, url: string) => void;
   /** Called once per poll while waiting. */
@@ -19,11 +24,22 @@ export interface DeviceLoginResult {
   setDefault?: boolean;
 }
 
-/** Builds the URL to open: the backend's complete URI, else the bare page plus the code. */
-export function verificationLink(code: { verification_url: string; verification_uri_complete?: string; user_code: string }): string {
-  if (code.verification_uri_complete) return code.verification_uri_complete;
-  const sep = code.verification_url.includes("?") ? "&" : "?";
-  return `${code.verification_url}${sep}code=${encodeURIComponent(code.user_code)}`;
+/**
+ * Builds the URL to open: the backend's complete URI, else the bare page plus
+ * the code, with the requested endpoint appended when there is one.
+ */
+export function verificationLink(
+  code: { verification_url: string; verification_uri_complete?: string; user_code: string },
+  endpoint?: string,
+): string {
+  const link = code.verification_uri_complete || withParam(code.verification_url, "code", code.user_code);
+  const wanted = endpoint?.trim();
+  return wanted ? withParam(link, "endpoint", wanted) : link;
+}
+
+function withParam(url: string, name: string, value: string): string {
+  const sep = url.includes("?") ? "&" : "?";
+  return `${url}${sep}${name}=${encodeURIComponent(value)}`;
 }
 
 /**
@@ -33,7 +49,7 @@ export function verificationLink(code: { verification_url: string; verification_
  */
 export async function deviceLogin(hooks: DeviceLoginHooks): Promise<DeviceLoginResult> {
   const code = await requestDeviceCode({ intent: hooks.intent });
-  hooks.onCode(code.user_code, verificationLink(code));
+  hooks.onCode(code.user_code, verificationLink(code, hooks.endpoint));
   const deadline = Date.now() + Math.max(30, code.expires_in || 600) * 1000;
   let interval = Math.max(2, code.interval || 5) * 1000;
   let wait = 1000;

@@ -207,6 +207,33 @@ test("verificationLink prefers the backend's complete URI and falls back to ?cod
   assert.equal(verificationLink({ verification_url: "https://a/device?x=1", user_code: "Q" }), "https://a/device?x=1&code=Q");
 });
 
+test("verificationLink appends the endpoint the command names", () => {
+  assert.equal(
+    verificationLink(
+      { verification_url: "https://a/device", verification_uri_complete: "https://a/device?code=X&intent=claude", user_code: "X" },
+      "ditto-dev",
+    ),
+    "https://a/device?code=X&intent=claude&endpoint=ditto-dev",
+  );
+  assert.equal(verificationLink({ verification_url: "https://a/device", user_code: "Q" }, " my ep/1 "), "https://a/device?code=Q&endpoint=my%20ep%2F1");
+  assert.equal(verificationLink({ verification_url: "https://a/device", user_code: "Q" }, "  "), "https://a/device?code=Q");
+});
+
+test("deviceLogin opens the page with the requested endpoint locked in", async () => {
+  const stub = await startStub();
+  const prevBase = process.env.DITTO_API_BASE;
+  process.env.DITTO_API_BASE = stub.base;
+  try {
+    const seen = [];
+    await deviceLogin({ intent: "claude", endpoint: "ditto-dev", onCode: (_code, url) => seen.push(url) });
+    assert.deepEqual(seen, ["https://app.example.test/device?code=ABCD-1234&intent=claude&client=heyditto-cli&endpoint=ditto-dev"]);
+  } finally {
+    if (prevBase === undefined) delete process.env.DITTO_API_BASE;
+    else process.env.DITTO_API_BASE = prevBase;
+    stub.close();
+  }
+});
+
 test("mergeActivationURL copies the claim token onto the backend link", () => {
   const backend = "https://app.example.test/agent/claim?activate=ep-1";
   assert.equal(
