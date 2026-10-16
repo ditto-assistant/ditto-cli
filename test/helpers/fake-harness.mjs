@@ -86,7 +86,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function headless() {
   if (bin === "claude") {
     const prompt = args[args.indexOf("-p") + 1];
-    record({ mode: "headless", args, prompt });
+    record({ mode: "headless", args, prompt, headers: process.env.ANTHROPIC_CUSTOM_HEADERS });
     process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "fake" }) + "\n");
     await sleep(turnMs);
     process.stdout.write(JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "fake answer to " + prompt }] } }) + "\n");
@@ -204,6 +204,12 @@ async function tui() {
   });
   await new Promise(() => undefined);
   return exitCode ?? 0;
+}
+
+// The launcher reads the installed version once per launch (X-Ditto-Harness-Version).
+if (args[0] === "--version") {
+  process.stdout.write(bin === "claude" ? "2.1.296 (Claude Code)\n" : "codex-cli 0.162.1\n");
+  process.exit(0);
 }
 
 const isHeadless = bin === "claude" ? args.includes("-p") : args[0] === "exec";

@@ -398,6 +398,9 @@ test("headless: one codex exec per turn, resumed thread, catalog rules, clean Ct
     assert.deepEqual(runs[1].args.slice(0, 2), ["exec", "resume"]);
     assert.ok(runs[1].args.includes("--last"));
     assert.equal(runs[1].prompt, "second");
+    for (const r of runs) {
+      assert.ok(r.args.some((a) => a.includes('"X-Ditto-Harness"="codex","X-Ditto-Harness-Version"="0.162.1"')), "headless turns carry the harness headers");
+    }
     assert.ok(runs[0].args.some((a) => a.startsWith("notify=[")), "codex exec carries the notify override");
 
     // A TUI-only builtin is refused with a reason; a custom prompt runs.
@@ -446,6 +449,8 @@ test("headless: claude turns resume the session id after the first one and -p se
     assert.deepEqual(runs[1].args.slice(0, 2), ["--resume", "sess-abc"]);
     assert.ok(runs[1].args.includes("stream-json"));
     assert.equal(runs[1].prompt, "next");
+    // Every headless turn names the harness and the version read once at launch.
+    for (const r of runs) assert.match(r.headers, /^X-Ditto-Harness: claude\nX-Ditto-Harness-Version: 2\.1\.296$/m);
     run.child.kill("SIGINT");
     assert.equal(await run.exit, 0);
   } finally {

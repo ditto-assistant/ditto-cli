@@ -1,3 +1,4 @@
+import { harnessHeaders, mergeCustomHeaders } from "./harness-headers.js";
 import { type HarnessPlan, type PlanInput, SESSION_HEADER, apiRootOf } from "./types.js";
 
 /**
@@ -27,9 +28,12 @@ export function planClaude(input: PlanInput): HarnessPlan {
   if (input.prompt !== undefined) args.push("-p", input.prompt);
   args.push(...input.passthrough);
 
-  const headers = [input.env.ANTHROPIC_CUSTOM_HEADERS?.trim(), `${SESSION_HEADER}: ${input.sessionId}`]
-    .filter((h): h is string => Boolean(h))
-    .join("\n");
+  // ANTHROPIC_CUSTOM_HEADERS (Claude Code >= 2.1.227) rides on every
+  // inference request; the caller's own headers are kept.
+  const headers = mergeCustomHeaders(input.env.ANTHROPIC_CUSTOM_HEADERS, [
+    [SESSION_HEADER, input.sessionId],
+    ...harnessHeaders("claude", input.harnessVersion),
+  ]);
 
   const envSet: Record<string, string> = {
     ANTHROPIC_BASE_URL: apiRootOf(input.baseUrl),
