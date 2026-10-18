@@ -151,6 +151,7 @@ heyditto codex  [options] [-- <codex args>]
 heyditto codex-app [--endpoint <slug>] [--model <id>] [--unset]
 heyditto sessions [--json] [--all]
 heyditto sessions rm <id>
+heyditto sessions prune [--older-than <age>] [--keep <n>] [--keys] [--dry-run]
 heyditto session new [<name>...] [--id <id>]
 heyditto session list [--all]
 heyditto session use <id>
@@ -666,7 +667,22 @@ to the user.
 
 List the coding-agent sessions launched from this machine (stored under
 `~/.config/heyditto/cli/sessions/`). `heyditto sessions rm <id>` forgets a local
-record; the Ditto thread and traces are unaffected.
+record (and a grok session's launch home); the Ditto thread and traces are
+unaffected.
+
+`heyditto sessions prune` forgets every record whose last launch is older than
+`--older-than` (default `7d`), except the `--keep` most recent (default `10`).
+A pruned record that never recorded an exit belongs to a launch that was killed
+before it could clean up, so its key is revoked too. With `--keys`, it also
+revokes this machine's launch keys (named `cli:<harness>:<hostname>`) that no
+remaining record names — keys stranded by a killed launch or by `sessions rm`.
+Keys created with `--name` are never touched.
+
+```bash
+heyditto sessions prune --dry-run             # show what would go
+heyditto sessions prune --older-than 1d --keys
+heyditto sessions prune --keep 0 --older-than 30d --yes --json
+```
 
 ### `session`
 
