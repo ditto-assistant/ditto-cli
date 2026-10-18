@@ -266,8 +266,8 @@ export async function cmdReviewAction(id: string, action: "retry" | "cancel", op
 }
 
 const SKIP_LISTS = ["headBranches", "baseBranches", "titles", "authors", "labels"] as const;
-function normalizeSkipRules(value: ReviewSkipRules | undefined): ReviewSkipRules | null {
-  if (value === undefined) return null;
+function normalizeSkipRules(value: ReviewSkipRules | null | undefined): ReviewSkipRules | null {
+  if (value == null) return null;
   return Object.fromEntries([...SKIP_LISTS.map(key => [key, value[key] ?? []]), ["bots", value.bots ?? false]]);
 }
 export function parseSkipRules(text: string): ReviewSkipRules {

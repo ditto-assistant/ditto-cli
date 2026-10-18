@@ -37,7 +37,7 @@ const FINDING_EARLIER = { ...FINDING_OPEN, id: "f_earlier", title: "Raised on th
 const EARLIER_DETAIL = { run: ORUN, result: { findings: [FINDING_EARLIER] }, repository: DETAIL.repository };
 const FINDING_BASE = `/api/v5/review/runs/${FRUN.id}/findings/${FINDING_OPEN.id}`;
 
-function startStub({ statuses = ["completed"], refusal, detailDelay = 0 } = {}) {
+function startStub({ statuses = ["completed"], refusal, detailDelay = 0, skipEcho = "saved" } = {}) {
   let detailReads = 0;
   const calls = [];
   const server = http.createServer((req, res) => {
@@ -49,7 +49,12 @@ function startStub({ statuses = ["completed"], refusal, detailDelay = 0 } = {}) 
       const json = (status, payload) => { res.statusCode = status; res.end(JSON.stringify(payload)); };
       if (req.url === "/api/v5/companies") return json(200, { companies: [COMPANY] });
       if (req.url === `/api/v5/review?company=${COMPANY.id}` && req.method === "GET") return json(200, { repositories: [REPO], runs: [RUN] });
-      if (req.url === `/api/v5/review/repositories?company=${COMPANY.id}` && req.method === "PUT") return json(200, { ...REPO, ...JSON.parse(body), revision: 8 });
+      if (req.url === `/api/v5/review/repositories?company=${COMPANY.id}` && req.method === "PUT") {
+        const saved = { ...REPO, ...JSON.parse(body), revision: 8 };
+        if (skipEcho === "null") saved.skipRules = null;
+        if (skipEcho === "omitted") delete saved.skipRules;
+        return json(200, saved);
+      }
       const query = `?company=${COMPANY.id}`;
       const pullsRoute = `/api/v5/review/repositories/${REPO.id}/pulls`;
       if (req.url === pullsRoute + query && req.method === "GET") return json(200, { pulls: [{ number: 88, title: "review picker", draft: false, url: "https://github.com/ditto-assistant/console/pull/88" }] });
@@ -485,4 +490,20 @@ test("invalid skip policies fail before any request",async()=>{
   }
   assert.equal(stub.calls.length,0);
  }finally{stub.close();}
+});
+
+test("null and omitted policy echoes fail clearly, including clears", async () => {
+  for (const skipEcho of ["null", "omitted"]) {
+    const stub = await startStub({ skipEcho });
+    const file = path.join(mkdtempSync(path.join(os.tmpdir(), "skip-echo-")), "rules.json");
+    writeFileSync(file, JSON.stringify({ authors: ["dependabot[bot]"] }));
+    try {
+      for (const args of [["--clear-skip-rules"], ["--skip-rules-file", file]]) {
+        const out = await run(stub.base, ["review", "set", REPO.fullName, "--org", "omni-aura", ...args]);
+        assert.notEqual(out.status, 0);
+        assert.match(out.stderr, /Skip rules were not saved by this backend/);
+        assert.doesNotMatch(out.stderr, /Cannot read properties/);
+      }
+    } finally { stub.close(); }
+  }
 });
