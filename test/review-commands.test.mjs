@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -455,4 +455,34 @@ test("review add takes --endpoint and the limits, and refuses before any write",
   } finally {
     stub.close();
   }
+});
+
+// Round trips every criterion through the real CLI parser and HTTP request.
+test("skip rules file replaces policy with revision guard and can be cleared", async () => {
+ const stub = await startStub();
+ const rules = {headBranches:["dependabot/*"],baseBranches:["release/*"],titles:["chore(i18n):*"],authors:["dependabot[bot]"],labels:["skip-review"],bots:true};
+ const file=path.join(mkdtempSync(path.join(os.tmpdir(),"skip-rules-")),"rules.json");
+ writeFileSync(file, JSON.stringify(rules));
+ try {
+  const out=await run(stub.base,["review","set",REPO.fullName,"--org","omni-aura","--skip-rules-file",file,"--output","json"]);
+  assert.equal(out.status,0,out.stderr);
+  const put=stub.calls.find(c=>c.method==="PUT");
+  assert.deepEqual(put.body.skipRules,rules);assert.equal(put.body.ifRevision,7);assert.equal(put.body.budgetCents,REPO.budgetCents);
+  const clear=await run(stub.base,["review","set",REPO.fullName,"--org","omni-aura","--clear-skip-rules"]);
+  assert.equal(clear.status,0,clear.stderr);
+  assert.deepEqual(stub.calls.filter(c=>c.method==="PUT").at(-1).body.skipRules,{});
+ }finally{stub.close();}
+});
+
+test("invalid skip policies fail before any request",async()=>{
+ const stub=await startStub();
+ const file=path.join(mkdtempSync(path.join(os.tmpdir(),"skip-invalid-")),"rules.json");
+ try{
+  for(const value of [[],{author:["oops"]},{bots:"yes"},{authors:[" "]},{titles:["x".repeat(201)]}]){
+   writeFileSync(file,JSON.stringify(value));
+   const out=await run(stub.base,["review","set",REPO.fullName,"--skip-rules-file",file]);
+   assert.notEqual(out.status,0,JSON.stringify(value));
+  }
+  assert.equal(stub.calls.length,0);
+ }finally{stub.close();}
 });

@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import type { Command, Option } from "commander";
 import { apiFetch, type Company, resolveCompany } from "./api.js";
@@ -16,7 +17,17 @@ import { readStoredAuth } from "./store.js";
  */
 
 /** One repository as `GET /api/v5/review` lists it. */
+export interface ReviewSkipRules {
+  headBranches?: string[];
+  baseBranches?: string[];
+  titles?: string[];
+  authors?: string[];
+  labels?: string[];
+  bots?: boolean;
+}
+
 export interface ReviewRepository {
+  skipRules?: ReviewSkipRules;
   id: string;
   fullName: string;
   endpointId: string;
@@ -53,6 +64,8 @@ interface ScopeOptions {
 }
 
 interface SetOptions extends ScopeOptions {
+  skipRulesFile?: string;
+  clearSkipRules?: boolean;
   maxMinutes?: string;
   budgetCents?: string;
   enabled?: string;
@@ -252,6 +265,24 @@ export async function cmdReviewAction(id: string, action: "retry" | "cancel", op
   process.stdout.write(`${id}: ${out.status}${out.cancelRequested ? " (cancellation requested)" : ""}${out.reusedResult ? " (reusing stored result)" : ""}${out.watchCancelled ? " (CI watch cancelled)" : ""}\n`);
 }
 
+const SKIP_LISTS = ["headBranches", "baseBranches", "titles", "authors", "labels"] as const;
+function normalizeSkipRules(value: ReviewSkipRules | undefined): ReviewSkipRules | null {
+  if (value === undefined) return null;
+  return Object.fromEntries([...SKIP_LISTS.map(key => [key, value[key] ?? []]), ["bots", value.bots ?? false]]);
+}
+export function parseSkipRules(text: string): ReviewSkipRules {
+  const rules: unknown = JSON.parse(text);
+  if (!rules || typeof rules !== "object" || Array.isArray(rules)) throw new Error("Skip rules must be a JSON object");
+  for (const [key, value] of Object.entries(rules)) {
+    if (key === "bots") { if (typeof value !== "boolean") throw new Error("bots must be a boolean"); continue; }
+    if (!(SKIP_LISTS as readonly string[]).includes(key)) throw new Error(`Unknown skip rule field: ${key}`);
+    if (!Array.isArray(value) || value.length > 50 || value.some(v => typeof v !== "string" || !v.trim() || v !== v.trim() || Buffer.byteLength(v) > 200 || /[\p{Cc}]/u.test(v))) {
+      throw new Error(`${key} must contain at most 50 nonempty patterns of at most 200 bytes without surrounding whitespace or control characters`);
+    }
+  }
+  return rules as ReviewSkipRules;
+}
+
 function money(cents: number): string {
   return `$${(cents / 100).toFixed(2)}`;
 }
@@ -286,6 +317,7 @@ export async function cmdReviewRepos(options: ScopeOptions): Promise<void> {
 export function reviewRepositoryInput(repo: ReviewRepository): Record<string, unknown> {
   return {
     ifRevision: repo.revision,
+    ...(repo.skipRules !== undefined ? { skipRules: repo.skipRules } : {}),
     fullName: repo.fullName,
     endpointId: repo.endpointId,
     enabled: repo.enabled,
@@ -320,6 +352,9 @@ function intFlag(flag: string, value: string, min: number, max: number): number 
 
 export async function cmdReviewSet(fullName: string, options: SetOptions): Promise<void> {
   const changes: Record<string, unknown> = {};
+  if (options.skipRulesFile && options.clearSkipRules) throw new Error("Use --skip-rules-file or --clear-skip-rules, not both");
+  if (options.skipRulesFile) changes.skipRules = parseSkipRules(await readFile(options.skipRulesFile, "utf8"));
+  if (options.clearSkipRules) changes.skipRules = {};
   if (options.maxMinutes !== undefined) changes.maxMinutes = intFlag("--max-minutes", options.maxMinutes, MIN_MAX_MINUTES, MAX_MAX_MINUTES);
   if (options.budgetCents !== undefined) changes.budgetCents = intFlag("--budget-cents", options.budgetCents, 1, MAX_BUDGET_CENTS);
   if (options.enabled !== undefined) {
@@ -347,12 +382,16 @@ export async function cmdReviewSet(fullName: string, options: SetOptions): Promi
     method: "PUT",
     body: { ...reviewRepositoryInput(repo), ...changes },
   });
-  if (isJSON(options)) {
-    process.stdout.write(`${JSON.stringify(saved, null, 2)}\n`);
-    return;
+  if ("skipRules" in changes && JSON.stringify(saved.skipRules ?? null) !== JSON.stringify(changes.skipRules)) {
+    // Key ordering may differ on a jsonb response; compare normalized values.
+    if (JSON.stringify(normalizeSkipRules(saved.skipRules)) !== JSON.stringify(normalizeSkipRules(changes.skipRules as ReviewSkipRules))) {
+      throw new Error("Skip rules were not saved by this backend. Update the backend and retry.");
+    }
   }
+  if (isJSON(options)) return writeJSON(saved);
   const after = { ...repo, ...changes } as ReviewRepository;
   const lines = [`Saved ${repo.fullName}:`];
+  if ("skipRules" in changes) lines.push(`  PR skip rules  ${JSON.stringify(saved.skipRules)}`);
   if ("maxMinutes" in changes) lines.push(`  time limit  ${repo.maxMinutes} → ${after.maxMinutes} min`);
   if ("budgetCents" in changes) lines.push(`  budget/run  ${money(repo.budgetCents)} → ${money(after.budgetCents)}`);
   if ("enabled" in changes) lines.push(`  enabled     ${repo.enabled ? "on" : "off"} → ${after.enabled ? "on" : "off"}`);
@@ -516,6 +555,8 @@ export function registerReviewCommands(
       .option("--max-minutes <n>", `time limit of one review (${MIN_MAX_MINUTES}-${MAX_MAX_MINUTES})`)
       .option("--budget-cents <n>", "spend limit of one review, in cents (1-10000)")
       .option("--enabled <on|off>", "review this repository's pull requests")
+      .option("--skip-rules-file <file>", "replace PR skip rules from a JSON file (headBranches, baseBranches, titles, authors, labels, bots)")
+      .option("--clear-skip-rules", "remove all PR skip rules")
       .option("--fast <on|off>", "fast mode: review on GLM-5.3-FlashX (faster, about 2.5x the per-token cost)")
       .addOption(orgOption())
       .addOption(outputOption())
