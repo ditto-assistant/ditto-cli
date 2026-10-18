@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {MINTED_PLAINTEXT,startStub} from "./helpers/stub-api.mjs";
-import {writePrivateKey} from "../dist/secret-stores/local-file.js";
+import {writePrivateKey,localFile} from "../dist/secret-stores/local-file.js";
 import {providerKeySelection} from "../dist/router-discovery.js";
 
 const cli=new URL('../dist/cli.js',import.meta.url);
@@ -63,6 +63,16 @@ test('post-create staging failures remove the partial secret and allow retry',()
  finally {fs.fsyncSync=original;syncBuiltinESMExports();}
  assert.equal(existsSync(file),false);assert.deepEqual(readdirSync(dir),[]);
  writePrivateKey(file,MINTED_PLAINTEXT);assert.equal(readFileSync(file,'utf8'),MINTED_PLAINTEXT);assert.equal(lstatSync(file).nlink,1);
+});
+test('directory fsync failures remove only the newly published key and allow retry',()=>{
+ const dir=temp(),file=path.join(dir,'key'),original=fs.fsyncSync;let directorySync=false;
+ try {fs.fsyncSync=fd=>{if(fs.fstatSync(fd).isDirectory()){directorySync=true;throw new Error('fixture directory sync failure');}return original(fd);};syncBuiltinESMExports();assert.throws(()=>writePrivateKey(file,MINTED_PLAINTEXT),/fixture directory sync failure/);}
+ finally {fs.fsyncSync=original;syncBuiltinESMExports();}
+ assert.equal(directorySync,true);assert.equal(existsSync(file),false);assert.deepEqual(readdirSync(dir),[]);writePrivateKey(file,MINTED_PLAINTEXT);assert.equal(lstatSync(file).nlink,1);
+});
+test('local key labels distinguish destinations without exposing private paths',()=>{
+ const first=localFile.keyName('/private/customer-a/key',{}),second=localFile.keyName('/private/customer-b/key',{});
+ assert.notEqual(first,second);assert.match(first,/^local:key:[a-f0-9]{16}$/);assert.ok(!first.includes('/private/'));
 });
 test('discovery supports readable text, JSON, profiles alias, and explicit malformed-response errors',async()=>{
  let malformed=false;const id='11111111-1111-1111-1111-111111111111';

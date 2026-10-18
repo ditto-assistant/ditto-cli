@@ -1,5 +1,6 @@
 import { closeSync, constants, fstatSync, fsyncSync, linkSync, lstatSync, mkdtempSync, openSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, normalize, parse } from "node:path";
+import { createHash } from "node:crypto";
 import type { SecretStore } from "./types.js";
 
 function validatePath(file: string): string {
@@ -22,22 +23,40 @@ function validatePath(file: string): string {
 }
 
 export function writePrivateKey(file: string, value: string): void {
-  if (!value || /[\r\n\0]/.test(value)) throw new Error("invalid inference key; nothing stored");
+  if (typeof value !== "string" || !value || /[\r\n\0]/.test(value)) throw new Error("invalid inference key; nothing stored");
   validatePath(file); // Recheck after minting; exclusive create remains the final no-clobber gate.
   // Stage under the private parent, then atomically link without replacing a
   // racing destination. A write/fsync failure never leaves a final-path file.
   const stage = mkdtempSync(join(dirname(file), ".heyditto-key-"));
   const temporary = join(stage, "value");
   let fd: number | undefined;
+  let published = false;
+  let identity: {dev: number; ino: number} | undefined;
   try {
     fd = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
     const st = fstatSync(fd);
+    identity = {dev: st.dev, ino: st.ino};
     if (!st.isFile() || st.uid !== process.getuid!() || (st.mode & 0o077) !== 0 || st.nlink !== 1) throw new Error("unsafe local key destination");
     writeFileSync(fd, value, { encoding: "utf8" });
     fsyncSync(fd);
     closeSync(fd);
     fd = undefined;
-    linkSync(temporary, file); // Atomic no-clobber publication; no operation after this may mask success.
+    linkSync(temporary, file); // Atomic no-clobber publication.
+    published = true;
+    unlinkSync(temporary);
+    rmdirSync(stage);
+    // Persist the final directory entry as well as its contents before
+    // reporting success; otherwise a crash can lose the delivered key.
+    fd = openSync(dirname(file), constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
+  } catch (error) {
+    if (published && identity) {
+      // Remove only our newly published inode, never a racing replacement.
+      try { const current = lstatSync(file); if (current.dev === identity.dev && current.ino === identity.ino) unlinkSync(file); } catch { /* preserve the original delivery failure */ }
+    }
+    throw error;
   } finally {
     if (fd !== undefined) { try { closeSync(fd); } catch { /* retain the original failure */ } }
     try { unlinkSync(temporary); } catch { /* best effort in an owned private staging directory */ }
@@ -52,5 +71,6 @@ export const localFile: SecretStore = {
   resolveTarget: () => ({ describe: "a private local file (0600, no overwrite)", fields: {} }),
   deliveries: name => [{ kind: "local-file", path: name, note: "exclusive private file creation" }],
   usage: name => [`Configure your application to read its inference key from ${name}; never paste it into command arguments.`],
-  keyName: name => `local:${basename(name)}`,
+  // Distinguish equal basenames without uploading the user's absolute path.
+  keyName: name => `local:${basename(name).slice(0, 60)}:${createHash("sha256").update(name).digest("hex").slice(0, 16)}`,
 };
