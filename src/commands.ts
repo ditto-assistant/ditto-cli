@@ -881,7 +881,8 @@ function parseKeyExpiry(raw: string | undefined): KeyExpiry {
 /**
  * Mints a key on an endpoint and hands the plaintext straight to the platform
  * CLI over stdin (`gh secret set`, `gcloud secrets create --data-file=-`, …).
- * The key is never printed, logged or stored locally; when the platform CLI
+ * The key is never printed or logged; only the explicit private-file adapter
+ * stores it locally. When delivery
  * fails it is revoked again so nothing usable is left behind.
  */
 export async function cmdEndpointKeysCreate(ref: string, options: KeysCreateOptions): Promise<void> {
@@ -959,7 +960,7 @@ export async function cmdEndpointKeysCreate(ref: string, options: KeysCreateOpti
   process.stdout.write(
     [
       `Minted key …${key.keyHint} (${key.name ?? keyName}) on ${endpoint.slug}: expires ${expiresIn}${budget !== undefined ? `, budget ${budget.toLocaleString()} tokens ${spendPeriod}` : ", no spend cap"}.`,
-      `Stored ${secretName} in ${target.describe} via ${store.bin}. The key was not printed and is not kept locally.`,
+      `Stored ${secretName} in ${target.describe} via ${store.bin}. The key was not printed${store.id === "file" ? "; its only local copy is the requested private file" : " and is not kept locally"}.`,
       "",
       ...store.usage(secretName, target, gateway),
       "",

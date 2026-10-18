@@ -1,6 +1,6 @@
 import { closeSync, constants, fstatSync, fsyncSync, linkSync, lstatSync, mkdtempSync, openSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, normalize, parse } from "node:path";
-import { createHash } from "node:crypto";
+import { dirname, isAbsolute, join, normalize, parse } from "node:path";
+import { randomUUID } from "node:crypto";
 import type { SecretStore } from "./types.js";
 
 function validatePath(file: string): string {
@@ -54,7 +54,14 @@ export function writePrivateKey(file: string, value: string): void {
   } catch (error) {
     if (published && identity) {
       // Remove only our newly published inode, never a racing replacement.
-      try { const current = lstatSync(file); if (current.dev === identity.dev && current.ino === identity.ino) unlinkSync(file); } catch { /* preserve the original delivery failure */ }
+      try {
+        const current = lstatSync(file);
+        if (current.dev === identity.dev && current.ino === identity.ino) {
+          unlinkSync(file);
+          const parent = openSync(dirname(file), constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+          try { fsyncSync(parent); } finally { closeSync(parent); }
+        }
+      } catch { /* best effort rollback durability; preserve the original delivery failure */ }
     }
     throw error;
   } finally {
@@ -71,6 +78,7 @@ export const localFile: SecretStore = {
   resolveTarget: () => ({ describe: "a private local file (0600, no overwrite)", fields: {} }),
   deliveries: name => [{ kind: "local-file", path: name, note: "exclusive private file creation" }],
   usage: name => [`Configure your application to read its inference key from ${name}; never paste it into command arguments.`],
-  // Distinguish equal basenames without uploading the user's absolute path.
-  keyName: name => `local:${basename(name).slice(0, 60)}:${createHash("sha256").update(name).digest("hex").slice(0, 16)}`,
+  // Minted once by the caller and reused for the request/receipt. Neither the
+  // destination nor a deterministic path fingerprint reaches the server.
+  keyName: () => `local:${randomUUID()}`,
 };

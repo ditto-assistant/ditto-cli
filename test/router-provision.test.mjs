@@ -23,6 +23,8 @@ test('local key delivery is exclusive, private, and never printed',async()=>{
   const out=await run(stub.base,['endpoints','keys','create','alpha','--key-file',file,'--yes','--output','json']);
   assert.equal(out.status,0,out.stderr);assert.equal(readFileSync(file,'utf8'),MINTED_PLAINTEXT);assert.equal(lstatSync(file).mode&0o777,0o600);
   assert.ok(!(out.stdout+out.stderr).includes(MINTED_PLAINTEXT));assert.equal(JSON.parse(out.stdout).store,'file');
+  assert.match(stub.mints()[0].body.name,/^local:[a-f0-9-]{36}$/);
+  assert.equal(JSON.parse(out.stdout).key.name,stub.mints()[0].body.name);
   const again=await run(stub.base,['endpoints','keys','create','alpha','--key-file',file,'--yes']);
   assert.notEqual(again.status,0);assert.equal(stub.mints().length,1);assert.equal(readFileSync(file,'utf8'),MINTED_PLAINTEXT);
  } finally {stub.close();}
@@ -64,15 +66,22 @@ test('post-create staging failures remove the partial secret and allow retry',()
  assert.equal(existsSync(file),false);assert.deepEqual(readdirSync(dir),[]);
  writePrivateKey(file,MINTED_PLAINTEXT);assert.equal(readFileSync(file,'utf8'),MINTED_PLAINTEXT);assert.equal(lstatSync(file).nlink,1);
 });
-test('directory fsync failures remove only the newly published key and allow retry',()=>{
- const dir=temp(),file=path.join(dir,'key'),original=fs.fsyncSync;let directorySync=false;
- try {fs.fsyncSync=fd=>{if(fs.fstatSync(fd).isDirectory()){directorySync=true;throw new Error('fixture directory sync failure');}return original(fd);};syncBuiltinESMExports();assert.throws(()=>writePrivateKey(file,MINTED_PLAINTEXT),/fixture directory sync failure/);}
+test('directory fsync failures persist rollback and allow retry without replacing the original error',()=>{
+ const dir=temp(),file=path.join(dir,'key'),original=fs.fsyncSync;let directorySyncs=0;
+ try {fs.fsyncSync=fd=>{if(fs.fstatSync(fd).isDirectory()){directorySyncs++;if(directorySyncs===1)throw new Error('fixture directory sync failure');assert.equal(existsSync(file),false);}return original(fd);};syncBuiltinESMExports();assert.throws(()=>writePrivateKey(file,MINTED_PLAINTEXT),/fixture directory sync failure/);}
  finally {fs.fsyncSync=original;syncBuiltinESMExports();}
- assert.equal(directorySync,true);assert.equal(existsSync(file),false);assert.deepEqual(readdirSync(dir),[]);writePrivateKey(file,MINTED_PLAINTEXT);assert.equal(lstatSync(file).nlink,1);
+ assert.equal(directorySyncs,2);assert.equal(existsSync(file),false);assert.deepEqual(readdirSync(dir),[]);writePrivateKey(file,MINTED_PLAINTEXT);assert.equal(lstatSync(file).nlink,1);
 });
-test('local key labels distinguish destinations without exposing private paths',()=>{
+test('local key labels are opaque and distinguish destinations without path-derived information',()=>{
  const first=localFile.keyName('/private/customer-a/key',{}),second=localFile.keyName('/private/customer-b/key',{});
- assert.notEqual(first,second);assert.match(first,/^local:key:[a-f0-9]{16}$/);assert.ok(!first.includes('/private/'));
+ assert.notEqual(first,second);assert.match(first,/^local:[a-f0-9-]{36}$/);assert.ok(!first.includes('customer-a'));assert.ok(!first.includes('key'));
+ assert.notEqual(first,localFile.keyName('/private/customer-a/key',{}));
+});
+test('rollback sync errors preserve the initial delivery failure and remove the file',()=>{
+ const dir=temp(),file=path.join(dir,'key'),original=fs.fsyncSync;let attempts=0;
+ try {fs.fsyncSync=fd=>{if(fs.fstatSync(fd).isDirectory())throw new Error(++attempts===1?'initial publication failure':'rollback failure');return original(fd);};syncBuiltinESMExports();assert.throws(()=>writePrivateKey(file,MINTED_PLAINTEXT),/initial publication failure/);}
+ finally {fs.fsyncSync=original;syncBuiltinESMExports();}
+ assert.equal(attempts,2);assert.equal(existsSync(file),false);assert.deepEqual(readdirSync(dir),[]);
 });
 test('discovery supports readable text, JSON, profiles alias, and explicit malformed-response errors',async()=>{
  let malformed=false;const id='11111111-1111-1111-1111-111111111111';
