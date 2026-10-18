@@ -67,7 +67,13 @@ export function writePrivateKey(file: string, value: string): void {
   } finally {
     if (fd !== undefined) { try { closeSync(fd); } catch { /* retain the original failure */ } }
     try { unlinkSync(temporary); } catch { /* best effort in an owned private staging directory */ }
-    try { rmdirSync(stage); } catch { /* never recursively remove unexpected files */ }
+    try {
+      rmdirSync(stage); // Never recursively remove unexpected files.
+      // A retry can remove staging after the earlier rollback sync. Persist
+      // that removal too, without replacing the original delivery error.
+      const parent = openSync(dirname(file), constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+      try { fsyncSync(parent); } finally { closeSync(parent); }
+    } catch { /* best effort; preserve the original delivery error */ }
   }
 }
 

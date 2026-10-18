@@ -83,6 +83,15 @@ test('rollback sync errors preserve the initial delivery failure and remove the 
  finally {fs.fsyncSync=original;syncBuiltinESMExports();}
  assert.equal(attempts,2);assert.equal(existsSync(file),false);assert.deepEqual(readdirSync(dir),[]);
 });
+test('retried staging cleanup fsyncs its removal after rollback',()=>{
+ const dir=temp(),file=path.join(dir,'key'),originalUnlink=fs.unlinkSync,originalSync=fs.fsyncSync;let failed=false;const directoryStates=[];
+ try {
+  fs.unlinkSync=name=>{if(!failed&&path.basename(String(name))==='value'){failed=true;throw new Error('fixture staging unlink failure');}return originalUnlink(name);};
+  fs.fsyncSync=fd=>{if(fs.fstatSync(fd).isDirectory())directoryStates.push(readdirSync(dir));return originalSync(fd);};
+  syncBuiltinESMExports();assert.throws(()=>writePrivateKey(file,MINTED_PLAINTEXT),/fixture staging unlink failure/);
+ } finally {fs.unlinkSync=originalUnlink;fs.fsyncSync=originalSync;syncBuiltinESMExports();}
+ assert.equal(failed,true);assert.equal(directoryStates.length,2);assert.match(directoryStates[0][0],/^\.heyditto-key-/);assert.deepEqual(directoryStates[1],[]);assert.deepEqual(readdirSync(dir),[]);
+});
 test('discovery supports readable text, JSON, profiles alias, and explicit malformed-response errors',async()=>{
  let malformed=false;const id='11111111-1111-1111-1111-111111111111';
  const server=http.createServer((req,res)=>{res.setHeader('content-type','application/json');
