@@ -1,5 +1,31 @@
 # Ditto CLI
 
+### Personal BYOK Router endpoints and local inference keys
+
+```sh
+heyditto endpoints provider-keys --output json
+heyditto endpoints models gm --output json
+heyditto endpoints create --name "Infinite Disk" --slug infinite-disk \
+  --model gm/gpt-6-luna --billing-mode byok --provider-key <saved-key-UUID>
+heyditto endpoints set infinite-disk --recall off --record off --record-trace off
+heyditto endpoints keys create infinite-disk --key-file /absolute/private/router-key --yes
+```
+
+Provider-key discovery returns only your personal vault's selection metadata,
+never raw credentials. `--provider-key` is repeatable (or comma-separated),
+replaces the selected list, and never accepts an empty list as an implicit
+"all keys". `byok` does not fall back to Ditto-funded providers. Endpoints created
+without an organization are personal; an existing saved default is unchanged
+unless you pass `--default`.
+
+`--key-file` (also `--store file --secret /absolute/private/router-key`) requires
+an existing owner-only 0700 parent directory. It creates a new 0600 file without
+overwriting existing files or following symlinks. No plaintext key is printed,
+put in argv, or returned in JSON. Delivery failure revokes the newly minted key.
+Use an endpoint key in your local app, never your management or provider key.
+On Windows use one of the external secret managers instead. Router discovery
+requires the matching server capability; an older server fails explicitly.
+
 `@heyditto/cli` — save, search, fetch, and traverse the [Ditto](https://heyditto.ai) memory graph from the shell.
 
 ```bash

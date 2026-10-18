@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Delivery, SecretStore } from "./types.js";
+import { writePrivateKey } from "./local-file.js";
 
 /**
  * Subprocess plumbing shared by every store. Generalized from the original
@@ -129,6 +130,10 @@ function substitute(args: string[], path: string): string[] {
 export function deliver(store: SecretStore, name: string, attempts: Delivery[], value: string): void {
   const failures: string[] = [];
   for (const attempt of attempts) {
+    if (attempt.kind === "local-file") {
+      writePrivateKey(attempt.path, value);
+      return;
+    }
     const payload = attempt.payload ? attempt.payload(value) : value;
     const res = attempt.kind === "stdin" ? runStdin(store, attempt, payload) : runPath(store, attempt, payload);
     if (res.missing) {
