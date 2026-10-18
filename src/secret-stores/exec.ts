@@ -131,8 +131,13 @@ export function deliver(store: SecretStore, name: string, attempts: Delivery[], 
   const failures: string[] = [];
   for (const attempt of attempts) {
     if (attempt.kind === "local-file") {
-      writePrivateKey(attempt.path, value);
-      return;
+      try {
+        writePrivateKey(attempt.path, value);
+        return;
+      } catch (error) {
+        failures.push(`${attempt.note}: ${error instanceof Error ? error.message : "private file delivery failed"}`);
+        continue;
+      }
     }
     const payload = attempt.payload ? attempt.payload(value) : value;
     const res = attempt.kind === "stdin" ? runStdin(store, attempt, payload) : runPath(store, attempt, payload);
@@ -143,7 +148,7 @@ export function deliver(store: SecretStore, name: string, attempts: Delivery[], 
     const detail = trimmedStderr(res);
     failures.push(`${attempt.note}: ${detail || `exit ${res.status}`}`);
   }
-  throw new Error(`${store.bin} could not store ${name} — ${failures.join("; ")}`);
+  throw new Error(`${store.id === "file" ? store.label : store.bin} could not store ${name} — ${failures.join("; ")}`);
 }
 
 function runStdin(store: SecretStore, attempt: Delivery & { kind: "stdin" }, payload: string): RunResult {

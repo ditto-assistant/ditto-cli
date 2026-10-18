@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {spawn} from "node:child_process";
-import {chmodSync,existsSync,lstatSync,mkdirSync,mkdtempSync,readFileSync,realpathSync,symlinkSync,writeFileSync} from "node:fs";
+import fs,{chmodSync,existsSync,lstatSync,mkdirSync,mkdtempSync,readFileSync,readdirSync,realpathSync,symlinkSync,writeFileSync} from "node:fs";
+import {syncBuiltinESMExports} from "node:module";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -55,6 +56,34 @@ test('a destination racing into existence revokes the minted key without overwri
 test('provider key selection never treats raw secrets, names or an empty list as all keys',()=>{
  const id='11111111-1111-1111-1111-111111111111';assert.deepEqual(providerKeySelection([id,id]),[id]);assert.equal(providerKeySelection(undefined),undefined);
  for(const x of [[],[''],['gm'],['sk-secret'],[id+',']])assert.throws(()=>providerKeySelection(x));
+});
+test('post-create staging failures remove the partial secret and allow retry',()=>{
+ const dir=temp(),file=path.join(dir,'key'),original=fs.fsyncSync;
+ try {fs.fsyncSync=()=>{throw new Error('fixture sync failure');};syncBuiltinESMExports();assert.throws(()=>writePrivateKey(file,MINTED_PLAINTEXT),/fixture sync failure/);}
+ finally {fs.fsyncSync=original;syncBuiltinESMExports();}
+ assert.equal(existsSync(file),false);assert.deepEqual(readdirSync(dir),[]);
+ writePrivateKey(file,MINTED_PLAINTEXT);assert.equal(readFileSync(file,'utf8'),MINTED_PLAINTEXT);assert.equal(lstatSync(file).nlink,1);
+});
+test('discovery supports readable text, JSON, profiles alias, and explicit malformed-response errors',async()=>{
+ let malformed=false;const id='11111111-1111-1111-1111-111111111111';
+ const server=http.createServer((req,res)=>{res.setHeader('content-type','application/json');
+  if(req.url.endsWith('/provider-keys'))return res.end(JSON.stringify(malformed?{}:{keys:[{id,provider:'gm',configured:true,enabled:true}]}));
+  if(req.url.includes('/providers/gm/models?includeLegacy=true'))return res.end(JSON.stringify({models:[{id:'gm/gpt-6-luna',name:'GPT 6 Luna'}]}));
+  res.statusCode=404;res.end('{}');
+ });await new Promise(r=>server.listen(0,'127.0.0.1',r));const base=`http://127.0.0.1:${server.address().port}`;
+ try {
+  const keys=await run(base,['profiles','provider-keys','--output','text']);assert.equal(keys.status,0,keys.stderr);assert.match(keys.stdout,/gm  enabled/);assert.doesNotMatch(keys.stdout,/"keys"/);
+  const models=await run(base,['profiles','models','gm','--output','text']);assert.equal(models.status,0,models.stderr);assert.match(models.stdout,/gm\/gpt-6-luna  GPT 6 Luna/);
+  const json=await run(base,['profiles','models','gm','--output','json']);assert.equal(JSON.parse(json.stdout).models[0].id,'gm/gpt-6-luna');
+  malformed=true;const invalid=await run(base,['profiles','provider-keys','--output','json']);assert.notEqual(invalid.status,0);assert.match(invalid.stderr,/invalid provider-key discovery response/);assert.doesNotMatch(invalid.stderr,/TypeError/);
+ } finally {server.closeAllConnections();server.close();}
+});
+test('selected keys cannot silently create a Ditto-funded profile',async()=>{
+ const stub=await startStub(), id='11111111-1111-1111-1111-111111111111';
+ try {
+  for(const extra of [[],['--billing-mode','ditto']]){const out=await run(stub.base,['profiles','create','--provider-key',id,...extra]);assert.notEqual(out.status,0);assert.match(out.stderr,/requires explicit --billing-mode/);}
+  assert.equal(stub.calls.some(c=>c.method==='POST'),false);
+ } finally {stub.close();}
 });
 test('personal BYOK creation sends selected IDs atomically and discovery projects secrets away',async()=>{
  const id='11111111-1111-1111-1111-111111111111';let created;

@@ -1,5 +1,5 @@
-import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, normalize, parse } from "node:path";
+import { closeSync, constants, fstatSync, fsyncSync, linkSync, lstatSync, mkdtempSync, openSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, normalize, parse } from "node:path";
 import type { SecretStore } from "./types.js";
 
 function validatePath(file: string): string {
@@ -24,13 +24,25 @@ function validatePath(file: string): string {
 export function writePrivateKey(file: string, value: string): void {
   if (!value || /[\r\n\0]/.test(value)) throw new Error("invalid inference key; nothing stored");
   validatePath(file); // Recheck after minting; exclusive create remains the final no-clobber gate.
-  const fd = openSync(file, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+  // Stage under the private parent, then atomically link without replacing a
+  // racing destination. A write/fsync failure never leaves a final-path file.
+  const stage = mkdtempSync(join(dirname(file), ".heyditto-key-"));
+  const temporary = join(stage, "value");
+  let fd: number | undefined;
   try {
+    fd = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
     const st = fstatSync(fd);
     if (!st.isFile() || st.uid !== process.getuid!() || (st.mode & 0o077) !== 0 || st.nlink !== 1) throw new Error("unsafe local key destination");
     writeFileSync(fd, value, { encoding: "utf8" });
     fsyncSync(fd);
-  } finally { closeSync(fd); }
+    closeSync(fd);
+    fd = undefined;
+    linkSync(temporary, file); // Atomic no-clobber publication; no operation after this may mask success.
+  } finally {
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* retain the original failure */ } }
+    try { unlinkSync(temporary); } catch { /* best effort in an owned private staging directory */ }
+    try { rmdirSync(stage); } catch { /* never recursively remove unexpected files */ }
+  }
 }
 
 export const localFile: SecretStore = {
@@ -40,4 +52,5 @@ export const localFile: SecretStore = {
   resolveTarget: () => ({ describe: "a private local file (0600, no overwrite)", fields: {} }),
   deliveries: name => [{ kind: "local-file", path: name, note: "exclusive private file creation" }],
   usage: name => [`Configure your application to read its inference key from ${name}; never paste it into command arguments.`],
+  keyName: name => `local:${basename(name)}`,
 };

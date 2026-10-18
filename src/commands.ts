@@ -201,6 +201,7 @@ export async function cmdEndpointCreate(options: EndpointCreateOptions): Promise
   if (options.slug?.trim()) input.slug = options.slug.trim().toLowerCase();
   if (options.model?.trim()) input.model = options.model.trim();
   if (options.billingMode !== undefined) input.billingMode = options.billingMode;
+  if (options.providerKey !== undefined && !["byok", "both"].includes(options.billingMode ?? "")) throw new Error("--provider-key on create requires explicit --billing-mode byok or both");
   if (options.providerKey !== undefined) input.providerKeyIds = providerKeySelection(options.providerKey);
   const created = await createEndpoint(input);
   const stored = await readStoredAuth();
@@ -653,6 +654,7 @@ export async function cmdEndpointSet(ref: string, options: EndpointSetOptions): 
   }
 
   const { endpoint } = await getEndpoint(ref);
+  if (options.providerKey !== undefined && !["byok", "both"].includes(options.billingMode ?? endpoint.billingMode ?? "")) throw new Error("--provider-key requires BYOK billing; also set --billing-mode byok or both");
   // The server replaces these maps wholesale, so merge onto what the endpoint
   // has now and validate the result the way the backend will.
   const kindRoutes = mergeMap(endpoint.kindRoutes, kindEntries, options.clearKindRoutes);
@@ -1008,6 +1010,7 @@ export function registerEndpointCommands(
 ): void {
   const endpoints = program
     .command("endpoints")
+    .alias("profiles")
     .description("manage the inference endpoints used by heyditto claude / codex")
     .summary("manage inference endpoints")
     .showHelpAfterError()
@@ -1050,15 +1053,28 @@ through the gh CLI; the plaintext never reaches your terminal.`,
     .command("provider-keys")
     .description("list your saved personal provider-key metadata, never plaintext credentials")
     .addOption(outputOption())
-    .action(async () => { process.stdout.write(`${JSON.stringify(await personalProviderKeys(), null, 2)}\n`); });
+    .action(async (options: {output?: string}) => {
+      const result = await personalProviderKeys();
+      if (isJSON(options)) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      else {
+        process.stdout.write(`Personal provider keys (${result.keys.length}; credentials never shown)\n`);
+        for (const key of result.keys) process.stdout.write(`${key.provider}  ${key.configured && key.enabled ? "enabled" : "unavailable"}  ${key.id}  ${key.label ?? ""}\n`);
+      }
+    });
   endpoints
     .command("models")
     .description("discover available GM models from the server catalog")
     .argument("<provider>", "provider (currently gm)")
     .addOption(outputOption())
-    .action(async (provider: string) => {
+    .action(async (provider: string, options: {output?: string}) => {
       if (provider !== "gm") throw new Error("model discovery currently supports gm");
-      process.stdout.write(`${JSON.stringify(await gmModels(), null, 2)}\n`);
+      const result = await gmModels();
+      if (!result || !Array.isArray(result.models)) throw new Error("Router returned an invalid GM model catalog");
+      if (isJSON(options)) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      else {
+        process.stdout.write(`GM models (${result.models.length})\n`);
+        for (const model of result.models) process.stdout.write(`${model.id}  ${model.name ?? ""}\n`);
+      }
     });
   endpoints
     .command("show")
