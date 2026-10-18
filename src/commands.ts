@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { gmModels, personalProviderKeys, providerKeySelection } from "./router-discovery.js";
 import { createInterface } from "node:readline/promises";
 import { Command, Option } from "commander";
 import { launchHarness, pickEndpoint } from "./agents/launch.js";
@@ -190,6 +191,8 @@ interface EndpointCreateOptions {
   slug?: string;
   model?: string;
   default?: boolean;
+  billingMode?: string;
+  providerKey?: string[];
 }
 
 export async function cmdEndpointCreate(options: EndpointCreateOptions): Promise<void> {
@@ -197,6 +200,9 @@ export async function cmdEndpointCreate(options: EndpointCreateOptions): Promise
   if (options.name?.trim()) input.name = options.name.trim();
   if (options.slug?.trim()) input.slug = options.slug.trim().toLowerCase();
   if (options.model?.trim()) input.model = options.model.trim();
+  if (options.billingMode !== undefined) input.billingMode = options.billingMode;
+  if (options.providerKey !== undefined && !["byok", "both"].includes(options.billingMode ?? "")) throw new Error("--provider-key on create requires explicit --billing-mode byok or both");
+  if (options.providerKey !== undefined) input.providerKeyIds = providerKeySelection(options.providerKey);
   const created = await createEndpoint(input);
   const stored = await readStoredAuth();
   const makeDefault = options.default || !stored?.defaultEndpoint;
@@ -380,6 +386,7 @@ interface EndpointSetOptions {
   maxToolRounds?: string;
   modelMode?: string;
   billingMode?: string;
+  providerKey?: string[];
   routing?: string;
   streamGranularity?: string;
   contextCompaction?: string;
@@ -574,6 +581,7 @@ export async function cmdEndpointSet(ref: string, options: EndpointSetOptions): 
   // quoted value with stray whitespace still matches the server's enum.
   if (options.modelMode !== undefined) patch.modelMode = options.modelMode.trim();
   if (options.billingMode !== undefined) patch.billingMode = options.billingMode.trim();
+  if (options.providerKey !== undefined) patch.providerKeyIds = providerKeySelection(options.providerKey);
   if (options.routing !== undefined) patch.routingMode = options.routing.trim();
   if (options.streamGranularity !== undefined) patch.streamGranularity = options.streamGranularity.trim();
   if (options.contextCompaction !== undefined) patch.contextCompaction = options.contextCompaction.trim();
@@ -646,6 +654,7 @@ export async function cmdEndpointSet(ref: string, options: EndpointSetOptions): 
   }
 
   const { endpoint } = await getEndpoint(ref);
+  if (options.providerKey !== undefined && !["byok", "both"].includes(options.billingMode ?? endpoint.billingMode ?? "")) throw new Error("--provider-key requires BYOK billing; also set --billing-mode byok or both");
   // The server replaces these maps wholesale, so merge onto what the endpoint
   // has now and validate the result the way the backend will.
   const kindRoutes = mergeMap(endpoint.kindRoutes, kindEntries, options.clearKindRoutes);
@@ -814,6 +823,7 @@ export interface KeysCreateOptions {
   vercelEnv?: string;
   k8sSecret?: string;
   flySecret?: string;
+  keyFile?: string;
   repo?: string;
   env?: string;
   org?: string;
@@ -851,6 +861,7 @@ export function shorthandsOf(options: KeysCreateOptions): Partial<Record<StoreId
     vercel: options.vercelEnv,
     kubernetes: options.k8sSecret,
     fly: options.flySecret,
+    file: options.keyFile,
   };
 }
 
@@ -870,7 +881,8 @@ function parseKeyExpiry(raw: string | undefined): KeyExpiry {
 /**
  * Mints a key on an endpoint and hands the plaintext straight to the platform
  * CLI over stdin (`gh secret set`, `gcloud secrets create --data-file=-`, …).
- * The key is never printed, logged or stored locally; when the platform CLI
+ * The key is never printed or logged; only the explicit private-file adapter
+ * stores it locally. When delivery
  * fails it is revoked again so nothing usable is left behind.
  */
 export async function cmdEndpointKeysCreate(ref: string, options: KeysCreateOptions): Promise<void> {
@@ -948,7 +960,7 @@ export async function cmdEndpointKeysCreate(ref: string, options: KeysCreateOpti
   process.stdout.write(
     [
       `Minted key …${key.keyHint} (${key.name ?? keyName}) on ${endpoint.slug}: expires ${expiresIn}${budget !== undefined ? `, budget ${budget.toLocaleString()} tokens ${spendPeriod}` : ", no spend cap"}.`,
-      `Stored ${secretName} in ${target.describe} via ${store.bin}. The key was not printed and is not kept locally.`,
+      `Stored ${secretName} in ${target.describe} via ${store.bin}. The key was not printed${store.id === "file" ? "; its only local copy is the requested private file" : " and is not kept locally"}.`,
       "",
       ...store.usage(secretName, target, gateway),
       "",
@@ -999,6 +1011,7 @@ export function registerEndpointCommands(
 ): void {
   const endpoints = program
     .command("endpoints")
+    .alias("profiles")
     .description("manage the inference endpoints used by heyditto claude / codex")
     .summary("manage inference endpoints")
     .showHelpAfterError()
@@ -1029,12 +1042,41 @@ through the gh CLI; the plaintext never reaches your terminal.`,
       .option("--name <name>", "display name")
       .option("--slug <slug>", "url-safe slug (lowercase letters, digits, dashes)")
       .option("--model <id>", "default model id (default: the gateway's default model)")
+      .addOption(new Option("--billing-mode <mode>", "whose keys pay; byok never falls back to Ditto-funded providers").choices([...BILLING_MODES]))
+      .option("--provider-key <id>", "select a saved personal provider key UUID (repeatable or comma-separated; never a raw key)", collect)
       .option("--default", "make it the default for heyditto claude / codex (automatic when you have no default yet)")
       .addOption(outputOption())
       .action(cmdEndpointCreate),
     `  heyditto endpoints create
   heyditto endpoints create --name "Work laptop" --model anthropic/claude-sonnet-5 --default`,
   );
+  endpoints
+    .command("provider-keys")
+    .description("list your saved personal provider-key metadata, never plaintext credentials")
+    .addOption(outputOption())
+    .action(async (options: {output?: string}) => {
+      const result = await personalProviderKeys();
+      if (isJSON(options)) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      else {
+        process.stdout.write(`Personal provider keys (${result.keys.length}; credentials never shown)\n`);
+        for (const key of result.keys) process.stdout.write(`${key.provider}  ${key.configured && key.enabled ? "enabled" : "unavailable"}  ${key.id}  ${key.label ?? ""}\n`);
+      }
+    });
+  endpoints
+    .command("models")
+    .description("discover available GM models from the server catalog")
+    .argument("<provider>", "provider (currently gm)")
+    .addOption(outputOption())
+    .action(async (provider: string, options: {output?: string}) => {
+      if (provider !== "gm") throw new Error("model discovery currently supports gm");
+      const result = await gmModels();
+      if (!result || !Array.isArray(result.models)) throw new Error("Router returned an invalid GM model catalog");
+      if (isJSON(options)) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      else {
+        process.stdout.write(`GM models (${result.models.length})\n`);
+        for (const model of result.models) process.stdout.write(`${model.id}  ${model.name ?? ""}\n`);
+      }
+    });
   endpoints
     .command("show")
     .description("show one endpoint's settings")
@@ -1092,6 +1134,7 @@ through the gh CLI; the plaintext never reaches your terminal.`,
       .addOption(new Option("--routing <mode>", "how a provider is picked for a model").choices([...ROUTING_MODES]))
       .addOption(new Option("--model-mode <mode>", "what happens to an unknown request model").choices([...MODEL_MODES]))
       .addOption(new Option("--billing-mode <mode>", "whose provider keys pay for requests").choices([...BILLING_MODES]))
+      .option("--provider-key <id>", "replace selected saved provider key UUIDs (repeatable or comma-separated; never raw keys)", collect)
       .addOption(new Option("--stream-granularity <level>", "how much server-side tool activity the stream shows").choices([...STREAM_GRANULARITIES]))
       .option("--max-tool-rounds <n>", `server-side tool loop cap per request (0-${MAX_TOOL_ROUNDS})`)
       .option("--batch <on|off>", "admit batch submissions")
@@ -1159,6 +1202,7 @@ through the gh CLI; the plaintext never reaches your terminal.`,
       .option("--vercel-env <NAME>", "shorthand for --store vercel --secret NAME")
       .option("--k8s-secret <NAME>", "shorthand for --store kubernetes --secret NAME")
       .option("--fly-secret <NAME>", "shorthand for --store fly --secret NAME")
+      .option("--key-file <ABSOLUTE_PATH>", "store file: exclusive 0600 local file; existing private 0700 parent required, never overwrites")
       .option("--repo <owner/repo>", "github: repository for the secret (default: the repo of the current directory)")
       .option("--env <environment>", "github: deployment environment; gitlab: variable environment scope")
       .option("--org <org>", "github: organization secret; gitlab: group variable (cannot be combined with --repo/--env)")

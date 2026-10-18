@@ -291,7 +291,7 @@ test("keys stores --output json is machine readable", async () => {
   const result = await run(["endpoints", "keys", "stores", "--output", "json"], fakes.env());
   assert.equal(result.status, 0, result.stderr);
   const stores = JSON.parse(result.stdout);
-  assert.equal(stores.length, 12);
+  assert.equal(stores.length, 13);
   const github = stores.find((s) => s.id === "github");
   assert.equal(github.installed, true);
   assert.equal(github.shorthand, "--gh-secret");

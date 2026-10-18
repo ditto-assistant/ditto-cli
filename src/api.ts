@@ -112,6 +112,7 @@ export interface InferenceEndpoint {
   tools?: string[];
   modelMode?: string;
   billingMode?: string;
+  providerKeyIds?: string[];
   routingMode?: string;
   streamGranularity?: string;
   contextCompaction?: string;
@@ -149,6 +150,7 @@ export interface EndpointInput {
   maxToolRounds?: number;
   modelMode?: string;
   billingMode?: string;
+  providerKeyIds?: string[];
   routingMode?: string;
   streamGranularity?: string;
   contextCompaction?: string;
