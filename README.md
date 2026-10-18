@@ -213,6 +213,16 @@ heyditto review retry <run-id> --org omniaura
 heyditto review cancel <run-id> --org omniaura
 ```
 
+Skip entire PRs from the console's repository settings or a JSON policy file:
+
+```sh
+heyditto review set owner/repo --skip-rules-file rules.json --org omniaura
+heyditto review repos --org omniaura --output json
+heyditto review set owner/repo --clear-skip-rules --org omniaura
+```
+
+The JSON object accepts `headBranches`, `baseBranches`, `titles`, `authors`, and `labels` arrays, plus `bots` (boolean). For example, `{"authors":["dependabot[bot]"],"titles":["chore(i18n):*"],"labels":["skip-review"]}`. Any match excludes the PR. `*` spans any text including slashes; `?` matches one character; brackets and all other characters are literal. Authors and labels ignore case; branches and titles match case. Each list permits 50 patterns of up to 200 UTF-8 bytes. Empty rules skip nothing, and bots are included by default. Rules skip automatic reviews. An explicit `heyditto review start`, console Review now/retry, or authorized `@ditto review` request overrides skip rules for that review, without changing the saved policy. Settings writes preserve the policy and use the repository revision to refuse concurrent edits. This requires a backend that returns `skipRules`; an unsupported backend is reported as a failed save.
+
 `start` reviews the PR's current head using the repository's saved budget and
 settings. Starting a previously completed head requests another paid attempt.
 `retry` can reuse a stored result after publication failure; other eligible
