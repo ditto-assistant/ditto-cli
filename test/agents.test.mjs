@@ -8,6 +8,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { liftResumeFlags, planClaude } from "../dist/agents/claude.js";
+import { claudeDittoDenyRules } from "../dist/agents/claude-deny.js";
 import { searchTranscripts } from "../dist/agents/claude-transcripts.js";
 import { planCodex, tomlString } from "../dist/agents/codex.js";
 import { GROK_MODEL_ID, GROK_SESSION_ENV, grokModelConfig, planGrok } from "../dist/agents/grok.js";
@@ -388,6 +389,29 @@ test("planClaude: resume, continue, model and header merging", () => {
   const merged = planClaude({ ...base, env: { ANTHROPIC_CUSTOM_HEADERS: "X-Team: a" } });
   assert.equal(merged.envSet.ANTHROPIC_CUSTOM_HEADERS, "X-Team: a\nX-Ditto-Session-Id: s1");
   assert.equal(childEnv(merged, { ANTHROPIC_API_KEY: "old", HOME: "/h" }).ANTHROPIC_API_KEY, undefined);
+});
+
+test("planClaude: forwards router deny rules as a header", () => {
+  const base = { baseUrl: "https://api.heyditto.ai/v1", apiKey: "k", sessionId: "s1", passthrough: [], env: {} };
+  assert.equal(planClaude({ ...base, toolDeny: [] }).envSet.ANTHROPIC_CUSTOM_HEADERS, "X-Ditto-Session-Id: s1");
+  const denied = planClaude({ ...base, toolDeny: ["gmail__*", "class:gated"], env: { ANTHROPIC_CUSTOM_HEADERS: "X-Team: a" } });
+  assert.equal(denied.envSet.ANTHROPIC_CUSTOM_HEADERS, "X-Team: a\nX-Ditto-Session-Id: s1\nX-Ditto-Tool-Deny: gmail__*,class:gated");
+});
+
+test("claudeDittoDenyRules: reads user, project and local settings", () => {
+  const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "ditto-deny-")));
+  const home = path.join(root, "home");
+  const cwd = path.join(root, "repo");
+  mkdirSync(home);
+  mkdirSync(path.join(cwd, ".claude"), { recursive: true });
+  const write = (file, deny) => writeFileSync(file, JSON.stringify({ permissions: { deny } }));
+  write(path.join(home, "settings.json"), ["mcp__ditto__gmail__send_email", "Bash(rm:*)"]);
+  write(path.join(cwd, ".claude", "settings.json"), ["mcp__ditto__slack__*", "mcp__ditto__bad name", "mcp__other__x", 7]);
+  write(path.join(cwd, ".claude", "settings.local.json"), ["mcp__ditto__slack__*", "mcp__ditto"]);
+  assert.deepEqual(claudeDittoDenyRules(cwd, { CLAUDE_CONFIG_DIR: home }), ["gmail__send_email", "slack__*", "*"]);
+  // Missing and malformed files contribute nothing rather than failing the launch.
+  writeFileSync(path.join(cwd, ".claude", "settings.local.json"), "{not json");
+  assert.deepEqual(claudeDittoDenyRules(cwd, { CLAUDE_CONFIG_DIR: path.join(root, "absent") }), ["slack__*"]);
 });
 
 test("planCodex: resume forms and header override", () => {

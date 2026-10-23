@@ -54,6 +54,8 @@ export interface PlanInput {
   plan?: boolean;
   /** Extra argv forwarded verbatim to the harness. */
   passthrough: string[];
+  /** Router tool deny rules to forward (claude-deny.ts); Claude only. */
+  toolDeny?: string[];
   /** Parent environment to derive the child environment from. */
   env: NodeJS.ProcessEnv;
 }

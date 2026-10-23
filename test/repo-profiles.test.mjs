@@ -149,6 +149,31 @@ test("repo apply patches only what differs and keeps unrelated provider options"
   }
 });
 
+test("tool_deny is sent in the server's normal form and then reads back unchanged", async () => {
+  const stub = await startStub([
+    { id: "ep-org", slug: "ditto-dev", companyId: ORG.id, model: "openai/gpt-6.1-sol", modelMode: "passthrough", codeMode: true,
+      kindRoutes: { aside: "z-ai/glm-5.3-flash" }, toolDeny: [], providerOptions: { claude_system_prompt: PROMPT, claude_prompt_mode: "replace" } },
+  ]);
+  const profile = ORG_PROFILE + `tool_deny = ["mcp__ditto__Gmail__send_*", "class:gated", "gmail__send_*"]\n`;
+  const dir = await repo({ ".ditto/config.toml": CONFIG, ".ditto/endpoints/dev.toml": profile, ".ditto/prompts/claude.md": PROMPT });
+  try {
+    const out = await run(["repo", "apply"], stub.base, dir);
+    assert.equal(out.status, 0, out.stderr);
+    assert.equal(stub.writes.length, 1);
+    assert.deepEqual(stub.writes[0].body, { toolDeny: ["gmail__send_*", "class:gated"] });
+    const again = await run(["repo", "apply"], stub.base, dir);
+    assert.equal(again.status, 0, again.stderr);
+    assert.equal(stub.writes.length, 1, "the normalized list matches what the server stored");
+
+    const bad = await repo({ ".ditto/config.toml": CONFIG, ".ditto/endpoints/dev.toml": ORG_PROFILE + `tool_deny = "gmail__*"\n`, ".ditto/prompts/claude.md": PROMPT });
+    const refused = await run(["repo", "apply"], stub.base, bad);
+    assert.notEqual(refused.status, 0);
+    assert.match(refused.stderr, /tool_deny must be a list of strings/);
+  } finally {
+    stub.close();
+  }
+});
+
 test("a personal profile lands in the caller's own account even when an org endpoint shares the slug", async () => {
   const stub = await startStub([{ id: "ep-org", slug: "dev", companyId: ORG.id, model: "m", providerOptions: {} }]);
   const dir = await repo({
