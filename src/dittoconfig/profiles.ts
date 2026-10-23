@@ -158,7 +158,11 @@ export async function profileBody(decl: EndpointDecl, profileDir: string): Promi
  */
 async function readPromptFile(profile: string, harness: string, profileDir: string, rel: string): Promise<string> {
   const field = `endpoints.${profile}.settings.${harness}_prompt.file`;
+  // Anchor to the repository, not to wherever .ditto/ resolves: a .ditto that
+  // is itself a symlink to another directory would otherwise become the boundary.
+  const repoRoot = await realpath(path.resolve(profileDir, "..", ".."));
   const dittoDir = await realpath(path.resolve(profileDir, ".."));
+  if (!dittoDir.startsWith(repoRoot + path.sep)) throw new ProfileError(`${field}: .ditto/ must be a directory inside the repository, not a link out of it`);
   let file: string;
   try {
     file = await realpath(path.resolve(profileDir, rel));

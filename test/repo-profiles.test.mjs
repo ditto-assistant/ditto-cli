@@ -304,3 +304,19 @@ test("resuming a transcript picks the profile of the repository it ran in, not t
     stub.close();
   }
 });
+
+test("a .ditto directory that links out of the repository is refused", async () => {
+  const stub = await startStub();
+  const outside = await repo({ "endpoints/dev.toml": ORG_PROFILE, "prompts/claude.md": "SECRET-OUTSIDE-REPO\n", "config.toml": CONFIG });
+  const dir = await repo({});
+  await symlink(outside, path.join(dir, ".ditto"));
+  try {
+    const out = await run(["repo", "apply"], stub.base, dir);
+    assert.notEqual(out.status, 0);
+    assert.match(out.stderr, /\.ditto\/ must be a directory inside the repository/);
+    assert.equal(stub.writes.length, 0);
+    assert.ok(!(out.stdout + out.stderr).includes("SECRET-OUTSIDE-REPO"));
+  } finally {
+    stub.close();
+  }
+});
