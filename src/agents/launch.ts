@@ -21,6 +21,7 @@ import { apiBaseURL, configDir, endpointURL, resolveApiKey } from "../config.js"
 import { deviceLogin } from "../device-login.js";
 import { formatActivation } from "../endpoint-format.js";
 import { readStoredAuth, saveLogin, updateStoredAuth } from "../store.js";
+import { findProfileEndpoint, repoDefaultProfile } from "../dittoconfig/profiles.js";
 import { err as c } from "../ui.js";
 import { holdNotesForTui, type NoteOptions, releaseNotes, writeNote } from "../terminal-note.js";
 import { liftResumeFlags, planClaude } from "./claude.js";
@@ -418,7 +419,24 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     selected = await browserLogin(harness, requestedEndpoint);
     catalog = await listEndpoints();
   }
-  const endpoint = await resolveEndpoint(requestedEndpoint, catalog.endpoints, selected);
+  // With no --endpoint (and no resumed session's endpoint), a repository that
+  // declares `repository.default_endpoint` in .ditto/config.toml picks the
+  // profile; the saved personal default only applies outside such a repository.
+  let endpoint: InferenceEndpoint | undefined;
+  if (!requestedEndpoint?.trim()) {
+    const profile = await repoDefaultProfile(options.cwd ?? process.cwd());
+    if (profile) {
+      endpoint = await findProfileEndpoint(profile, catalog.endpoints);
+      if (!endpoint) {
+        throw new Error(
+          `this repository's .ditto profile "${profile.name}" has no endpoint in ${profile.owner.kind === "org" ? `@${profile.owner.org}` : "your account"} yet.\n` +
+            `Create it with \`heyditto repo apply --profile ${profile.name}\` (in ${profile.repoDir}), or pass --endpoint.`,
+        );
+      }
+      log(`using ${profile.owner.kind === "org" ? `@${profile.owner.org}/` : ""}${endpoint.slug} from ${path.join(profile.repoDir, ".ditto")}`);
+    }
+  }
+  endpoint ??= await resolveEndpoint(requestedEndpoint, catalog.endpoints, selected);
   await assertEndpointActive(endpoint);
 
   let cwd = process.cwd();
