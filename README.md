@@ -514,6 +514,11 @@ How the wiring works:
   token, which skips Claude's "use this API key?" prompt) and
   `ANTHROPIC_CUSTOM_HEADERS` with the session id. Any inherited
   `ANTHROPIC_API_KEY` is removed from the child environment.
+  Router tools run on the server, so Claude Code's own permission rules never
+  see them. `permissions.deny` entries for `mcp__ditto__<tool>` (globs allowed;
+  a bare `mcp__ditto` denies them all) in your user, project or local
+  `settings.json` are forwarded as `X-Ditto-Tool-Deny`, and the router refuses
+  those tools for the session. The header can only add denials.
 - **Codex** speaks the Responses API only, so the endpoint is injected as a
   `ditto` model provider via `-c` overrides (nothing is written to
   `~/.codex/config.toml`) with the key in `DITTO_INFERENCE_API_KEY`.
@@ -1033,8 +1038,14 @@ Settings: `owner`, `claude_prompt` / `codex_prompt` (`file`, `mode`,
 `precompact_at_tokens`, `max_tool_rounds`, `memory_depth`, `recall`, `record`,
 `record_trace`, `record_attachments`, `trace_retention_days`, `batch`,
 `batch_max_requests`, `tools`, `tool_approval_mode`, `auto_approve_tools`,
-`required_connections`, `kind_routes`, `model_routes`, `subagent_routes`,
-`aliases`.
+`tool_deny`, `required_connections`, `kind_routes`, `model_routes`,
+`subagent_routes`, `aliases`.
+
+`tool_deny` lists router tools the endpoint never runs, whatever a client asks:
+tool names, globs such as `"gmail__send_*"`, or a class (`"class:gated"`,
+`"class:write"`). Denied tools are hidden from the model, and a call to one is
+refused. On an organization endpoint, changing it needs endpoint policy
+authority.
 
 Layers: workspace `.ditto/` (a parent folder of many repos) < repository `.ditto/` <
 ignored `.ditto/local.toml` < flags. Secrets are never literals: use `secret://`
