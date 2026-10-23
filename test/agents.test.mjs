@@ -414,6 +414,26 @@ test("claudeDittoDenyRules: reads user, project and local settings", () => {
   assert.deepEqual(claudeDittoDenyRules(cwd, { CLAUDE_CONFIG_DIR: path.join(root, "absent") }), ["slack__*"]);
 });
 
+test("claudeDittoDenyRules: a nested directory still gets the repository's rules", () => {
+  const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "ditto-deny-nested-")));
+  const repo = path.join(root, "repo");
+  const nested = path.join(repo, "packages", "app");
+  mkdirSync(path.join(repo, ".git"), { recursive: true });
+  mkdirSync(path.join(repo, ".claude"), { recursive: true });
+  mkdirSync(path.join(nested, ".claude"), { recursive: true });
+  // Above the repository root: never read.
+  mkdirSync(path.join(root, ".claude"), { recursive: true });
+  writeFileSync(path.join(root, ".claude", "settings.json"), JSON.stringify({ permissions: { deny: ["mcp__ditto__outside__*"] } }));
+  writeFileSync(path.join(repo, ".claude", "settings.json"), JSON.stringify({ permissions: { deny: ["mcp__ditto__gmail__*"] } }));
+  writeFileSync(path.join(nested, ".claude", "settings.local.json"), JSON.stringify({ permissions: { deny: ["mcp__ditto__slack__*"] } }));
+  const env = { CLAUDE_CONFIG_DIR: path.join(root, "absent") };
+  assert.deepEqual(claudeDittoDenyRules(nested, env), ["slack__*", "gmail__*"]);
+  // Outside any repository only the directory itself counts.
+  const loose = path.join(root, "loose", "deep");
+  mkdirSync(path.join(loose, ".claude"), { recursive: true });
+  assert.deepEqual(claudeDittoDenyRules(loose, env), []);
+});
+
 test("planCodex: resume forms and header override", () => {
   const base = { baseUrl: "https://api.heyditto.ai/v1", apiKey: "k", sessionId: "s1", passthrough: ["--search"], env: {} };
   const resumeId = planCodex({ ...base, resumeId: "t1" });

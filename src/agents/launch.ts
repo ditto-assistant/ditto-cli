@@ -845,6 +845,7 @@ async function runHeadless(harness: Harness, ctx: HeadlessRunContext): Promise<n
         model: ctx.model,
         yolo: ctx.options.yolo,
         yellow: ctx.options.yellow,
+        toolDeny: harness === "claude" ? claudeDittoDenyRules(ctx.cwd, process.env) : undefined,
         env: process.env,
       },
       prompt,
