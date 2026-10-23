@@ -28,6 +28,7 @@ import { liftResumeFlags, planClaude } from "./claude.js";
 import { resolveClaudeResume, transcriptCwd } from "./claude-resume.js";
 import { type ClaudeTranscript, findTranscriptById, listTranscriptsIn } from "./claude-transcripts.js";
 import { planCodex } from "./codex.js";
+import { readHarnessVersion } from "./harness-headers.js";
 import { ensureGrokHome, planGrok } from "./grok.js";
 import { type SessionRecord, latestSession, readSession, sessionForHarnessId, writeSession } from "./sessions.js";
 import { canonicalCwd } from "../teleport/harness.js";
@@ -522,10 +523,17 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
       })
     : undefined;
 
+  // Sent as X-Ditto-Harness-Version so the router can shape requests for this
+  // exact release. Read once per launch (after sign-in, so a failed login
+  // never runs the harness) and reused by every turn; unreadable means the
+  // header is left out, never guessed.
+  const harnessVersion = harness === "grok" ? undefined : readHarnessVersion(harness);
+
   const plan = planFor(harness, {
     baseUrl: catalog.baseUrl,
     apiKey: key?.key ?? DRY_RUN_KEY,
     sessionId,
+    harnessVersion,
     model,
     resumeId,
     resumeLast,
@@ -603,6 +611,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
         harnessSessionId,
         baseUrl: catalog.baseUrl,
         apiKey: key.key ?? "",
+        harnessVersion,
         model,
         options,
         record: nextRecord,
@@ -781,6 +790,8 @@ async function runInTerminalWithRemote(harness: Harness, plan: HarnessPlan, ctx:
 interface HeadlessRunContext extends RemoteRunContext {
   baseUrl: string;
   apiKey: string;
+  /** Installed harness version read at launch (X-Ditto-Harness-Version). */
+  harnessVersion?: string;
   model?: string;
   options: LaunchOptions;
   /** grok: the launch GROK_HOME reused by every headless turn. */
@@ -840,6 +851,7 @@ async function runHeadless(harness: Harness, ctx: HeadlessRunContext): Promise<n
         baseUrl: ctx.baseUrl,
         apiKey: ctx.apiKey,
         sessionId: ctx.sessionId,
+        harnessVersion: ctx.harnessVersion,
         model: ctx.model,
         yolo: ctx.options.yolo,
         yellow: ctx.options.yellow,
