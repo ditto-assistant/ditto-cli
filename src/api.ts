@@ -112,6 +112,8 @@ export interface InferenceEndpoint {
   /** Free-form per-provider settings, including the coding-agent keys. */
   providerOptions?: Record<string, unknown>;
   tools?: string[];
+  /** Router tools this endpoint never runs: names, globs, or class:<tier>. */
+  toolDeny?: string[];
   modelMode?: string;
   billingMode?: string;
   providerKeyIds?: string[];
@@ -171,6 +173,8 @@ export interface EndpointInput {
   modelRoutes?: Record<string, string>;
   aliases?: Record<string, string>;
   providerOptions?: Record<string, unknown>;
+  /** Whole-list replacement; needs endpoint policy authority on org endpoints. */
+  toolDeny?: string[];
 }
 
 /**

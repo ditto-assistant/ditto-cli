@@ -51,6 +51,7 @@ const SETTING_FIELDS: Record<string, keyof EndpointInput | "codeMode" | "subagen
   tools: "tools",
   tool_approval_mode: "toolApprovalMode",
   auto_approve_tools: "autoApproveTools",
+  tool_deny: "toolDeny",
   required_connections: "requiredConnections",
   kind_routes: "kindRoutes",
   model_routes: "modelRoutes",
@@ -145,9 +146,23 @@ export async function profileBody(decl: EndpointDecl, profileDir: string): Promi
         `endpoints.${decl.name}.settings.${key}: unknown setting. Known: owner, claude_prompt, codex_prompt, ${Object.keys(SETTING_FIELDS).join(", ")}`,
       );
     }
-    body[field] = value;
+    body[field] = field === "toolDeny" ? denyRules(decl.name, value) : value;
   }
   return { body, options };
+}
+
+/**
+ * Deny rules in the form the server stores them (toolgate.NormalizeDenyRules:
+ * trimmed, lower-case, without the mcp__ditto__ prefix, deduplicated), so a
+ * profile written either way reads back unchanged instead of re-patching on
+ * every apply. The server still validates each rule.
+ */
+function denyRules(profile: string, value: unknown): string[] {
+  if (!Array.isArray(value) || value.some((v) => typeof v !== "string")) {
+    throw new ProfileError(`endpoints.${profile}.settings.tool_deny must be a list of strings, e.g. ["gmail__send_*", "class:gated"]`);
+  }
+  const rules = value.map((v: string) => v.trim().toLowerCase().replace(/^mcp__ditto__/, ""));
+  return [...new Set(rules)];
 }
 
 /**

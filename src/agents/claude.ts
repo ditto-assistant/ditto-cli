@@ -1,3 +1,4 @@
+import { TOOL_DENY_HEADER } from "./claude-deny.js";
 import { type HarnessPlan, type PlanInput, SESSION_HEADER, apiRootOf } from "./types.js";
 
 /**
@@ -27,7 +28,8 @@ export function planClaude(input: PlanInput): HarnessPlan {
   if (input.prompt !== undefined) args.push("-p", input.prompt);
   args.push(...input.passthrough);
 
-  const headers = [input.env.ANTHROPIC_CUSTOM_HEADERS?.trim(), `${SESSION_HEADER}: ${input.sessionId}`]
+  const deny = input.toolDeny?.length ? `${TOOL_DENY_HEADER}: ${input.toolDeny.join(",")}` : undefined;
+  const headers = [input.env.ANTHROPIC_CUSTOM_HEADERS?.trim(), `${SESSION_HEADER}: ${input.sessionId}`, deny]
     .filter((h): h is string => Boolean(h))
     .join("\n");
 

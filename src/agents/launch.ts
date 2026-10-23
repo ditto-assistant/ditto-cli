@@ -24,6 +24,7 @@ import { readStoredAuth, saveLogin, updateStoredAuth } from "../store.js";
 import { findProfileEndpoint, repoDefaultProfile } from "../dittoconfig/profiles.js";
 import { err as c } from "../ui.js";
 import { holdNotesForTui, type NoteOptions, releaseNotes, writeNote } from "../terminal-note.js";
+import { claudeDittoDenyRules } from "./claude-deny.js";
 import { liftResumeFlags, planClaude } from "./claude.js";
 import { resolveClaudeResume, transcriptCwd } from "./claude-resume.js";
 import { type ClaudeTranscript, findTranscriptById, listTranscriptsIn } from "./claude-transcripts.js";
@@ -534,6 +535,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     yellow: options.yellow,
     plan: options.plan,
     passthrough,
+    toolDeny: harness === "claude" ? claudeDittoDenyRules(cwd, process.env) : undefined,
     env: process.env,
   }, grokHome);
 
@@ -843,6 +845,7 @@ async function runHeadless(harness: Harness, ctx: HeadlessRunContext): Promise<n
         model: ctx.model,
         yolo: ctx.options.yolo,
         yellow: ctx.options.yellow,
+        toolDeny: harness === "claude" ? claudeDittoDenyRules(ctx.cwd, process.env) : undefined,
         env: process.env,
       },
       prompt,
