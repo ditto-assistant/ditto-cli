@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, symlink, writeFile } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -58,9 +58,9 @@ function startStub(initial = []) {
   });
 }
 
-function run(args, base, cwd) {
+function run(args, base, cwd, extraEnv = {}) {
   return new Promise((resolve, reject) => {
-    const env = { ...process.env, DITTO_API_BASE: base, DITTO_API_KEY: "ditto_mcp_test", DITTO_CONFIG_DIR: path.join(cwd, ".heyditto-config") };
+    const env = { ...process.env, DITTO_API_BASE: base, DITTO_API_KEY: "ditto_mcp_test", DITTO_CONFIG_DIR: path.join(cwd, ".heyditto-config"), ...extraEnv };
     delete env.DITTO_ENDPOINT;
     const child = spawn(process.execPath, [cliPath, ...args], { env, cwd, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
@@ -211,6 +211,95 @@ test("a launch names the apply command when the repository's profile does not ex
     const out = await run(["claude", "--dry-run"], stub.base, dir);
     assert.notEqual(out.status, 0);
     assert.match(out.stderr, /heyditto repo apply --profile dev/);
+  } finally {
+    stub.close();
+  }
+});
+
+test("a prompt symlink pointing outside .ditto/ is refused and its target never sent", async () => {
+  const stub = await startStub();
+  const outside = await repo({ "secret.txt": "AWS_SECRET_ACCESS_KEY=do-not-send\n" });
+  const dir = await repo({ ".ditto/config.toml": CONFIG, ".ditto/endpoints/dev.toml": ORG_PROFILE });
+  await mkdir(path.join(dir, ".ditto/prompts"), { recursive: true });
+  await symlink(path.join(outside, "secret.txt"), path.join(dir, ".ditto/prompts/claude.md"));
+  try {
+    const out = await run(["repo", "apply"], stub.base, dir);
+    assert.notEqual(out.status, 0);
+    assert.match(out.stderr, /must stay inside \.ditto\/ \(symlinks included\)/);
+    assert.equal(stub.writes.length, 0);
+    assert.ok(!(out.stdout + out.stderr).includes("do-not-send"));
+  } finally {
+    stub.close();
+  }
+});
+
+test("every profile is planned before any is written", async () => {
+  const stub = await startStub();
+  const dir = await repo({
+    ".ditto/config.toml": CONFIG,
+    ".ditto/endpoints/a-good.toml": `managed = true\nname = "a-good"\nmodel = "m"\n`,
+    ".ditto/endpoints/b-bad.toml": `managed = true\nname = "b-bad"\n[settings]\nclaude_prompt = { file = "../prompts/missing.md" }\n`,
+  });
+  try {
+    const out = await run(["repo", "apply"], stub.base, dir);
+    assert.notEqual(out.status, 0);
+    assert.equal(stub.writes.length, 0, "the valid first profile must not be written when a later one fails");
+  } finally {
+    stub.close();
+  }
+});
+
+test("prompt autoupdate must be a boolean", async () => {
+  const stub = await startStub();
+  const dir = await repo({
+    ".ditto/config.toml": CONFIG,
+    ".ditto/endpoints/dev.toml": `managed = true\nname = "dev"\n[settings]\nclaude_prompt = { autoupdate = "false" }\n`,
+  });
+  try {
+    const out = await run(["repo", "apply"], stub.base, dir);
+    assert.notEqual(out.status, 0);
+    assert.match(out.stderr, /autoupdate must be true or false/);
+    assert.equal(stub.writes.length, 0);
+  } finally {
+    stub.close();
+  }
+});
+
+test("a personal launch profile never resolves to an organization's endpoint", async () => {
+  const stub = await startStub([{ id: "ep-org", slug: "dev", companyId: ORG.id, model: "m", status: "active", providerOptions: {} }]);
+  const dir = await repo({ ".ditto/config.toml": CONFIG, ".ditto/endpoints/dev.toml": `managed = true\nname = "dev"\n` });
+  try {
+    const out = await run(["claude", "--dry-run"], stub.base, dir);
+    assert.notEqual(out.status, 0, "only the org's endpoint has the slug, so the personal profile is unresolved");
+    assert.match(out.stderr, /heyditto repo apply --profile dev/);
+  } finally {
+    stub.close();
+  }
+});
+
+test("resuming a transcript picks the profile of the repository it ran in, not the shell's", async () => {
+  const stub = await startStub([
+    { id: "ep-a", slug: "repo-a", model: "m", status: "active", providerOptions: {} },
+    { id: "ep-b", slug: "repo-b", model: "m", status: "active", providerOptions: {} },
+  ]);
+  const a = await repo({ ".ditto/config.toml": CONFIG.replace('"dev"', '"repo-a"') });
+  const b = await realpath(await repo({ ".ditto/config.toml": CONFIG.replace('"dev"', '"repo-b"') }));
+  // A Claude Code transcript that ran in repository b, as Claude stores it.
+  const claudeHome = await mkdtemp(path.join(os.tmpdir(), "heyditto-claude-home-"));
+  const id = "5a1b0e0c-7f39-4c47-9a53-1f0b8c2d9e11";
+  const tdir = path.join(claudeHome, "projects", b.replace(/[^A-Za-z0-9]/g, "-"));
+  await mkdir(tdir, { recursive: true });
+  const lines = [
+    { type: "user", message: { role: "user", content: [{ type: "text", text: "hi" }] }, cwd: b, sessionId: id },
+    { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "hi" }] }, cwd: b, sessionId: id },
+  ];
+  await writeFile(path.join(tdir, `${id}.jsonl`), lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+  try {
+    const out = await run(["claude", "--dry-run", "--resume", id], stub.base, a, { CLAUDE_CONFIG_DIR: claudeHome });
+    assert.equal(out.status, 0, out.stderr);
+    const plan = JSON.parse(out.stdout);
+    assert.equal(plan.cwd, b);
+    assert.equal(plan.endpoint.slug, "repo-b");
   } finally {
     stub.close();
   }

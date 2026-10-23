@@ -131,16 +131,20 @@ async function cmdApply(pathArg: string | undefined, options: { profile?: string
       process.exitCode = 1;
       return;
     }
-    const where = plan.owner.kind === "org" ? `@${plan.owner.org}` : "personal";
+    results.push({ ...plan, applied: false });
+  }
+  // Every profile is planned before any is written, so a bad prompt path or a
+  // typo in the third profile cannot leave the first two half-applied.
+  for (const result of results) {
+    const where = result.owner.kind === "org" ? `@${result.owner.org}` : "personal";
     if (!options.json) {
-      out(`${name} -> ${where}/${plan.slug}: ${plan.action}${options.dryRun && plan.action !== "unchanged" ? " (dry run)" : ""}`);
-      for (const [field, [from, to]] of Object.entries(plan.changes)) {
+      out(`${result.profile} -> ${where}/${result.slug}: ${result.action}${options.dryRun && result.action !== "unchanged" ? " (dry run)" : ""}`);
+      for (const [field, [from, to]] of Object.entries(result.changes)) {
         out(`  ${field}: ${JSON.stringify(from) ?? "unset"} -> ${JSON.stringify(to)}`);
       }
     }
-    const applied = !options.dryRun && plan.action !== "unchanged";
-    if (applied) await applyPlan(plan);
-    results.push({ ...plan, applied });
+    result.applied = !options.dryRun && result.action !== "unchanged";
+    if (result.applied) await applyPlan(result);
   }
   if (options.json) {
     out(JSON.stringify(results.map(({ body: _body, ...r }) => r), null, 2));

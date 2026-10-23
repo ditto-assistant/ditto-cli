@@ -14,7 +14,7 @@
  * the endpoint has, so a profile can pin the prompt and the model without
  * owning the tool list a person curated in the console.
  */
-import { readFile } from "node:fs/promises";
+import { readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import {
   type EndpointInput,
@@ -127,19 +127,16 @@ export async function profileBody(decl: EndpointDecl, profileDir: string): Promi
       if (!["file", "mode", "autoupdate"].includes(k)) throw new ProfileError(`endpoints.${decl.name}.settings.${harness}_prompt.${k}: unknown key (file, mode, autoupdate)`);
     }
     if (p.file !== undefined) {
-      const file = path.resolve(profileDir, p.file);
-      if (!file.startsWith(path.resolve(profileDir, "..") + path.sep)) {
-        throw new ProfileError(`endpoints.${decl.name}.settings.${harness}_prompt.file must stay inside .ditto/: ${p.file}`);
-      }
-      options[`${harness}_system_prompt`] = await readFile(file, "utf8").catch((e: Error) => {
-        throw new ProfileError(`endpoints.${decl.name}: cannot read ${harness} prompt ${p.file}: ${e.message}`);
-      });
+      options[`${harness}_system_prompt`] = await readPromptFile(decl.name, harness, profileDir, p.file);
     }
     if (p.mode !== undefined) {
       if (p.mode !== "replace" && p.mode !== "append") throw new ProfileError(`endpoints.${decl.name}.settings.${harness}_prompt.mode must be replace or append`);
       options[`${harness}_prompt_mode`] = p.mode;
     }
-    if (p.autoupdate !== undefined) options[`${harness}_prompt_autoupdate`] = Boolean(p.autoupdate);
+    if (p.autoupdate !== undefined) {
+      if (typeof p.autoupdate !== "boolean") throw new ProfileError(`endpoints.${decl.name}.settings.${harness}_prompt.autoupdate must be true or false`);
+      options[`${harness}_prompt_autoupdate`] = p.autoupdate;
+    }
   }
   for (const [key, value] of Object.entries(settings)) {
     const field = SETTING_FIELDS[key];
@@ -151,6 +148,26 @@ export async function profileBody(decl: EndpointDecl, profileDir: string): Promi
     body[field] = value;
   }
   return { body, options };
+}
+
+/**
+ * Reads a prompt file that must live inside the repository's `.ditto/`. The
+ * check runs on the RESOLVED path: a symlink checked in under `.ditto/` that
+ * points at ~/.ssh or a credentials file would otherwise pass a lexical check
+ * and send that file's contents to the endpoint as its system prompt.
+ */
+async function readPromptFile(profile: string, harness: string, profileDir: string, rel: string): Promise<string> {
+  const field = `endpoints.${profile}.settings.${harness}_prompt.file`;
+  const dittoDir = await realpath(path.resolve(profileDir, ".."));
+  let file: string;
+  try {
+    file = await realpath(path.resolve(profileDir, rel));
+  } catch (e) {
+    throw new ProfileError(`endpoints.${profile}: cannot read ${harness} prompt ${rel}: ${(e as Error).message}`);
+  }
+  if (!file.startsWith(dittoDir + path.sep)) throw new ProfileError(`${field} must stay inside .ditto/ (symlinks included): ${rel}`);
+  if (!(await stat(file)).isFile()) throw new ProfileError(`${field} is not a regular file: ${rel}`);
+  return readFile(file, "utf8");
 }
 
 function summarise(field: string, v: unknown): unknown {
@@ -267,7 +284,7 @@ export async function repoDefaultProfile(startDir: string): Promise<RepoProfile 
 
 /** Picks the endpoint a repository profile names, scoped to its owner. */
 export async function findProfileEndpoint(profile: RepoProfile, endpoints: InferenceEndpoint[]): Promise<InferenceEndpoint | undefined> {
-  if (profile.owner.kind === "personal") return endpoints.find((e) => e.slug === profile.slug && !e.companyId) ?? endpoints.find((e) => e.slug === profile.slug);
+  if (profile.owner.kind === "personal") return endpoints.find((e) => e.slug === profile.slug && !e.companyId);
   const org = (await listCompanies()).find((c) => c.slug === profile.owner.org || c.id === profile.owner.org);
   if (!org) throw new ProfileError(`this repository's profile ${profile.name} requires organization @${profile.owner.org}, and you are not a member of it. Pass --endpoint to use another.`);
   return endpoints.find((e) => e.slug === profile.slug && e.companyId === org.id);

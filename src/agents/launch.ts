@@ -419,25 +419,6 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     selected = await browserLogin(harness, requestedEndpoint);
     catalog = await listEndpoints();
   }
-  // With no --endpoint (and no resumed session's endpoint), a repository that
-  // declares `repository.default_endpoint` in .ditto/config.toml picks the
-  // profile; the saved personal default only applies outside such a repository.
-  let endpoint: InferenceEndpoint | undefined;
-  if (!requestedEndpoint?.trim()) {
-    const profile = await repoDefaultProfile(options.cwd ?? process.cwd());
-    if (profile) {
-      endpoint = await findProfileEndpoint(profile, catalog.endpoints);
-      if (!endpoint) {
-        throw new Error(
-          `this repository's .ditto profile "${profile.name}" has no endpoint in ${profile.owner.kind === "org" ? `@${profile.owner.org}` : "your account"} yet.\n` +
-            `Create it with \`heyditto repo apply --profile ${profile.name}\` (in ${profile.repoDir}), or pass --endpoint.`,
-        );
-      }
-      log(`using ${profile.owner.kind === "org" ? `@${profile.owner.org}/` : ""}${endpoint.slug} from ${path.join(profile.repoDir, ".ditto")}`);
-    }
-  }
-  endpoint ??= await resolveEndpoint(requestedEndpoint, catalog.endpoints, selected);
-  await assertEndpointActive(endpoint);
 
   let cwd = process.cwd();
   let worktreePath: string | undefined;
@@ -467,6 +448,28 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
       worktreePath = wt.path;
     }
   }
+
+  // With no --endpoint (and no resumed session's endpoint), a repository that
+  // declares `repository.default_endpoint` in .ditto/config.toml picks the
+  // profile; the saved personal default only applies outside such a repository.
+  // It is read from the directory the harness will run in, which a transcript
+  // resume or --cwd may have moved away from process.cwd().
+  let endpoint: InferenceEndpoint | undefined;
+  if (!requestedEndpoint?.trim()) {
+    const profile = await repoDefaultProfile(cwd);
+    if (profile) {
+      endpoint = await findProfileEndpoint(profile, catalog.endpoints);
+      if (!endpoint) {
+        throw new Error(
+          `this repository's .ditto profile "${profile.name}" has no endpoint in ${profile.owner.kind === "org" ? `@${profile.owner.org}` : "your account"} yet.\n` +
+            `Create it with \`heyditto repo apply --profile ${profile.name}\` (in ${profile.repoDir}), or pass --endpoint.`,
+        );
+      }
+      log(`using ${profile.owner.kind === "org" ? `@${profile.owner.org}/` : ""}${endpoint.slug} from ${path.join(profile.repoDir, ".ditto")}`);
+    }
+  }
+  endpoint ??= await resolveEndpoint(requestedEndpoint, catalog.endpoints, selected);
+  await assertEndpointActive(endpoint);
 
   // A Claude session first seen here keeps its own id as the Ditto session id,
   // so `--resume <that id>` finds this record next time.
