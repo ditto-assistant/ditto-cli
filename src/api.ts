@@ -97,6 +97,8 @@ export interface InferenceEndpoint {
   slug: string;
   name: string;
   model: string;
+  /** The organization the endpoint is filed under; empty for a personal one. */
+  companyId?: string;
   systemPrompt?: string;
   spendPeriod?: string;
   spendLimitTokens?: number | null;

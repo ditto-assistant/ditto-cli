@@ -990,7 +990,51 @@ heyditto repo init               # scaffold .ditto/config.toml + .ditto/mise.tom
 heyditto repo validate           # exit 1 on any problem, naming the file and key
 heyditto repo show               # effective document with the layer each table came from
 heyditto teleport plan [path]      # what a push would capture, per project, with byte estimates
+heyditto repo apply [--dry-run]  # make your Router endpoints match .ditto/endpoints/*.toml
 ```
+
+### Router profiles
+
+A `.ditto/endpoints/<name>.toml` is a Router profile checked into the repository:
+model, routing, tools, and the Claude Code or Codex system prompt, which is read
+from a file next to it. `repository.default_endpoint` in `.ditto/config.toml`
+names the profile that `heyditto claude` / `codex` use when no `--endpoint` is
+given, from anywhere inside the repository. `--endpoint` always wins.
+
+```toml
+# .ditto/endpoints/dev.toml
+managed = true
+name = "dev"
+slug = "ditto-dev"                       # the endpoint slug within its owner
+model = "openai/gpt-6.1-sol"
+[settings]
+owner = "@omniaura"                      # or "personal" (the default)
+model_mode = "passthrough"
+code_mode = true
+kind_routes = { aside = "z-ai/glm-5.3-flash" }
+claude_prompt = { file = "../prompts/claude.md", mode = "replace" }
+```
+
+`owner = "@<org>"` targets that organization's endpoint, so you must be a member
+who can manage it. `owner = "personal"` creates the endpoint in your own account,
+billed to you, so anyone who clones the repository gets the same setup.
+`heyditto repo apply` creates the endpoint when it is missing and otherwise
+changes only the fields that differ. Settings the file does not name, such as a
+tool list curated in the console, are left alone. An unknown setting is an
+error, not a no-op. Edit the prompt by editing its file and running
+`heyditto repo apply`. `heyditto endpoints set <slug> --claude-prompt @file`
+still works for a one-off change, but the next apply returns the endpoint to
+what the repository says.
+
+Settings: `owner`, `claude_prompt` / `codex_prompt` (`file`, `mode`,
+`autoupdate`), `system_prompt`, `model_mode`, `routing_mode`, `billing_mode`,
+`stream_granularity`, `context_compaction`, `result_compression`,
+`speculative_compaction`, `tool_compression`, `code_mode`,
+`precompact_at_tokens`, `max_tool_rounds`, `memory_depth`, `recall`, `record`,
+`record_trace`, `record_attachments`, `trace_retention_days`, `batch`,
+`batch_max_requests`, `tools`, `tool_approval_mode`, `auto_approve_tools`,
+`required_connections`, `kind_routes`, `model_routes`, `subagent_routes`,
+`aliases`.
 
 Layers: workspace `.ditto/` (a parent folder of many repos) < repository `.ditto/` <
 ignored `.ditto/local.toml` < flags. Secrets are never literals: use `secret://`

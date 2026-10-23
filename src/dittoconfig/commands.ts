@@ -2,7 +2,8 @@ import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Command } from "commander";
 import { DittoConfigError, DittoConfigNotFound, loadDittoConfig, slugify, summarize } from "./load.js";
-import { CONFIG_FILE, DITTO_DIR, MISE_FILE } from "./types.js";
+import { CONFIG_FILE, DITTO_DIR, ENDPOINTS_DIR, MISE_FILE } from "./types.js";
+import { type ApplyPlan, ProfileError, applyPlan, planProfile } from "./profiles.js";
 import { MISE_TOOL_FOR_TYPE } from "../teleport/catalog.js";
 import { type CapturePlan, discoverWorkspace } from "../teleport/workspace.js";
 import { formatBytes } from "../teleport/types.js";
@@ -47,6 +48,18 @@ export function registerConfigCommands(program: Command, addExamples: (c: Comman
         process.exitCode = 1;
       }
     });
+  addExamples(
+    config
+      .command("apply [path]")
+      .description("create or update the Router endpoints declared in .ditto/endpoints/*.toml in your account or their organization")
+      .option("--profile <name>", "apply only this profile (default: every profile in .ditto/endpoints/)")
+      .option("--dry-run", "print what would change and write nothing")
+      .option("--json", "machine-readable output")
+      .action(cmdApply),
+    `  heyditto repo apply --dry-run          show what each profile would change
+  heyditto repo apply                    make your endpoints match the repository
+  heyditto repo apply --profile dev      apply one profile`,
+  );
   config
     .command("show [path]")
     .description("print the effective configuration with the layer each table came from")
@@ -75,6 +88,67 @@ export function registerConfigCommands(program: Command, addExamples: (c: Comman
         throw e;
       }
     });
+}
+
+async function cmdApply(pathArg: string | undefined, options: { profile?: string; dryRun?: boolean; json?: boolean }): Promise<void> {
+  const dir = path.resolve(pathArg ?? process.cwd());
+  let eff;
+  try {
+    eff = await loadDittoConfig(dir);
+  } catch (e) {
+    if (e instanceof DittoConfigNotFound || e instanceof DittoConfigError) {
+      err(e.message);
+      process.exitCode = 1;
+      return;
+    }
+    throw e;
+  }
+  const names = options.profile ? [options.profile] : Object.keys(eff.endpoints).sort();
+  if (names.length === 0) {
+    err(`no profiles in ${path.join(DITTO_DIR, ENDPOINTS_DIR)}/`);
+    process.exitCode = 1;
+    return;
+  }
+  const profileDir = path.join(dir, DITTO_DIR, ENDPOINTS_DIR);
+  const results: Array<ApplyPlan & { applied: boolean }> = [];
+  for (const name of names) {
+    const decl = eff.endpoints[name];
+    if (!decl) {
+      err(`no profile named ${name}; have: ${Object.keys(eff.endpoints).join(", ")}`);
+      process.exitCode = 1;
+      return;
+    }
+    if (!decl.managed) {
+      if (!options.json) out(`${name}: managed = false, skipped`);
+      continue;
+    }
+    let plan: ApplyPlan;
+    try {
+      plan = await planProfile(decl, profileDir);
+    } catch (e) {
+      if (!(e instanceof ProfileError)) throw e;
+      err(e.message);
+      process.exitCode = 1;
+      return;
+    }
+    results.push({ ...plan, applied: false });
+  }
+  // Every profile is planned before any is written, so a bad prompt path or a
+  // typo in the third profile cannot leave the first two half-applied.
+  for (const result of results) {
+    const where = result.owner.kind === "org" ? `@${result.owner.org}` : "personal";
+    if (!options.json) {
+      out(`${result.profile} -> ${where}/${result.slug}: ${result.action}${options.dryRun && result.action !== "unchanged" ? " (dry run)" : ""}`);
+      for (const [field, [from, to]] of Object.entries(result.changes)) {
+        out(`  ${field}: ${JSON.stringify(from) ?? "unset"} -> ${JSON.stringify(to)}`);
+      }
+    }
+    result.applied = !options.dryRun && result.action !== "unchanged";
+    if (result.applied) await applyPlan(result);
+  }
+  if (options.json) {
+    out(JSON.stringify(results.map(({ body: _body, ...r }) => r), null, 2));
+  }
 }
 
 async function cmdInit(pathArg: string | undefined, options: { force?: boolean }): Promise<void> {
