@@ -174,6 +174,31 @@ test("tool_deny is sent in the server's normal form and then reads back unchange
   }
 });
 
+test("claude_native_tool_blocks lands in providerOptions and must be a boolean", async () => {
+  const stub = await startStub([
+    { id: "ep-org", slug: "ditto-dev", companyId: ORG.id, model: "openai/gpt-6.1-sol", modelMode: "passthrough", codeMode: true,
+      kindRoutes: { aside: "z-ai/glm-5.3-flash" }, providerOptions: { claude_system_prompt: PROMPT, claude_prompt_mode: "replace", excluded_providers: ["chutes"] } },
+  ]);
+  const dir = await repo({ ".ditto/config.toml": CONFIG, ".ditto/endpoints/dev.toml": ORG_PROFILE + "claude_native_tool_blocks = true\n", ".ditto/prompts/claude.md": PROMPT });
+  try {
+    const out = await run(["repo", "apply"], stub.base, dir);
+    assert.equal(out.status, 0, out.stderr);
+    assert.equal(stub.writes.length, 1);
+    assert.equal(stub.writes[0].body.providerOptions.claude_native_tool_blocks, true);
+    assert.deepEqual(stub.writes[0].body.providerOptions.excluded_providers, ["chutes"], "options the profile does not name survive");
+    const again = await run(["repo", "apply"], stub.base, dir);
+    assert.equal(again.status, 0, again.stderr);
+    assert.equal(stub.writes.length, 1, "applying twice changes nothing");
+
+    const bad = await repo({ ".ditto/config.toml": CONFIG, ".ditto/endpoints/dev.toml": ORG_PROFILE + 'claude_native_tool_blocks = "yes"\n', ".ditto/prompts/claude.md": PROMPT });
+    const refused = await run(["repo", "apply"], stub.base, bad);
+    assert.notEqual(refused.status, 0);
+    assert.match(refused.stderr, /claude_native_tool_blocks must be true or false/);
+  } finally {
+    stub.close();
+  }
+});
+
 test("a personal profile lands in the caller's own account even when an org endpoint shares the slug", async () => {
   const stub = await startStub([{ id: "ep-org", slug: "dev", companyId: ORG.id, model: "m", providerOptions: {} }]);
   const dir = await repo({

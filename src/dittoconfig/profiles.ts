@@ -139,11 +139,19 @@ export async function profileBody(decl: EndpointDecl, profileDir: string): Promi
       options[`${harness}_prompt_autoupdate`] = p.autoupdate;
     }
   }
+  // Router tool rounds written into Claude Code's own transcript as native
+  // blocks, so a replay never depends on the gateway's memory (DITTO-1260).
+  if (settings.claude_native_tool_blocks !== undefined) {
+    const v = settings.claude_native_tool_blocks;
+    delete settings.claude_native_tool_blocks;
+    if (typeof v !== "boolean") throw new ProfileError(`endpoints.${decl.name}.settings.claude_native_tool_blocks must be true or false`);
+    options.claude_native_tool_blocks = v;
+  }
   for (const [key, value] of Object.entries(settings)) {
     const field = SETTING_FIELDS[key];
     if (!field) {
       throw new ProfileError(
-        `endpoints.${decl.name}.settings.${key}: unknown setting. Known: owner, claude_prompt, codex_prompt, ${Object.keys(SETTING_FIELDS).join(", ")}`,
+        `endpoints.${decl.name}.settings.${key}: unknown setting. Known: owner, claude_prompt, codex_prompt, claude_native_tool_blocks, ${Object.keys(SETTING_FIELDS).join(", ")}`,
       );
     }
     body[field] = field === "toolDeny" ? denyRules(decl.name, value) : value;
