@@ -3,7 +3,8 @@ import { gmModels, personalProviderKeys, providerKeySelection } from "./router-d
 import { createInterface } from "node:readline/promises";
 import { Command, Option } from "commander";
 import { launchHarness, pickEndpoint } from "./agents/launch.js";
-import { listSessions, removeSession } from "./agents/sessions.js";
+import { type KeyToRevoke, applyPrune, findStrandedKeys, parseAge, planPrune, removeLaunchState, unfinishedKeys } from "./agents/prune.js";
+import { listSessions } from "./agents/sessions.js";
 import { DEFAULT_LAUNCH_EXPIRY, HARNESSES, type Harness, KEY_EXPIRIES, type KeyExpiry, apiRootOf } from "./agents/types.js";
 import {
   BILLING_MODES,
@@ -1352,12 +1353,88 @@ export async function cmdSessions(options: SessionsOptions): Promise<void> {
     process.stdout.write(`\n…and ${records.length - shown.length} more (use --all)\n`);
   }
   process.stdout.write(`\nResume: heyditto <claude|codex|grok> --resume <id>  (claude: also a title, or no value to pick)\n`);
+  if (!options.all && records.length > shown.length) process.stdout.write(`Clean up old records: heyditto sessions prune --dry-run\n`);
 }
 
 export async function cmdSessionsRm(id: string): Promise<void> {
-  const removed = await removeSession(id);
+  const removed = await removeLaunchState(id);
   if (!removed) throw new Error(`no local session "${id}"`);
   process.stdout.write(`Removed local session record ${id} (the Ditto thread and traces are kept).\n`);
+}
+
+export interface SessionsPruneOptions {
+  olderThan: string;
+  keep: string;
+  keys?: boolean;
+  dryRun?: boolean;
+  yes?: boolean;
+  json?: boolean;
+}
+
+function keyLabel(k: KeyToRevoke): string {
+  return `${k.keyId}  …${k.keyHint ?? "?"}  ${k.name ?? ""}`.trimEnd();
+}
+
+/**
+ * `heyditto sessions prune`: forget records not launched within --older-than
+ * (keeping the --keep most recent), revoke the keys of the ones that never
+ * reached their cleanup, and with --keys sweep this machine's launch keys
+ * that no remaining record names.
+ */
+export async function cmdSessionsPrune(options: SessionsPruneOptions): Promise<void> {
+  const olderThanMs = parseAge(options.olderThan);
+  const keep = Number(options.keep);
+  if (!Number.isInteger(keep) || keep < 0) throw new Error(`--keep must be a whole number, got "${options.keep}"`);
+
+  const records = await listSessions();
+  const plan = planPrune(records, { olderThanMs, keep });
+  const keys = unfinishedKeys(plan);
+  if (options.keys) {
+    const endpointIds = records.map((r) => r.endpointId);
+    keys.push(...(await findStrandedKeys(endpointIds, plan.kept)));
+  }
+
+  if (options.dryRun) {
+    if (options.json) {
+      process.stdout.write(`${JSON.stringify({ dryRun: true, prune: plan.prune.map((r) => r.id), kept: plan.kept.length, revoke: keys }, null, 2)}\n`);
+      return;
+    }
+    if (plan.prune.length === 0 && keys.length === 0) {
+      process.stdout.write(`Nothing to prune (${records.length} record${records.length === 1 ? "" : "s"}, none older than ${options.olderThan}).\n`);
+      return;
+    }
+    for (const r of plan.prune) {
+      process.stdout.write(`would forget ${r.id}  ${pad(r.harness, 6)}  ${r.lastLaunchedAt.slice(0, 16).replace("T", " ")}  ${r.worktree ?? r.cwd}\n`);
+    }
+    for (const k of keys) process.stdout.write(`would revoke ${keyLabel(k)}  (${k.reason})\n`);
+    return;
+  }
+
+  if (plan.prune.length === 0 && keys.length === 0) {
+    if (options.json) process.stdout.write(`${JSON.stringify({ removed: [], retained: [], revoked: [], failed: [] }, null, 2)}\n`);
+    else process.stdout.write(`Nothing to prune (${records.length} record${records.length === 1 ? "" : "s"}, none older than ${options.olderThan}).\n`);
+    return;
+  }
+
+  await confirmTyped({
+    action: `forget ${plan.prune.length} session record${plan.prune.length === 1 ? "" : "s"} and revoke ${keys.length} key${keys.length === 1 ? "" : "s"}`,
+    expected: "prune",
+    label: "the word",
+    yes: options.yes,
+    preview: [...plan.prune.map((r) => `  forget ${r.id}  ${r.harness}  ${r.lastLaunchedAt.slice(0, 10)}`), ...keys.map((k) => `  revoke ${keyLabel(k)}`)].join("\n"),
+  });
+
+  const result = await applyPrune(plan, keys);
+  if (result.failed.length > 0) process.exitCode = 1;
+  if (options.json) {
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
+  process.stdout.write(`Forgot ${result.removed.length} session record${result.removed.length === 1 ? "" : "s"}; revoked ${result.revoked.length} key${result.revoked.length === 1 ? "" : "s"}. Threads and traces are kept.\n`);
+  for (const f of result.failed) process.stderr.write(`could not revoke ${keyLabel(f)}: ${f.error}\n`);
+  if (result.retained.length > 0) {
+    process.stderr.write(`kept ${result.retained.length} record${result.retained.length === 1 ? "" : "s"} whose key is still live; run prune again to retry\n`);
+  }
 }
 
 /** Registers `claude` and `codex` on the program (which must have enablePositionalOptions()). */
