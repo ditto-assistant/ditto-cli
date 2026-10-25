@@ -175,6 +175,13 @@ export interface EndpointInput {
   providerOptions?: Record<string, unknown>;
   /** Whole-list replacement; needs endpoint policy authority on org endpoints. */
   toolDeny?: string[];
+  /**
+   * Organization the endpoint is filed under; the organization owns and pays
+   * for it. On create it files the new endpoint there; on PATCH it moves the
+   * endpoint, and "" moves it back to the caller's personal context. The
+   * server checks manager rights on both sides of a move.
+   */
+  companyId?: string;
 }
 
 /**

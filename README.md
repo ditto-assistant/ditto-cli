@@ -561,7 +561,8 @@ you to an endpoint's page there; set `DITTO_DEVELOPER_BASE` to point elsewhere):
 
 ```
 heyditto endpoints [--set-default <slug>] [--clear-default]   list (* = default)
-heyditto endpoints create [--name <n>] [--slug <s>] [--model <id>] [--default]
+heyditto endpoints create [--name <n>] [--slug <s>] [--model <id>] [--org <org>] [--default]
+heyditto endpoints move <endpoint> (--org <org> | --personal)   change who owns and pays for it
 heyditto endpoints show <endpoint>
 heyditto endpoints use <endpoint>          make it the default
 heyditto endpoints pick                    choose the default interactively
