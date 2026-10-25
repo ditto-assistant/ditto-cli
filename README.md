@@ -1039,7 +1039,7 @@ Settings: `owner`, `claude_prompt` / `codex_prompt` (`file`, `mode`,
 `precompact_at_tokens`, `max_tool_rounds`, `memory_depth`, `recall`, `record`,
 `record_trace`, `record_attachments`, `trace_retention_days`, `batch`,
 `batch_max_requests`, `tools`, `tool_approval_mode`, `auto_approve_tools`,
-`tool_deny`, `required_connections`, `kind_routes`, `model_routes`,
+`tool_deny`, `claude_native_tool_blocks`, `required_connections`, `kind_routes`, `model_routes`,
 `subagent_routes`, `aliases`.
 
 `tool_deny` lists router tools the endpoint never runs, whatever a client asks:
@@ -1047,6 +1047,12 @@ tool names, globs such as `"gmail__send_*"`, or a class (`"class:gated"`,
 `"class:write"`). Denied tools are hidden from the model, and a call to one is
 refused. On an organization endpoint, changing it needs endpoint policy
 authority.
+
+`claude_native_tool_blocks = true` writes each router tool call and its result
+into Claude Code's own transcript (`server_tool_use` / `mcp_tool_result`), so
+the router rebuilds earlier turns from the transcript instead of its memory, and
+a deploy no longer loses them. Claude Code does not draw these blocks in its live
+view; they appear in the session file and in tools that read it.
 
 Layers: workspace `.ditto/` (a parent folder of many repos) < repository `.ditto/` <
 ignored `.ditto/local.toml` < flags. Secrets are never literals: use `secret://`
