@@ -19,7 +19,7 @@ import { pullCapsule } from "../dist/teleport/pull.js";
 import { unpushedRepos } from "../dist/teleport/offload.js";
 import { extractWorktree } from "../dist/teleport/worktree.js";
 import { writeSession } from "../dist/agents/sessions.js";
-import { cdcBoundaries } from "../dist/teleport/archive.js";
+import { buildArchive, cdcBoundaries } from "../dist/teleport/archive.js";
 
 const fixtureDir = fileURLToPath(new URL("./fixtures/", import.meta.url));
 
@@ -1012,6 +1012,56 @@ test("teleport archive backs up sources as storage and restores them byte-for-by
     assert.equal(readFileSync(path.join(dest, "-Users-me-code-app", "s2.jsonl"), "utf8"), transcript.slice(0, 5000));
     r = await cli(stub, cfg, ["teleport", "archive-restore", "claude-code", dest]);
     assert.notEqual(r.status, 0, "restore must refuse an existing destination");
+  } finally {
+    stub.close();
+  }
+});
+
+test("streaming archive chunks equal whole-buffer content-defined chunks", async () => {
+  const src = tmp("teleport-archive-stream-src-");
+  const big = Buffer.alloc(30 * 1024 * 1024);
+  for (let off = 0, i = 0; off < big.length; off += 32, i++) createHash("sha256").update(`s:${i}`).digest().copy(big, off);
+  writeFileSync(path.join(src, "big.bin"), big);
+  writeFileSync(path.join(src, "small.txt"), "tail");
+  const out = tmp("teleport-archive-stream-out-");
+  const built = await buildArchive({ name: "x", dir: src }, out);
+  // Rebuild the same tar and chunk it in one buffer for the reference.
+  const ref = path.join(tmp("teleport-archive-stream-ref-"), "x.tar");
+  assert.equal(spawnSync("tar", ["-c", "-f", ref, "-C", src, "."]).status, 0);
+  const raw = readFileSync(ref);
+  assert.equal(built.entry.bytes, raw.length);
+  let start = 0;
+  const expected = cdcBoundaries(raw).map((cut) => {
+    const z = zlib.zstdCompressSync(raw.subarray(start, cut));
+    start = cut;
+    return createHash("sha256").update(z).digest("hex");
+  });
+  assert.deepEqual(built.entry.chunks.map((c) => c.sha256), expected);
+  // Decompressing the chunks in order reproduces the tar exactly.
+  const joined = Buffer.concat(built.entry.chunks.map((c) => zlib.zstdDecompressSync(readFileSync(built.files.get(c.sha256)))));
+  assert.ok(joined.equals(raw));
+});
+
+test("teleport archive rejects malformed sources, repo capsules and bad generations", async () => {
+  const stub = await startTeleportStub();
+  const cfg = tmp("teleport-archive-bad-cfg-");
+  const dir = tmp("teleport-archive-bad-src-");
+  try {
+    let r = await cli(stub, cfg, ["teleport", "archive", "--source", "traces="]);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /name=dir/);
+    r = await cli(stub, cfg, ["teleport", "archive", "--source", `t=${dir}`, "--source", `t=${dir}`]);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /duplicate --source name/);
+    const repo = makeRepo();
+    r = await cli(stub, cfg, ["teleport", "push", repo, "--name", "code"]);
+    assert.equal(r.status, 0, r.stderr);
+    r = await cli(stub, cfg, ["teleport", "archive", "--name", "code", "--source", `t=${dir}`]);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /is a repo capsule/);
+    r = await cli(stub, cfg, ["teleport", "archive-restore", "t", path.join(dir, "out"), "--generation", "0"]);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /positive integer/);
   } finally {
     stub.close();
   }

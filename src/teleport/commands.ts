@@ -496,11 +496,16 @@ interface ArchiveOptions extends OutputOptions {
 
 /** Parses repeatable --source name=dir; defaults to agent history and infinite-disk recovery data. */
 async function archiveSources(options: ArchiveOptions): Promise<ArchiveSource[]> {
+  const names = new Set<string>();
   const sources = options.source?.length
     ? options.source.map((s) => {
         const at = s.indexOf("=");
-        if (at <= 0) throw new Error(`--source must be name=dir, got "${s}"`);
-        return { name: s.slice(0, at), dir: path.resolve(s.slice(at + 1)) };
+        const dir = s.slice(at + 1);
+        if (at <= 0 || !dir) throw new Error(`--source must be name=dir, got "${s}"`);
+        const name = s.slice(0, at);
+        if (names.has(name)) throw new Error(`duplicate --source name "${name}"`);
+        names.add(name);
+        return { name, dir: path.resolve(dir) };
       })
     : defaultArchiveSources();
   const present: ArchiveSource[] = [];
@@ -517,6 +522,9 @@ export async function cmdTeleportArchive(options: ArchiveOptions): Promise<void>
   const name = options.name ?? "agent-traces";
   const sources = await archiveSources(options);
   let capsule = (await tapi.listCapsules()).find((c) => c.name === name && c.status !== "deleted");
+  if (capsule && capsule.rootKind !== "archive") {
+    throw new Error(`capsule "${name}" is a ${capsule.rootKind} capsule; choose another --name for the archive`);
+  }
   if (!capsule) capsule = await tapi.createCapsule({ name, rootKind: "archive" });
   if (!json(options)) {
     err(`Archiving ${sources.map((s) => s.name).join(", ")} into "${name}" (generation ${capsule.headGeneration + 1})…`);
@@ -533,7 +541,7 @@ export async function cmdTeleportArchive(options: ArchiveOptions): Promise<void>
 
 export async function cmdTeleportArchiveRestore(archiveName: string, dest: string, options: { name?: string; generation?: string }): Promise<void> {
   const generation = options.generation === undefined ? undefined : Number(options.generation);
-  if (generation !== undefined && !Number.isInteger(generation)) throw new Error("--generation must be an integer");
+  if (generation !== undefined && (!Number.isInteger(generation) || generation < 1)) throw new Error("--generation must be a positive integer");
   const res = await restoreArchive(options.name ?? "agent-traces", archiveName, path.resolve(dest), generation);
   out(`Restored ${res.entries} files (${formatBytes(res.bytes)}) into ${path.resolve(dest)}.`);
 }

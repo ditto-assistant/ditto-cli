@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createWriteStream } from "node:fs";
-import { mkdir, mkdtemp, open, readFile, rm, stat } from "node:fs/promises";
+import { createReadStream, createWriteStream } from "node:fs";
+import { mkdir, mkdtemp, open, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { zstdCompressSync, zstdDecompressSync } from "node:zlib";
@@ -94,30 +94,52 @@ export interface BuiltArchive {
   files: Map<string, string>;
 }
 
-/** Tars `src.dir` and writes each compressed chunk into `outDir`. */
+/**
+ * Tars `src.dir` and writes each compressed chunk into `outDir`. The tar is
+ * read through a window of at most MAX_CHUNK + one read, so memory stays
+ * bounded however large the source grows; boundaries match cdcBoundaries.
+ */
 export async function buildArchive(src: ArchiveSource, outDir: string): Promise<BuiltArchive> {
   const tarFile = path.join(outDir, `${safe(src.name)}.tar`);
   const entries = await tarDirectory(src.dir, tarFile);
-  const raw = await readFile(tarFile);
-  await rm(tarFile, { force: true });
   const chunks: ChunkRef[] = [];
   const files = new Map<string, string>();
-  let start = 0;
-  for (const cut of cdcBoundaries(raw)) {
-    const z = zstdCompressSync(raw.subarray(start, cut));
-    start = cut;
+  let bytes = 0;
+  const emit = async (piece: Buffer) => {
+    const z = zstdCompressSync(piece);
     if (z.length > CHUNK_BYTES) throw new Error(`compressed chunk exceeds ${CHUNK_BYTES} bytes`);
     const sha = createHash("sha256").update(z).digest("hex");
     chunks.push({ sha256: sha, size: z.length });
     if (!files.has(sha)) {
       const file = path.join(outDir, sha);
-      const fh = await open(file, "w");
-      await fh.writeFile(z);
-      await fh.close();
+      await writeFile(file, z);
       files.set(sha, file);
     }
+  };
+  try {
+    let pending: Buffer = Buffer.alloc(0);
+    for await (const piece of createReadStream(tarFile, { highWaterMark: 1 << 20 })) {
+      const buf = piece as Buffer;
+      bytes += buf.length;
+      pending = pending.length === 0 ? buf : Buffer.concat([pending, buf]);
+      // A cut is final once MAX_CHUNK bytes follow its start: later data
+      // can't move it. Keep the unfinished tail.
+      while (pending.length >= MAX_CHUNK) {
+        const cut = cdcBoundaries(pending.subarray(0, MAX_CHUNK))[0];
+        await emit(Buffer.from(pending.subarray(0, cut)));
+        pending = Buffer.from(pending.subarray(cut));
+      }
+    }
+    // The tail is under MAX_CHUNK; its cuts are offsets into this buffer.
+    let start = 0;
+    for (const cut of cdcBoundaries(pending)) {
+      await emit(Buffer.from(pending.subarray(start, cut)));
+      start = cut;
+    }
+  } finally {
+    await rm(tarFile, { force: true });
   }
-  return { entry: { name: src.name, format: "tar", chunkCompression: "zstd", chunks, entries, bytes: raw.length }, files };
+  return { entry: { name: src.name, format: "tar", chunkCompression: "zstd", chunks, entries, bytes }, files };
 }
 
 /** tar with paths relative to `dir`; returns the entry count. */
@@ -211,17 +233,23 @@ export async function restoreArchive(capsuleId: string, name: string, dest: stri
   const archive = manifest.archives?.find((a) => a.name === name);
   if (!archive) throw new Error(`generation ${res.generation} has no archive named "${name}"`);
   const urls = new Map(res.chunks.map((c) => [c.sha256, c.getUrl]));
-  await stat(dest).then(
-    () => {
-      throw new Error(`${dest} already exists; restore never overwrites`);
-    },
-    () => undefined,
-  );
-  await mkdir(dest, { recursive: true });
+  // Claim the destination atomically: a non-recursive mkdir fails if it exists.
+  await mkdir(path.dirname(dest), { recursive: true });
+  try {
+    await mkdir(dest);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "EEXIST") throw new Error(`${dest} already exists; restore never overwrites`);
+    throw e;
+  }
   const tmp = await mkdtemp(path.join(os.tmpdir(), "teleport-archive-restore-"));
   try {
     const tarFile = path.join(tmp, "archive.tar");
     const out = createWriteStream(tarFile);
+    const finished = new Promise<void>((resolve, reject) => {
+      out.once("error", reject);
+      out.once("finish", resolve);
+    });
+    finished.catch(() => undefined);
     let bytes = 0;
     for (const c of archive.chunks) {
       const url = urls.get(c.sha256);
@@ -230,9 +258,10 @@ export async function restoreArchive(capsuleId: string, name: string, dest: stri
       if (createHash("sha256").update(body).digest("hex") !== c.sha256) throw new Error(`chunk ${c.sha256.slice(0, 12)} failed its checksum`);
       const plain = zstdDecompressSync(body);
       bytes += plain.length;
-      if (!out.write(plain)) await new Promise((r) => out.once("drain", r));
+      if (!out.write(plain)) await Promise.race([new Promise((r) => out.once("drain", r)), finished]);
     }
-    await new Promise<void>((resolve, reject) => out.end((err?: Error | null) => (err ? reject(err) : resolve())));
+    out.end();
+    await finished;
     const x = await run("tar", ["-x", "-k", "-f", tarFile, "-C", dest]);
     if (x.code !== 0) throw new Error(`tar extract failed: ${x.stderr.trim()}`);
     return { entries: archive.entries, bytes };
@@ -254,6 +283,7 @@ async function uploadAll(missing: tapi.NegotiateResponse["missing"], files: Map<
       for (let attempt = 1; ; attempt++) {
         const r = await fetch(missing[i].putUrl, { method: "PUT", body });
         if (r.ok) break;
+        await r.body?.cancel().catch(() => undefined);
         if (attempt >= 4 || (r.status < 500 && r.status !== 429)) throw new Error(`chunk upload failed: HTTP ${r.status}`);
         await new Promise((s) => setTimeout(s, delay));
         delay *= 2;
