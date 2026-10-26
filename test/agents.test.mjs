@@ -414,6 +414,14 @@ test("claudeDittoDenyRules: reads user, project and local settings", () => {
   assert.deepEqual(claudeDittoDenyRules(cwd, { CLAUDE_CONFIG_DIR: path.join(root, "absent") }), ["slack__*"]);
 });
 
+test("claudeDittoDenyRules: native MCP's per-source servers map onto router rules", () => {
+  const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "ditto-deny-mcp-")));
+  const home = path.join(root, "home");
+  mkdirSync(home);
+  writeFileSync(path.join(home, "settings.json"), JSON.stringify({ permissions: { deny: ["mcp__ditto-github__delete_repo", "mcp__ditto-linear", "mcp__ditto-bad name__x", "mcp__dittoish__x"] } }));
+  assert.deepEqual(claudeDittoDenyRules(path.join(root, "nowhere"), { CLAUDE_CONFIG_DIR: home }), ["github__delete_repo", "linear__*"]);
+});
+
 test("claudeDittoDenyRules: a nested directory still gets the repository's rules", () => {
   const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "ditto-deny-nested-")));
   const repo = path.join(root, "repo");

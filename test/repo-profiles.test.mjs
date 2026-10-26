@@ -174,6 +174,31 @@ test("tool_deny is sent in the server's normal form and then reads back unchange
   }
 });
 
+test("claude_tool_surface and client_approvals: surface in providerOptions, approvals as a field", async () => {
+  const stub = await startStub([
+    { id: "ep-org", slug: "ditto-dev", companyId: ORG.id, model: "openai/gpt-6.1-sol", modelMode: "passthrough", codeMode: true,
+      kindRoutes: { aside: "z-ai/glm-5.3-flash" }, providerOptions: { claude_system_prompt: PROMPT, claude_prompt_mode: "replace" } },
+  ]);
+  const dir = await repo({ ".ditto/config.toml": CONFIG, ".ditto/endpoints/dev.toml": ORG_PROFILE + 'claude_tool_surface = "mcp"\nclient_approvals = true\n', ".ditto/prompts/claude.md": PROMPT });
+  try {
+    const out = await run(["repo", "apply"], stub.base, dir);
+    assert.equal(out.status, 0, out.stderr);
+    assert.equal(stub.writes.length, 1);
+    assert.equal(stub.writes[0].body.providerOptions.claude_tool_surface, "mcp");
+    assert.equal(stub.writes[0].body.clientApprovals, true);
+    const again = await run(["repo", "apply"], stub.base, dir);
+    assert.equal(again.status, 0, again.stderr);
+    assert.equal(stub.writes.length, 1, "applying twice changes nothing");
+
+    const bad = await repo({ ".ditto/config.toml": CONFIG, ".ditto/endpoints/dev.toml": ORG_PROFILE + 'claude_tool_surface = "native"\n', ".ditto/prompts/claude.md": PROMPT });
+    const refused = await run(["repo", "apply"], stub.base, bad);
+    assert.notEqual(refused.status, 0);
+    assert.match(refused.stderr, /claude_tool_surface must be "mcp" or "router"/);
+  } finally {
+    stub.close();
+  }
+});
+
 test("claude_native_tool_blocks lands in providerOptions and must be a boolean", async () => {
   const stub = await startStub([
     { id: "ep-org", slug: "ditto-dev", companyId: ORG.id, model: "openai/gpt-6.1-sol", modelMode: "passthrough", codeMode: true,

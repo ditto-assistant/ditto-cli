@@ -114,6 +114,8 @@ export interface InferenceEndpoint {
   tools?: string[];
   /** Router tools this endpoint never runs: names, globs, or class:<tier>. */
   toolDeny?: string[];
+  /** Native MCP surface: Claude Code's own prompts replace Ditto's approval queue. Manager-only on an org endpoint. */
+  clientApprovals?: boolean;
   modelMode?: string;
   billingMode?: string;
   providerKeyIds?: string[];
@@ -175,6 +177,8 @@ export interface EndpointInput {
   providerOptions?: Record<string, unknown>;
   /** Whole-list replacement; needs endpoint policy authority on org endpoints. */
   toolDeny?: string[];
+  /** Native MCP surface: Claude Code's own prompts replace Ditto's approval queue. Manager-only on an org endpoint. */
+  clientApprovals?: boolean;
   /**
    * Organization the endpoint is filed under; the organization owns and pays
    * for it. On create it files the new endpoint there; on PATCH it moves the
