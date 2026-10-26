@@ -101,7 +101,7 @@ export function wantsMcp(options: Pick<LaunchOptions, "mcp">, endpoint: Pick<Inf
 }
 
 function mcpBanner(mcp: ClaudeMcpAttachment | undefined, dryRun?: boolean): string {
-  if (!mcp) return dryRun ? "mcp (catalog read at launch)" : c("yellow", "router (MCP catalog unavailable)");
+  if (!mcp) return dryRun ? "mcp (catalog read at launch)" : c("yellow", "router (MCP not attached)");
   const asks = mcp.clientApprovals ? "Claude Code asks" : "Ditto holds gated calls";
   return `mcp ${c("dim", `(${mcp.servers} servers, ${mcp.tools} tools; ${asks})`)}`;
 }
@@ -572,6 +572,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     passthrough,
     toolDeny: harness === "claude" ? claudeDittoDenyRules(cwd, process.env) : undefined,
     mcp,
+    cwd,
     env: process.env,
   }, grokHome);
 
@@ -891,6 +892,7 @@ async function runHeadless(harness: Harness, ctx: HeadlessRunContext): Promise<n
         yellow: ctx.options.yellow,
         toolDeny: harness === "claude" ? claudeDittoDenyRules(ctx.cwd, process.env) : undefined,
         mcp: ctx.mcp,
+        cwd: ctx.cwd,
         env: process.env,
       },
       prompt,

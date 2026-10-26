@@ -1,4 +1,6 @@
-import { readFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 /**
  * Native MCP mode for Claude Code (DITTO-1497).
@@ -160,14 +162,40 @@ export function mergeSettings(a: Json, b: Json): Json {
   return out;
 }
 
+export interface SettingsIO {
+  /** Claude's launch directory: a relative settings path means a file there. */
+  cwd?: string;
+  read?: (file: string) => string;
+  /** Writes merged settings somewhere only this user can read; returns the path. */
+  writePrivate?: (json: string) => string;
+}
+
+/**
+ * A private copy of merged settings for the life of this process. A user's
+ * settings file can hold secrets, so its contents never go into Claude's
+ * argv (visible in process listings); the merged copy is a 0600 file in a
+ * 0700 directory, removed when the CLI exits.
+ */
+export function writePrivateSettings(json: string): string {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "ditto-claude-settings-"));
+  chmodSync(dir, 0o700);
+  const file = path.join(dir, "settings.json");
+  writeFileSync(file, json, { mode: 0o600 });
+  process.once("exit", () => rmSync(dir, { recursive: true, force: true }));
+  return file;
+}
+
 /**
  * Adds settings to a Claude argv. Claude Code reads a single `--settings`, so
  * the one already in the argv absorbs the new keys rather than a second flag
- * silently replacing either. A `--settings <file>` is read and merged into one
- * inline value; a file that cannot be read stops the launch, since dropping it
+ * silently replacing either. Inline JSON is merged in place. A settings file is
+ * read from Claude's launch directory and merged into a private copy whose path
+ * replaces it. A file that cannot be read stops the launch, since dropping it
  * would lose the user's settings and dropping ours their MCP permissions.
  */
-export function withClaudeSettings(args: string[], settings: Json, readFile: (file: string) => string = (f) => readFileSync(f, "utf8")): string[] {
+export function withClaudeSettings(args: string[], settings: Json, io: SettingsIO = {}): string[] {
+  const read = io.read ?? ((f: string) => readFileSync(f, "utf8"));
+  const writePrivate = io.writePrivate ?? writePrivateSettings;
   if (Object.keys(settings).length === 0) return args;
   for (let i = 0; i < args.length; i += 1) {
     const a = args[i];
@@ -175,14 +203,16 @@ export function withClaudeSettings(args: string[], settings: Json, readFile: (fi
     if (a !== "--settings" && !inline) continue;
     const value = inline ? a.slice("--settings=".length) : args[i + 1];
     if (value === undefined) continue;
+    const isJSON = value.trim().startsWith("{");
     let parsed: unknown;
     try {
-      parsed = JSON.parse(value.trim().startsWith("{") ? value : readFile(value));
+      parsed = JSON.parse(isJSON ? value : read(path.resolve(io.cwd ?? process.cwd(), value)));
     } catch (err) {
       throw new Error(`--settings ${value}: cannot be merged with native MCP permissions (${(err as Error).message})`);
     }
     if (!isObject(parsed)) throw new Error(`--settings ${value}: not a JSON object`);
-    const merged = JSON.stringify(mergeSettings(parsed, settings));
+    const json = JSON.stringify(mergeSettings(parsed, settings));
+    const merged = isJSON ? json : writePrivate(json);
     const out = [...args];
     if (inline) out[i] = `--settings=${merged}`;
     else out[i + 1] = merged;

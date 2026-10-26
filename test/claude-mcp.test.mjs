@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -95,15 +95,20 @@ test("withClaudeSettings merges into the one --settings, inline or a file", () =
   const merged = withClaudeSettings(["--settings", '{"permissions":{"allow":["Bash"]},"model":"x"}'], { permissions: { allow: ["mcp__ditto"] } });
   assert.deepEqual(merged.length, 2);
   assert.deepEqual(JSON.parse(merged[1]), { permissions: { allow: ["Bash", "mcp__ditto"] }, model: "x" });
-  // A settings file is read and merged into one inline value: Claude Code
-  // honours a single --settings, so appending a second would lose one of them.
+  // A settings file is merged into ONE private copy whose path replaces it:
+  // Claude Code honours a single --settings, and a file's contents (which can
+  // hold secrets) must not land in argv. A relative path means Claude's cwd.
   const dir = mkdtempSync(path.join(os.tmpdir(), "ditto-settings-"));
-  const file = path.join(dir, "s.json");
-  writeFileSync(file, '{"model":"y","permissions":{"deny":["WebFetch"]}}');
-  const fromFile = withClaudeSettings(["-p", "x", "--settings", file], { permissions: { allow: ["mcp__ditto"] } });
+  writeFileSync(path.join(dir, "s.json"), '{"model":"y","env":{"TOKEN":"s3cret"},"permissions":{"deny":["WebFetch"]}}');
+  const fromFile = withClaudeSettings(["-p", "x", "--settings", "s.json"], { permissions: { allow: ["mcp__ditto"] } }, { cwd: dir });
   assert.equal(fromFile.filter((a) => a === "--settings").length, 1);
-  assert.deepEqual(JSON.parse(fromFile[3]), { model: "y", permissions: { deny: ["WebFetch"], allow: ["mcp__ditto"] } });
-  assert.throws(() => withClaudeSettings(["--settings", path.join(dir, "missing.json")], { a: 1 }), /cannot be merged with native MCP permissions/);
+  assert.ok(!fromFile.join(" ").includes("s3cret"), "settings contents never enter argv");
+  const copy = fromFile[3];
+  assert.notEqual(copy, path.join(dir, "s.json"), "the user's file is not modified");
+  assert.equal(statSync(copy).mode & 0o777, 0o600);
+  assert.equal(statSync(path.dirname(copy)).mode & 0o777, 0o700);
+  assert.deepEqual(JSON.parse(readFileSync(copy, "utf8")), { model: "y", env: { TOKEN: "s3cret" }, permissions: { deny: ["WebFetch"], allow: ["mcp__ditto"] } });
+  assert.throws(() => withClaudeSettings(["--settings", "s.json"], { a: 1 }, { cwd: os.tmpdir() + "/nowhere" }), /cannot be merged with native MCP permissions/);
   assert.throws(() => withClaudeSettings(["--settings", "[1]"], { a: 1 }), /cannot be merged|not a JSON object/);
   // "__proto__" in settings JSON is data, never a prototype swap.
   const proto = JSON.parse(withClaudeSettings(["--settings", '{"a":1}'], JSON.parse('{"__proto__":{"polluted":true}}'))[1]);

@@ -31,7 +31,7 @@ export function planClaude(input: PlanInput): HarnessPlan {
   // the router told not to inject them a second time.
   if (input.mcp) args.push("--mcp-config", input.mcp.config);
   args.push(...input.passthrough);
-  const finalArgs = input.mcp ? withClaudeSettings(args, attachmentSettings(input.mcp)) : args;
+  const finalArgs = input.mcp ? withClaudeSettings(args, attachmentSettings(input.mcp), { cwd: input.cwd }) : args;
 
   const deny = input.toolDeny?.length ? `${TOOL_DENY_HEADER}: ${input.toolDeny.join(",")}` : undefined;
   const surface = input.mcp ? `${TOOL_SURFACE_HEADER}: ${TOOL_SURFACE_MCP}` : undefined;
