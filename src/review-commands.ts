@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { Command, Option } from "commander";
 import { ApiError, apiFetch, type Company, resolveCompany } from "./api.js";
@@ -140,6 +141,7 @@ interface LocalOptions extends ScopeOptions {
   directory?: string;
   preview?: boolean;
   timeout?: string;
+  requestId?: string;
 }
 
 interface LocalRun {
@@ -175,7 +177,9 @@ function printLocalRun(run: LocalRun, options: LocalOptions): void {
   const result = run.result;
   process.stdout.write(`Local review ${run.status} · ${run.profile}\nRun: ${run.runId}\nSnapshot: ${run.snapshotDigest}\n`);
   const findings = result?.findings?.filter(f => !f.status || f.status === "posted") ?? [];
-  process.stdout.write(`${findings.length ? `${findings.length} finding${findings.length === 1 ? "" : "s"} in reviewed scope` : "No findings in reviewed scope"}\n`);
+  if (result && (Array.isArray(result.findings) || result.complete === true) && ["completed", "partial"].includes(run.status)) {
+    process.stdout.write(`${findings.length ? `${findings.length} finding${findings.length === 1 ? "" : "s"} in reviewed scope` : "No findings in reviewed scope"}\n`);
+  } else process.stdout.write("No review result is available for this run.\n");
   for (const f of findings) process.stdout.write(`\n${f.severity ?? "finding"} · ${f.path ?? ""}:${f.line ?? f.startLine ?? ""} · ${f.title ?? ""}\n${f.body ?? f.explanation ?? ""}\n`);
   if (!result?.complete || run.status !== "completed") process.stdout.write("Review incomplete; check coverage and errors before relying on this result.\n");
   if (result?.local?.contextComplete === false) process.stdout.write("Surrounding context was bounded; omitted files were not reviewed.\n");
@@ -186,10 +190,23 @@ function printLocalRun(run: LocalRun, options: LocalOptions): void {
   if (run.error || result?.error) process.stdout.write(`Error: ${run.error || result?.error}\n`);
 }
 
+async function pollLocalRun(route: string, signal: AbortSignal): Promise<LocalRun> {
+  for (let attempt = 0; ; attempt++) {
+    try { return await apiFetch<LocalRun>(route, { signal }); }
+    catch (error) {
+      const transient = error instanceof TypeError || (error instanceof ApiError && (error.status >= 500 || [408, 429].includes(error.status)));
+      if (!transient || signal.aborted || attempt === 2) throw error;
+      process.stderr.write("Review status is temporarily unavailable; retrying the read.\n");
+      await delay(500 * (attempt + 1), undefined, { signal });
+    }
+  }
+}
+
 export async function cmdReviewLocal(options: LocalOptions): Promise<void> {
   if (options.staged && options.base) throw new Error("--staged and --base cannot be used together");
   const profile = options.profile ?? "quick";
   if (!["quick", "standard", "deep"].includes(profile)) throw new Error("--profile must be quick, standard or deep");
+  if (options.requestId) { try { runPath(options.requestId); } catch { throw new Error("--request-id must be a UUID"); } }
   const timeout = intFlag("--timeout", options.timeout ?? "1200", 1, 1800) * 1000;
   const context = options.contextFile ? new TextDecoder("utf-8", { fatal: true }).decode(await readFile(options.contextFile)) : undefined;
   if (context && (Buffer.byteLength(context) > 16000 || context.includes("\0"))) throw new Error("--context-file must contain at most 16000 UTF-8 bytes without NUL characters");
@@ -197,14 +214,25 @@ export async function cmdReviewLocal(options: LocalOptions): Promise<void> {
   const company = options.preview ? undefined : await resolveScope(options);
   const repos = options.preview ? [] : await listReviewRepositories(company);
   const controller = new AbortController();
-  let interrupted = 0, timedOut = false, runId: string | undefined, posted = false;
+  let interrupted = 0, timedOut = false, runId: string | undefined, posted = false, capturedRoot: string | undefined;
   const interrupt = (signal: NodeJS.Signals) => { interrupted = signal === "SIGTERM" ? 143 : 130; controller.abort(); };
   const onInt = () => interrupt("SIGINT"), onTerm = () => interrupt("SIGTERM");
   process.on("SIGINT", onInt); process.on("SIGTERM", onTerm);
   const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeout);
-  const requestId = randomUUID();
+  const requestId = options.requestId?.toLowerCase() ?? randomUUID();
+  const recovery = (): string => {
+    const args = ["heyditto", "review", "local", "--request-id", requestId, "--profile", profile];
+    if (capturedRoot) args.push("--directory", capturedRoot);
+    if (options.staged) args.push("--staged");
+    if (options.base) args.push("--base", options.base);
+    if (options.contextFile) args.push("--context-file", path.resolve(options.contextFile));
+    if (options.repository) args.push("--repository", options.repository);
+    if (company) args.push("--org", company.id);
+    return args.map(arg => /^[a-zA-Z0-9_./:=@-]+$/.test(arg) ? arg : "'" + arg.replaceAll("'", "'\\''") + "'").join(" ");
+  };
   try {
     const captured = await captureReviewSnapshot({ staged: options.staged, base: options.base, cwd: options.directory, signal: controller.signal });
+    capturedRoot = captured.root;
     const { snapshot } = captured;
     const preview = {
       requestId, profile, snapshotDigest: snapshot.digest, mode: snapshot.mode, baseSha: snapshot.baseSha,
@@ -235,8 +263,8 @@ export async function cmdReviewLocal(options: LocalOptions): Promise<void> {
     let run = await apiFetch<LocalRun>(`/api/v5/review/repositories/${encodeURIComponent(repo.id)}/local${scopeQuery(company)}`, {
       method: "POST", body: { requestId, snapshot, profile, ...(context ? { context } : {}) }, signal: AbortSignal.timeout(30000),
     });
+    try { runPath(run.runId); } catch { throw new Error("Review API returned no valid run ID"); }
     runId = run.runId;
-    if (!/^[0-9a-f-]{36}$/i.test(runId)) throw new Error("Review API returned no valid run ID");
     process.stderr.write(`Local review run: ${runId}\n`);
     const route = `/api/v5/review/local/runs/${encodeURIComponent(runId)}`;
     let prior = "";
@@ -251,12 +279,13 @@ export async function cmdReviewLocal(options: LocalOptions): Promise<void> {
           run.workspaceCurrent = current.snapshot.digest === snapshot.digest;
         } catch { run.workspaceCurrent = null; run.workspaceCurrentReason = "Snapshot could not be recaptured"; }
         printLocalRun(run, options);
-        if (["failed", "cancelled", "partial"].includes(run.status)) process.exitCode = 1;
+        if (interrupted) process.exitCode = interrupted;
+        else if (["failed", "cancelled", "partial"].includes(run.status) || (run.status === "completed" && run.result?.complete !== true)) process.exitCode = 1;
         return;
       }
       if (!ACTIVE_REVIEW_STATUSES.has(run.status)) throw new Error(`unknown local review status: ${run.status}`);
       await delay(500, undefined, { signal: controller.signal });
-      run = await apiFetch<LocalRun>(`${route}${scopeQuery(company)}`, { signal: controller.signal });
+      run = await pollLocalRun(`${route}${scopeQuery(company)}`, controller.signal);
     }
   } catch (error) {
     if (runId) {
@@ -267,6 +296,7 @@ export async function cmdReviewLocal(options: LocalOptions): Promise<void> {
     }
     if (interrupted || timedOut) {
       process.stderr.write(`${timedOut ? "Local review timed out" : "Local review interrupted"}${runId ? ` (run ${runId})` : posted ? `; admission outcome is unknown (request ${requestId})` : ""}.\n`);
+      if (posted && !runId) process.stderr.write(`Recover the same admission: ${recovery()}\nChanged source, profile or context is refused; no automatic retry was made.\n`);
       process.exitCode = interrupted || 124;
       return;
     }
@@ -274,7 +304,7 @@ export async function cmdReviewLocal(options: LocalOptions): Promise<void> {
       if (error.status === 404) throw new Error("The local review endpoint is unavailable on this Ditto backend; no local review was admitted.");
       throw error;
     }
-    if (posted && !runId) throw new Error(`${error instanceof Error ? error.message : String(error)}\nAdmission outcome is unknown; request ${requestId}. No automatic retry was made.`);
+    if (posted && !runId) throw new Error(`${error instanceof Error ? error.message : String(error)}\nAdmission outcome is unknown; request ${requestId}.\nRecover the same admission: ${recovery()}\nChanged source, profile or context is refused; no automatic retry was made.`);
     throw error;
   } finally {
     clearTimeout(timer); process.removeListener("SIGINT", onInt); process.removeListener("SIGTERM", onTerm);
@@ -285,6 +315,8 @@ export async function cmdReviewLocalStatus(id: string, options: ScopeOptions): P
   runPath(id);
   const company = await resolveScope(options);
   const run = await apiFetch<LocalRun>(`/api/v5/review/local/runs/${encodeURIComponent(id)}${scopeQuery(company)}`);
+  run.workspaceCurrent = null;
+  run.workspaceCurrentReason = "Status reads do not recapture a local checkout";
   printLocalRun(run, options);
 }
 
@@ -683,7 +715,8 @@ export function registerReviewCommands(
     .option("--repository <owner/name>", "Review repository (default: current checkout's GitHub origin)")
     .option("--directory <directory>", "checkout to review (default: current directory)")
     .option("--preview", "inspect selected paths and upload size locally; no auth, upload or inference")
-    .option("--timeout <seconds>", "cancel after this many seconds including capture and queue time (1-1800)", "1200"))
+    .option("--timeout <seconds>", "cancel after this many seconds including capture and queue time (1-1800)", "1200")
+    .option("--request-id <uuid>", "recover an uncertain admission with exactly the same source, profile and context"))
     .action(cmdReviewLocal),
     `  heyditto review local --preview\n  heyditto review local --staged --profile quick --org omniaura\n  heyditto review local --base main --context-file .tmp/task.md --output json`);
   scoped(review.command("local-status").description("inspect a pre-PR review run without starting or retrying it")

@@ -252,6 +252,8 @@ review and verification engine. The immutable snapshot is limited to 16 MiB of
 decoded source and 4096 files per tree. Every eligible changed file must fit;
 nearby surrounding files fill the remaining budget. Binary files, symlinks and
 submodules are recorded as skipped rather than followed or executed.
+Git paths must be valid UTF-8. Unsupported path encodings abort capture before
+upload rather than changing path identity or silently omitting changes.
 
 Choose `quick` (default), `standard` or `deep`. The service returns the effective
 time and budget ceilings; queue and capture time are additional. These profiles
@@ -259,7 +261,10 @@ are effort policies, not measured speed guarantees. `--timeout` bounds the
 whole CLI operation and requests cancellation when it expires. Ctrl-C also
 requests cancellation; use the printed run ID to inspect or cancel a run later.
 An uncertain admission is identified by its request ID and is never retried
-automatically.
+automatically. Use the printed recovery command with `--request-id <uuid>` to
+recover that same admission. The server reuses the original run for identical
+input and refuses changes to the source snapshot, profile or context under that
+ID, so this recovery does not start another paid attempt.
 
 Readable and JSON results identify the reviewed snapshot, findings, coverage,
 cost receipts and whether the current working tree still matches. Partial

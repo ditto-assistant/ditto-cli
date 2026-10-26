@@ -24,15 +24,24 @@ export interface ReviewSnapshot {
 }
 interface GitEntry { oid: string; mode: string }
 export interface SnapshotOptions { staged?: boolean; base?: string; cwd?: string; signal?: AbortSignal }
-const utf8 = new TextDecoder("utf-8", { fatal: true });
+const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 const order = (a: string, b: string): number => Buffer.compare(Buffer.from(a), Buffer.from(b));
 
 /** Git is only ever queried. In particular capture does not write the index,
  * create commits, stash changes, invoke hooks, or use external diff drivers. */
 export async function reviewGit(cwd: string, args: string[], input?: string, signal?: AbortSignal): Promise<Buffer> {
+  const filterConfig: string[] = [];
+  if (args[0] === "diff") {
+    // --no-ext-diff/--no-textconv do not disable clean/process filters. Read
+    // names only (never credential/config values) and override each configured
+    // driver for this invocation, so preview cannot run Git LFS or custom code.
+    const keys = names(await reviewGit(cwd, ["config", "--null", "--name-only", "--list"], undefined, signal));
+    const drivers = new Set(keys.flatMap(key => /^filter\.(.+)\.(clean|smudge|process|required)$/i.exec(key)?.[1] ?? []));
+    for (const driver of drivers) for (const [setting, value] of [["clean", ""], ["smudge", ""], ["process", ""], ["required", "false"]]) filterConfig.push("-c", `filter.${driver}.${setting}=${value}`);
+  }
   return new Promise((resolve, reject) => {
-    const child = spawn("git", ["-c", "core.fsmonitor=false", ...args], {
-      cwd, env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" }, stdio: ["pipe", "pipe", "pipe"], signal,
+    const child = spawn("git", ["-c", "core.fsmonitor=false", ...filterConfig, ...args], {
+      cwd, env: { ...process.env, GIT_OPTIONAL_LOCKS: "0", GIT_NO_LAZY_FETCH: "1", GIT_TERMINAL_PROMPT: "0" }, stdio: ["pipe", "pipe", "pipe"], signal,
     });
     const chunks: Buffer[] = [], errors: Buffer[] = [];
     let size = 0, overflow = false;
@@ -53,7 +62,8 @@ export async function reviewGit(cwd: string, args: string[], input?: string, sig
 }
 
 function names(data: Buffer): string[] {
-  return utf8.decode(data).split("\0").filter(Boolean);
+  try { return utf8.decode(data).split("\0").filter(Boolean); }
+  catch { throw new Error("local review requires UTF-8 Git paths; unsupported names abort capture before upload rather than changing or omitting path identity"); }
 }
 
 function safePath(file: string): void {
@@ -82,7 +92,7 @@ async function objectSizes(cwd: string, ids: string[], signal?: AbortSignal): Pr
   const rows = (await reviewGit(cwd, ["cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)"], ids.join("\n") + "\n", signal)).toString("ascii").trim().split("\n");
   for (const row of rows) {
     const [id, type, size] = row.split(" ");
-    if (type !== "blob" || !/^\d+$/.test(size)) throw new Error("local review requires available Git blob objects");
+    if (type !== "blob" || !/^\d+$/.test(size)) throw new Error("local review requires available Git blob objects; materialize missing objects manually before retrying (capture never fetches)");
     out.set(id, Number(size));
   }
   return out;
@@ -118,13 +128,15 @@ async function workingFile(root: string, file: string, read: boolean): Promise<{
     for (const part of file.split("/").slice(0, -1)) {
       parent = path.join(parent, part);
       const stat = await lstat(parent);
+      if (stat.isFile()) return undefined; // A tracked directory was replaced by a file.
       if (stat.isSymbolicLink() || !stat.isDirectory()) throw new SkipFile("symlink or non-directory parent");
     }
     before = await lstat(absolute);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    if (["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) return undefined;
     throw error;
   }
+  if (before.isDirectory()) return undefined; // A tracked file was replaced by a directory.
   if (!before.isFile() || before.isSymbolicLink()) throw new SkipFile("symlink or non-regular file");
   const mode = (before.mode & 0o111) ? "100755" : "100644";
   if (!read) return { size: before.size, mode };
@@ -161,7 +173,7 @@ export function snapshotDigest(snapshot: Omit<ReviewSnapshot, "digest"> | Review
 
 export async function captureReviewSnapshot(options: SnapshotOptions = {}): Promise<{ root: string; snapshot: ReviewSnapshot; bytes: number }> {
   if (options.staged && options.base) throw new Error("--staged and --base cannot be used together");
-  const root = await realpath(utf8.decode(await reviewGit(options.cwd ?? process.cwd(), ["rev-parse", "--show-toplevel"], undefined, options.signal)).trim());
+  const root = await realpath(utf8.decode(await reviewGit(options.cwd ?? process.cwd(), ["rev-parse", "--show-toplevel"], undefined, options.signal)).replace(/\r?\n$/, ""));
   let head: string | undefined;
   try { head = (await reviewGit(root, ["rev-parse", "--verify", "HEAD"], undefined, options.signal)).toString("ascii").trim(); }
   catch {
@@ -249,7 +261,7 @@ export async function captureReviewSnapshot(options: SnapshotOptions = {}): Prom
   if (sealedChanges.length > LOCAL_REVIEW_MAX_FILES || omittedContext.length > 20000 || skipped.length > 20000) throw new Error("local review manifest exceeds path limits; narrow the diff");
   const bytes = [...baseFiles, ...headFiles].reduce((n, f) => n + Buffer.byteLength(f.contentBase64, "base64"), 0);
   if (bytes > LOCAL_REVIEW_MAX_BYTES) throw new Error("files grew beyond the local review content limit during capture; retry with a smaller diff");
-  const snapshot: ReviewSnapshot = { version: 1, mode, ...(options.base ? { baseRef: options.base } : {}), ...(baseSha ? { baseSha } : {}), digest: "", baseFiles, headFiles, changedPaths: sealedChanges, contextComplete: omittedContext.length === 0, omittedContext, skipped };
+  const snapshot: ReviewSnapshot = { version: 1, mode, ...(options.base ? { baseRef: options.base } : {}), ...(baseSha ? { baseSha } : {}), digest: "", baseFiles, headFiles, changedPaths: sealedChanges, contextComplete: omittedContext.length === 0 && skipped.length === 0, omittedContext, skipped };
   snapshot.digest = snapshotDigest(snapshot);
   if (Buffer.byteLength(JSON.stringify(snapshot)) > LOCAL_REVIEW_MAX_JSON_BYTES) throw new Error("local review snapshot exceeds the 24 MiB transport limit; narrow the diff");
   return { root, snapshot, bytes };
