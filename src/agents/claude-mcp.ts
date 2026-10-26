@@ -192,11 +192,18 @@ function alive(pid: number): boolean {
 }
 
 /**
+ * A dead owner's directory survives this long, since a launcher killed right after
+ * spawning Claude can leave a Claude that has not yet read its `--settings`.
+ */
+const STALE_SETTINGS_GRACE_MS = 5 * 60 * 1000;
+
+/**
  * Removes settings copies whose CLI is gone (killed by a signal before its exit
  * cleanup ran). Liveness, not age: a session can run for days, and its Claude
- * keeps reading its settings for as long as it runs.
+ * keeps reading its settings for as long as it runs. A dead owner's directory
+ * is kept for a short grace period after its last write.
  */
-export function sweepStaleSettings(tmp: string, isAlive: (pid: number) => boolean = alive): void {
+export function sweepStaleSettings(tmp: string, isAlive: (pid: number) => boolean = alive, now: number = Date.now()): void {
   let entries: string[];
   try {
     entries = readdirSync(tmp);
@@ -210,7 +217,9 @@ export function sweepStaleSettings(tmp: string, isAlive: (pid: number) => boolea
     if (pid === undefined || pid === process.pid || isAlive(pid)) continue;
     const dir = path.join(tmp, name);
     try {
-      if (uid === undefined || statSync(dir).uid === uid) rmSync(dir, { recursive: true, force: true });
+      const st = statSync(dir);
+      if (now - st.mtimeMs < STALE_SETTINGS_GRACE_MS) continue;
+      if (uid === undefined || st.uid === uid) rmSync(dir, { recursive: true, force: true });
     } catch {
       // Another process removed it, or it is not ours to read: leave it.
     }

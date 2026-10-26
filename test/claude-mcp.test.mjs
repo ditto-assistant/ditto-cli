@@ -200,15 +200,19 @@ test("private settings copies are reused per content, per temp root, and swept o
 
   const tmp = mkdtempSync(path.join(os.tmpdir(), "ditto-sweep-"));
   const dead = path.join(tmp, "ditto-claude-settings-111-abc");
+  const fresh = path.join(tmp, "ditto-claude-settings-333-abc");
   const live = path.join(tmp, "ditto-claude-settings-222-abc");
   const old = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
   const unnamed = path.join(tmp, "ditto-claude-settings-xyz");
   const other = path.join(tmp, "someone-else-111-abc");
-  for (const d of [dead, live, unnamed, other]) mkdirSync(d);
-  // Age is irrelevant: a month-old directory of a live session survives.
-  utimesSync(live, old, old);
+  for (const d of [dead, fresh, live, unnamed, other]) mkdirSync(d);
+  for (const d of [dead, live, unnamed, other]) utimesSync(d, old, old);
   sweepStaleSettings(tmp, (pid) => pid === 222);
   assert.equal(existsSync(dead), false, "a dead CLI's copy is removed");
+  // Its launcher died, but the Claude it spawned may not have read --settings yet.
+  assert.equal(existsSync(fresh), true, "a dead CLI's copy written in the last few minutes is kept");
+  sweepStaleSettings(tmp, (pid) => pid === 222, Date.now() + 6 * 60 * 1000);
+  assert.equal(existsSync(fresh), false, "and removed once the grace period is over");
   assert.equal(existsSync(live), true, "a live session keeps its settings however long it runs");
   assert.equal(existsSync(unnamed), true, "a directory without an owner pid is left alone");
   assert.equal(existsSync(other), true, "only our own prefix is swept");
