@@ -1236,7 +1236,7 @@ through the gh CLI; the plaintext never reaches your terminal.`,
       .option("--alias <name=model>", "name a model on this endpoint; repeatable, empty value removes one", collect)
       .option("--failover <on|off>", "allow sticky provider/model fallback; off by default, requires a USD cap")
       .option("--failover-model <model|same>", "fallback model; choose a cheaper model to reduce cold-cache refill cost")
-      .option("--failover-max-cost <usd>", "maximum cold-cache quote across fallback attempts per request; zero disables fallback")
+      .option("--failover-max-cost <usd>", "maximum cold-cache quote across fallback attempts per request; positive when enabled; use --failover off to disable")
       .option("--clear-kind-routes", "remove every kind route")
       .option("--clear-model-routes", "remove every model route")
       .option("--clear-aliases", "remove every alias")

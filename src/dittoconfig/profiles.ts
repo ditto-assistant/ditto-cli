@@ -121,8 +121,9 @@ export async function profileBody(decl: EndpointDecl, profileDir: string): Promi
   if (fallback !== undefined) {
     if (!fallback || typeof fallback !== "object" || Array.isArray(fallback)) throw new ProfileError("settings.failover must be a table");
     const f = fallback as Record<string, unknown>;
-    if (Object.keys(f).some(k => !["enabled", "model", "max_cost_usd"].includes(k)) || typeof f.enabled !== "boolean" || (f.model !== undefined && typeof f.model !== "string") || typeof f.max_cost_usd !== "number" || !Number.isFinite(f.max_cost_usd) || f.max_cost_usd < 0 || f.max_cost_usd > 1_000_000 || (f.enabled && f.max_cost_usd < 0.000001)) throw new ProfileError("settings.failover needs enabled, optional model and a finite max_cost_usd (positive when enabled)");
-    body.failover = { enabled: f.enabled, model: typeof f.model === "string" ? f.model.trim() : "", maxCostUsd: f.max_cost_usd };
+    const cap = f.max_cost_usd === undefined && f.enabled === false ? 0 : f.max_cost_usd;
+    if (Object.keys(f).some(k => !["enabled", "model", "max_cost_usd"].includes(k)) || typeof f.enabled !== "boolean" || (f.model !== undefined && typeof f.model !== "string") || typeof cap !== "number" || !Number.isFinite(cap) || cap < 0 || cap > 1_000_000 || (f.enabled && cap < 0.000001)) throw new ProfileError("settings.failover needs enabled, optional model and a finite max_cost_usd (required and positive when enabled)");
+    body.failover = { enabled: f.enabled, model: typeof f.model === "string" ? f.model.trim() : "", maxCostUsd: cap };
   }
   for (const harness of HARNESSES) {
     const raw = settings[`${harness}_prompt`];

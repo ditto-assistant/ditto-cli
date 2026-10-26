@@ -107,6 +107,23 @@ test("repo apply persists opt-in fallback settings and then makes no further wri
   } finally { stub.close(); }
 });
 
+test("disabled failover profiles may omit a cap, enabled profiles may not", async () => {
+  for (const enabled of [false, true]) {
+    const stub = await startStub();
+    const dir = await repo({ ".ditto/config.toml": CONFIG, ".ditto/endpoints/dev.toml": ORG_PROFILE + `failover = { enabled = ${enabled} }\n`, ".ditto/prompts/claude.md": PROMPT });
+    try {
+      const out = await run(["repo", "apply"], stub.base, dir);
+      if (enabled) {
+        assert.notEqual(out.status, 0);
+        assert.equal(stub.writes.length, 0);
+      } else {
+        assert.equal(out.status, 0, out.stderr);
+        assert.deepEqual(stub.writes[0].body.failover, { enabled: false, model: "", maxCostUsd: 0 });
+      }
+    } finally { stub.close(); }
+  }
+});
+
 test("repo apply creates an org profile with the checked-in prompt, then is a no-op", async () => {
   const stub = await startStub();
   const dir = await repo({ ".ditto/config.toml": CONFIG, ".ditto/endpoints/dev.toml": ORG_PROFILE, ".ditto/prompts/claude.md": PROMPT });
