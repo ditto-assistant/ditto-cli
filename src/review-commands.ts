@@ -1,9 +1,11 @@
 import { readFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import type { Command, Option } from "commander";
-import { apiFetch, type Company, resolveCompany } from "./api.js";
+import { ApiError, apiFetch, type Company, resolveCompany } from "./api.js";
 import { registerReviewFindingCommands } from "./review-findings.js";
 import { readStoredAuth } from "./store.js";
+import { captureReviewSnapshot, reviewGit } from "./review-snapshot.js";
 
 /**
  * Ditto Review repository settings: the developer console's Review →
@@ -127,6 +129,170 @@ interface WatchOptions extends ScopeOptions {
   interval?: string;
   timeout?: string;
   watch?: boolean;
+}
+
+interface LocalOptions extends ScopeOptions {
+  staged?: boolean;
+  base?: string;
+  profile?: string;
+  contextFile?: string;
+  repository?: string;
+  directory?: string;
+  preview?: boolean;
+  timeout?: string;
+}
+
+interface LocalRun {
+  runId: string;
+  status: string;
+  profile: string;
+  snapshotDigest: string;
+  budgetCents: number;
+  maxSeconds: number;
+  chargedCredits?: number;
+  creditsPerDollar?: number;
+  error?: string;
+  workspaceCurrent?: boolean | null;
+  workspaceCurrentReason?: string;
+  result?: {
+    complete?: boolean;
+    error?: string;
+    costUsd?: number;
+    findings?: { status?: string; severity?: string; path?: string; line?: number; startLine?: number; title?: string; body?: string; explanation?: string }[];
+    local?: { changedCoverageComplete?: boolean; contextComplete?: boolean; [key: string]: unknown };
+    [key: string]: unknown;
+  };
+}
+
+function repositoryFromRemote(remote: string): string {
+  const match = /^(?:git@github\.com:|https?:\/\/github\.com\/|ssh:\/\/git@github\.com\/)([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/.exec(remote.trim());
+  if (!match) throw new Error("cannot identify a GitHub repository from origin; pass --repository <owner/name>");
+  return match[1];
+}
+
+function printLocalRun(run: LocalRun, options: LocalOptions): void {
+  if (isJSON(options)) return writeJSON(run);
+  const result = run.result;
+  process.stdout.write(`Local review ${run.status} · ${run.profile}\nRun: ${run.runId}\nSnapshot: ${run.snapshotDigest}\n`);
+  const findings = result?.findings?.filter(f => !f.status || f.status === "posted") ?? [];
+  process.stdout.write(`${findings.length ? `${findings.length} finding${findings.length === 1 ? "" : "s"} in reviewed scope` : "No findings in reviewed scope"}\n`);
+  for (const f of findings) process.stdout.write(`\n${f.severity ?? "finding"} · ${f.path ?? ""}:${f.line ?? f.startLine ?? ""} · ${f.title ?? ""}\n${f.body ?? f.explanation ?? ""}\n`);
+  if (!result?.complete || run.status !== "completed") process.stdout.write("Review incomplete; check coverage and errors before relying on this result.\n");
+  if (result?.local?.contextComplete === false) process.stdout.write("Surrounding context was bounded; omitted files were not reviewed.\n");
+  if (run.workspaceCurrent === false) process.stdout.write("The working tree changed after capture; these findings describe the saved snapshot.\n");
+  if (run.workspaceCurrent === null) process.stdout.write("Current working-tree identity could not be checked; these findings describe the saved snapshot.\n");
+  process.stdout.write(`Limits: ${run.maxSeconds}s, ${money(run.budgetCents)} maximum inference budget\n`);
+  if (run.chargedCredits !== undefined) process.stdout.write(`Charged: ${run.chargedCredits} credits${run.creditsPerDollar ? ` (${run.creditsPerDollar} credits/USD)` : ""}\n`);
+  if (run.error || result?.error) process.stdout.write(`Error: ${run.error || result?.error}\n`);
+}
+
+export async function cmdReviewLocal(options: LocalOptions): Promise<void> {
+  if (options.staged && options.base) throw new Error("--staged and --base cannot be used together");
+  const profile = options.profile ?? "quick";
+  if (!["quick", "standard", "deep"].includes(profile)) throw new Error("--profile must be quick, standard or deep");
+  const timeout = intFlag("--timeout", options.timeout ?? "1200", 1, 1800) * 1000;
+  const context = options.contextFile ? new TextDecoder("utf-8", { fatal: true }).decode(await readFile(options.contextFile)) : undefined;
+  if (context && (Buffer.byteLength(context) > 16000 || context.includes("\0"))) throw new Error("--context-file must contain at most 16000 UTF-8 bytes without NUL characters");
+  // Preview deliberately has no auth or network dependency.
+  const company = options.preview ? undefined : await resolveScope(options);
+  const repos = options.preview ? [] : await listReviewRepositories(company);
+  const controller = new AbortController();
+  let interrupted = 0, timedOut = false, runId: string | undefined, posted = false;
+  const interrupt = (signal: NodeJS.Signals) => { interrupted = signal === "SIGTERM" ? 143 : 130; controller.abort(); };
+  const onInt = () => interrupt("SIGINT"), onTerm = () => interrupt("SIGTERM");
+  process.on("SIGINT", onInt); process.on("SIGTERM", onTerm);
+  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeout);
+  const requestId = randomUUID();
+  try {
+    const captured = await captureReviewSnapshot({ staged: options.staged, base: options.base, cwd: options.directory, signal: controller.signal });
+    const { snapshot } = captured;
+    const preview = {
+      requestId, profile, snapshotDigest: snapshot.digest, mode: snapshot.mode, baseSha: snapshot.baseSha,
+      changedPaths: snapshot.changedPaths, baseFileCount: snapshot.baseFiles.length, headFileCount: snapshot.headFiles.length,
+      contentBytes: captured.bytes, payloadBytes: Buffer.byteLength(JSON.stringify({ requestId, snapshot, profile, context })),
+      contextComplete: snapshot.contextComplete, omittedContext: snapshot.omittedContext, skipped: snapshot.skipped,
+    };
+    if (options.preview) {
+      if (isJSON(options)) return writeJSON(preview);
+      process.stdout.write(`Local review preview · ${profile}\nSnapshot: ${snapshot.digest}\nSelected changes: ${snapshot.changedPaths.length}\nContext files: ${snapshot.headFiles.length} (${captured.bytes} decoded bytes; ${preview.payloadBytes} payload bytes)\n`);
+      for (const file of snapshot.changedPaths) process.stdout.write(`  ${file}\n`);
+      process.stdout.write(`Omitted context: ${snapshot.omittedContext.length}; skipped files: ${snapshot.skipped.length}\nNo source uploaded; no review started.\n`);
+      return;
+    }
+    if (!snapshot.changedPaths.length) {
+      const empty = { status: "skipped", reason: "no_changes", snapshotDigest: snapshot.digest, changedPaths: [] };
+      if (isJSON(options)) writeJSON(empty); else process.stdout.write("No working-diff changes to review.\n");
+      return;
+    }
+    const fullName = options.repository ?? repositoryFromRemote((await reviewGit(captured.root, ["remote", "get-url", "origin"], undefined, controller.signal)).toString("utf8"));
+    const repo = repos.find(r => r.fullName.toLowerCase() === fullName.toLowerCase());
+    if (!repo) throw new Error(`${fullName} is not set up in this workspace; see heyditto review repos${options.org ? ` --org ${options.org}` : ""}`);
+    process.stderr.write(`Uploading ${snapshot.changedPaths.length} changed paths with ${snapshot.headFiles.length} context files (${preview.payloadBytes} bytes) for ${profile} review; omitted context: ${snapshot.omittedContext.length}.\nRequest: ${requestId}\n`);
+    if (controller.signal.aborted) throw controller.signal.reason;
+    posted = true;
+    // Complete the admission response even on Ctrl-C so a returned run can be
+    // cancelled. An uncertain POST is never retried automatically.
+    let run = await apiFetch<LocalRun>(`/api/v5/review/repositories/${encodeURIComponent(repo.id)}/local${scopeQuery(company)}`, {
+      method: "POST", body: { requestId, snapshot, profile, ...(context ? { context } : {}) }, signal: AbortSignal.timeout(30000),
+    });
+    runId = run.runId;
+    if (!/^[0-9a-f-]{36}$/i.test(runId)) throw new Error("Review API returned no valid run ID");
+    process.stderr.write(`Local review run: ${runId}\n`);
+    const route = `/api/v5/review/local/runs/${encodeURIComponent(runId)}`;
+    let prior = "";
+    for (;;) {
+      if (controller.signal.aborted) throw controller.signal.reason;
+      if (run.status !== prior) { process.stderr.write(`Local review: ${run.status}\n`); prior = run.status; }
+      if (TERMINAL_REVIEW_STATUSES.has(run.status)) {
+        if (run.snapshotDigest !== snapshot.digest) throw new Error("Review API returned a result for a different snapshot");
+        clearTimeout(timer);
+        try {
+          const current = await captureReviewSnapshot({ staged: options.staged, base: options.base, cwd: captured.root, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(10000)]) });
+          run.workspaceCurrent = current.snapshot.digest === snapshot.digest;
+        } catch { run.workspaceCurrent = null; run.workspaceCurrentReason = "Snapshot could not be recaptured"; }
+        printLocalRun(run, options);
+        if (["failed", "cancelled", "partial"].includes(run.status)) process.exitCode = 1;
+        return;
+      }
+      if (!ACTIVE_REVIEW_STATUSES.has(run.status)) throw new Error(`unknown local review status: ${run.status}`);
+      await delay(500, undefined, { signal: controller.signal });
+      run = await apiFetch<LocalRun>(`${route}${scopeQuery(company)}`, { signal: controller.signal });
+    }
+  } catch (error) {
+    if (runId) {
+      try {
+        await apiFetch(`/api/v5/review/local/runs/${encodeURIComponent(runId)}/cancel${scopeQuery(company)}`, { method: "POST", signal: AbortSignal.timeout(5000) });
+        process.stderr.write(`Cancellation requested for ${runId}.\n`);
+      } catch { process.stderr.write(`Could not confirm cancellation of ${runId}; use heyditto review local-status ${runId}${options.org ? ` --org ${options.org}` : ""} to inspect it.\n`); }
+    }
+    if (interrupted || timedOut) {
+      process.stderr.write(`${timedOut ? "Local review timed out" : "Local review interrupted"}${runId ? ` (run ${runId})` : posted ? `; admission outcome is unknown (request ${requestId})` : ""}.\n`);
+      process.exitCode = interrupted || 124;
+      return;
+    }
+    if (posted && !runId && error instanceof ApiError && error.status >= 400 && error.status < 500) {
+      if (error.status === 404) throw new Error("The local review endpoint is unavailable on this Ditto backend; no local review was admitted.");
+      throw error;
+    }
+    if (posted && !runId) throw new Error(`${error instanceof Error ? error.message : String(error)}\nAdmission outcome is unknown; request ${requestId}. No automatic retry was made.`);
+    throw error;
+  } finally {
+    clearTimeout(timer); process.removeListener("SIGINT", onInt); process.removeListener("SIGTERM", onTerm);
+  }
+}
+
+export async function cmdReviewLocalStatus(id: string, options: ScopeOptions): Promise<void> {
+  runPath(id);
+  const company = await resolveScope(options);
+  const run = await apiFetch<LocalRun>(`/api/v5/review/local/runs/${encodeURIComponent(id)}${scopeQuery(company)}`);
+  printLocalRun(run, options);
+}
+
+export async function cmdReviewLocalCancel(id: string, options: ScopeOptions): Promise<void> {
+  runPath(id);
+  const company = await resolveScope(options);
+  const result = await apiFetch(`/api/v5/review/local/runs/${encodeURIComponent(id)}/cancel${scopeQuery(company)}`, { method: "POST" });
+  if (isJSON(options)) writeJSON(result); else process.stdout.write(`Cancellation requested for local review ${id}.\n`);
 }
 
 const TERMINAL_REVIEW_STATUSES = new Set(["completed", "partial", "failed", "cancelled", "skipped", "superseded"]);
@@ -508,6 +674,22 @@ export function registerReviewCommands(
   heyditto review repos --output json`,
   );
   const scoped = (command: Command): Command => command.addOption(orgOption()).addOption(outputOption());
+  addExamples(scoped(review.command("local")
+    .description("review a working diff before a PR; uploads selected changes and bounded tracked source context to Ditto Review")
+    .option("--staged", "review index bytes only, excluding unstaged and untracked changes")
+    .option("--base <ref>", "review branch and working changes since merge-base(ref, HEAD); conflicts with --staged")
+    .option("--profile <profile>", "quick, standard or deep (default quick)", "quick")
+    .option("--context-file <file>", "read task context from a UTF-8 file (maximum 16000 bytes)")
+    .option("--repository <owner/name>", "Review repository (default: current checkout's GitHub origin)")
+    .option("--directory <directory>", "checkout to review (default: current directory)")
+    .option("--preview", "inspect selected paths and upload size locally; no auth, upload or inference")
+    .option("--timeout <seconds>", "cancel after this many seconds including capture and queue time (1-1800)", "1200"))
+    .action(cmdReviewLocal),
+    `  heyditto review local --preview\n  heyditto review local --staged --profile quick --org omniaura\n  heyditto review local --base main --context-file .tmp/task.md --output json`);
+  scoped(review.command("local-status").description("inspect a pre-PR review run without starting or retrying it")
+    .argument("<run-id>", "local review run UUID")).action(cmdReviewLocalStatus);
+  scoped(review.command("local-cancel").description("cancel a queued or running pre-PR review")
+    .argument("<run-id>", "local review run UUID")).action(cmdReviewLocalCancel);
   const watched = (command: Command): Command => command
     .option("--interval <seconds>", "poll interval (1-60 seconds)", "10")
     .option("--timeout <seconds>", "stop waiting after this many seconds (review continues)", "3600");
