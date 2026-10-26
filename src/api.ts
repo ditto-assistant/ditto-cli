@@ -143,7 +143,7 @@ export interface InferenceEndpoint {
 
 /** Partial body for POST / PATCH /api/v5/inference/endpoints. */
 export interface EndpointInput {
-  failover?: RouterFailover;
+  failover?: Partial<RouterFailover>;
   name?: string;
   slug?: string;
   model?: string;

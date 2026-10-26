@@ -725,11 +725,12 @@ export async function cmdEndpointSet(ref: string, options: EndpointSetOptions): 
   const { endpoint } = await getEndpoint(ref);
   if (touchesFailover) {
     const current = endpoint.failover ?? { enabled: false, model: "", maxCostUsd: 0 };
-    patch.failover = { ...current,
+    patch.failover = {
       ...(failoverEnabled !== undefined ? { enabled: failoverEnabled } : {}),
       ...(options.failoverModel !== undefined ? { model: options.failoverModel.trim() === "same" ? "" : options.failoverModel.trim() } : {}),
       ...(failoverCap !== undefined ? { maxCostUsd: failoverCap } : {}) };
-    if (patch.failover.enabled && patch.failover.maxCostUsd < 0.000001) throw new Error("enable failover with --failover-max-cost <usd>; zero never means unlimited");
+    const next = { ...current, ...patch.failover };
+    if (next.enabled && next.maxCostUsd < 0.000001) throw new Error("enable failover with --failover-max-cost <usd>; zero never means unlimited");
   }
   if (options.providerKey !== undefined && !["byok", "both"].includes(options.billingMode ?? endpoint.billingMode ?? "")) throw new Error("--provider-key requires BYOK billing; also set --billing-mode byok or both");
   // The server replaces these maps wholesale, so merge onto what the endpoint
@@ -759,7 +760,8 @@ export async function cmdEndpointSet(ref: string, options: EndpointSetOptions): 
   }
   // Raising or removing a spend cap lets the endpoint spend more credits.
   const raisesSpend =
-    (patch.failover?.enabled === true && (!endpoint.failover?.enabled || patch.failover.maxCostUsd > endpoint.failover.maxCostUsd)) ||
+    (touchesFailover && (patch.failover?.enabled ?? endpoint.failover?.enabled) === true &&
+      (!endpoint.failover?.enabled || (patch.failover?.maxCostUsd ?? endpoint.failover.maxCostUsd) > endpoint.failover.maxCostUsd)) ||
     patch.spendLimitTokens === null ||
     (typeof patch.spendLimitTokens === "number" &&
       endpoint.spendLimitTokens != null &&
