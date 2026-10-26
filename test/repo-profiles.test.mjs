@@ -124,6 +124,24 @@ test("disabled failover profiles may omit a cap, enabled profiles may not", asyn
   }
 });
 
+test("profile opt-out preserves omitted model and cap without replaying hidden authorization", async () => {
+  for (const reset of [false, true]) {
+    const policy = { enabled: true, model: "openai/gpt-5.6-luna", maxCostUsd: 0.25 };
+    const stub = await startStub([{ id: "existing", slug: "ditto-dev", companyId: ORG.id, failover: policy, providerOptions: { ditto_failover: policy } }]);
+    const setting = reset ? 'failover = { enabled = false, model = "", max_cost_usd = 0 }\n' : 'failover = { enabled = false }\n';
+    const dir = await repo({ ".ditto/config.toml": CONFIG, ".ditto/endpoints/dev.toml": ORG_PROFILE + setting, ".ditto/prompts/claude.md": PROMPT });
+    try {
+      const out = await run(["repo", "apply"], stub.base, dir);
+      assert.equal(out.status, 0, out.stderr);
+      assert.deepEqual(stub.writes[0].body.failover, reset ? { enabled: false, model: "", maxCostUsd: 0 } : { ...policy, enabled: false });
+      assert.equal(stub.writes[0].body.providerOptions.ditto_failover, undefined);
+      const again = await run(["repo", "apply"], stub.base, dir);
+      assert.equal(again.status, 0, again.stderr);
+      assert.equal(stub.writes.length, 1);
+    } finally { stub.close(); }
+  }
+});
+
 test("repo apply creates an org profile with the checked-in prompt, then is a no-op", async () => {
   const stub = await startStub();
   const dir = await repo({ ".ditto/config.toml": CONFIG, ".ditto/endpoints/dev.toml": ORG_PROFILE, ".ditto/prompts/claude.md": PROMPT });

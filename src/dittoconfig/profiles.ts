@@ -250,6 +250,17 @@ export async function planProfile(decl: EndpointDecl, profileDir: string): Promi
     for (const [k, v] of Object.entries(plan.body)) plan.changes[k] = [undefined, summarise(k, v)];
     return plan;
   }
+  if (body.failover && current.failover) {
+    const declared = (decl.settings as Record<string, unknown>).failover as Record<string, unknown>;
+    const wanted = body.failover as Record<string, unknown>;
+    // An opt-out need not restate the saved cache target or spend limit.
+    // Explicit empty model / zero cap declarations still reset those values.
+    body.failover = {
+      ...wanted,
+      ...(declared.model === undefined ? { model: current.failover.model } : {}),
+      ...(declared.max_cost_usd === undefined ? { maxCostUsd: current.failover.maxCostUsd } : {}),
+    };
+  }
   const cur = current as unknown as Record<string, unknown>;
   for (const [k, v] of Object.entries(body)) {
     if (!same(cur[k], v)) {
