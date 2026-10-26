@@ -92,7 +92,10 @@ export interface EndpointActivation {
   url?: string;
 }
 
+export interface RouterFailover { enabled: boolean; model: string; maxCostUsd: number }
+
 export interface InferenceEndpoint {
+  failover?: RouterFailover;
   id: string;
   slug: string;
   name: string;
@@ -140,6 +143,7 @@ export interface InferenceEndpoint {
 
 /** Partial body for POST / PATCH /api/v5/inference/endpoints. */
 export interface EndpointInput {
+  failover?: RouterFailover;
   name?: string;
   slug?: string;
   model?: string;

@@ -369,6 +369,8 @@ function excludedProviders(value: string): string[] | null {
 function codingAgentLines(endpoint: InferenceEndpoint): string[] {
   const options = endpoint.providerOptions ?? {};
   const lines: string[] = [];
+  const failover = endpoint.failover;
+  lines.push(`failover:     ${failover?.enabled ? `on · ${failover.model || "same model"} · $${failover.maxCostUsd} per request · sticky for session` : "off · stay on the original provider"}`);
   const excluded = options[EXCLUDED_PROVIDERS_OPTION];
   if (Array.isArray(excluded) && excluded.length > 0) lines.push(`excluded:      ${excluded.join(", ")}`);
   if (options.codex_models === true) {
@@ -472,6 +474,9 @@ interface EndpointSetOptions {
   claudePrompt?: string;
   claudePromptMode?: string;
   claudePromptAutoupdate?: string;
+  failover?: string;
+  failoverModel?: string;
+  failoverMaxCost?: string;
   excludeProvider?: string;
   yes?: boolean;
 }
@@ -709,11 +714,23 @@ export async function cmdEndpointSet(ref: string, options: EndpointSetOptions): 
   // in providerOptions beside the coding-agent settings; `none` removes it.
   if (options.excludeProvider !== undefined) agent[EXCLUDED_PROVIDERS_OPTION] = excludedProviders(options.excludeProvider);
 
-  if (Object.keys(patch).length === 0 && Object.keys(agent).length === 0 && !touchesMaps) {
+  const failoverEnabled = onOff("--failover", options.failover);
+  const touchesFailover = failoverEnabled !== undefined || options.failoverModel !== undefined || options.failoverMaxCost !== undefined;
+  const failoverCap = options.failoverMaxCost === undefined ? undefined : Number(options.failoverMaxCost);
+  if (failoverCap !== undefined && (!Number.isFinite(failoverCap) || failoverCap < 0 || failoverCap > 1_000_000)) throw new Error("--failover-max-cost must be a finite USD amount between 0 and 1000000");
+  if (Object.keys(patch).length === 0 && Object.keys(agent).length === 0 && !touchesMaps && !touchesFailover) {
     throw new Error("nothing to change; pass at least one --flag (see `heyditto endpoints set --help`)");
   }
 
   const { endpoint } = await getEndpoint(ref);
+  if (touchesFailover) {
+    const current = endpoint.failover ?? { enabled: false, model: "", maxCostUsd: 0 };
+    patch.failover = { ...current,
+      ...(failoverEnabled !== undefined ? { enabled: failoverEnabled } : {}),
+      ...(options.failoverModel !== undefined ? { model: options.failoverModel.trim() === "same" ? "" : options.failoverModel.trim() } : {}),
+      ...(failoverCap !== undefined ? { maxCostUsd: failoverCap } : {}) };
+    if (patch.failover.enabled && patch.failover.maxCostUsd < 0.000001) throw new Error("enable failover with --failover-max-cost <usd>; zero never means unlimited");
+  }
   if (options.providerKey !== undefined && !["byok", "both"].includes(options.billingMode ?? endpoint.billingMode ?? "")) throw new Error("--provider-key requires BYOK billing; also set --billing-mode byok or both");
   // The server replaces these maps wholesale, so merge onto what the endpoint
   // has now and validate the result the way the backend will.
@@ -742,6 +759,7 @@ export async function cmdEndpointSet(ref: string, options: EndpointSetOptions): 
   }
   // Raising or removing a spend cap lets the endpoint spend more credits.
   const raisesSpend =
+    (patch.failover?.enabled === true && (!endpoint.failover?.enabled || patch.failover.maxCostUsd > endpoint.failover.maxCostUsd)) ||
     patch.spendLimitTokens === null ||
     (typeof patch.spendLimitTokens === "number" &&
       endpoint.spendLimitTokens != null &&
@@ -1216,6 +1234,9 @@ through the gh CLI; the plaintext never reaches your terminal.`,
       .option("--kind-route <kind=model>", `pin a request kind to a model (${ROUTABLE_KINDS.join(", ")}); repeatable, empty value removes one`, collect)
       .option("--model-route <requested=target>", "map a requested model id to a provider model; repeatable, empty value removes one", collect)
       .option("--alias <name=model>", "name a model on this endpoint; repeatable, empty value removes one", collect)
+      .option("--failover <on|off>", "allow sticky provider/model fallback; off by default, requires a USD cap")
+      .option("--failover-model <model|same>", "fallback model; choose a cheaper model to reduce cold-cache refill cost")
+      .option("--failover-max-cost <usd>", "maximum cold-cache quote across fallback attempts per request; zero disables fallback")
       .option("--clear-kind-routes", "remove every kind route")
       .option("--clear-model-routes", "remove every model route")
       .option("--clear-aliases", "remove every alias")

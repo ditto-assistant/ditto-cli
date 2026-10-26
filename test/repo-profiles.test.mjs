@@ -94,6 +94,19 @@ kind_routes = { aside = "z-ai/glm-5.3-flash" }
 claude_prompt = { file = "../prompts/claude.md", mode = "replace" }
 `;
 
+test("repo apply persists opt-in fallback settings and then makes no further write", async () => {
+  const stub = await startStub();
+  const dir = await repo({ ".ditto/config.toml": CONFIG, ".ditto/endpoints/dev.toml": ORG_PROFILE + 'failover = { enabled = true, model = "openai/gpt-5.6-luna", max_cost_usd = 0.25 }\n', ".ditto/prompts/claude.md": PROMPT });
+  try {
+    const out = await run(["repo", "apply"], stub.base, dir);
+    assert.equal(out.status, 0, out.stderr);
+    assert.deepEqual(stub.writes[0].body.failover, { enabled: true, model: "openai/gpt-5.6-luna", maxCostUsd: 0.25 });
+    const again = await run(["repo", "apply"], stub.base, dir);
+    assert.equal(again.status, 0, again.stderr);
+    assert.equal(stub.writes.length, 1);
+  } finally { stub.close(); }
+});
+
 test("repo apply creates an org profile with the checked-in prompt, then is a no-op", async () => {
   const stub = await startStub();
   const dir = await repo({ ".ditto/config.toml": CONFIG, ".ditto/endpoints/dev.toml": ORG_PROFILE, ".ditto/prompts/claude.md": PROMPT });
