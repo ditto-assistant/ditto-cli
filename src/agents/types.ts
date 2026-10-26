@@ -1,5 +1,7 @@
 /** Shared types for the coding-agent launchers. Pure data, no I/O. */
 
+import type { ClaudeMcpAttachment } from "./claude-mcp.js";
+
 export type Harness = "claude" | "codex" | "grok";
 
 export const HARNESSES: readonly Harness[] = ["claude", "codex", "grok"];
@@ -56,6 +58,10 @@ export interface PlanInput {
   passthrough: string[];
   /** Router tool deny rules to forward (claude-deny.ts); Claude only. */
   toolDeny?: string[];
+  /** The endpoint's tools attached as Claude Code MCP servers (claude-mcp.ts); Claude only. */
+  mcp?: ClaudeMcpAttachment;
+  /** Where the harness runs; relative paths in its passthrough argv mean files there. */
+  cwd?: string;
   /** Parent environment to derive the child environment from. */
   env: NodeJS.ProcessEnv;
 }

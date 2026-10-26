@@ -25,6 +25,7 @@ import { findProfileEndpoint, repoDefaultProfile } from "../dittoconfig/profiles
 import { err as c } from "../ui.js";
 import { holdNotesForTui, type NoteOptions, releaseNotes, writeNote } from "../terminal-note.js";
 import { claudeDittoDenyRules } from "./claude-deny.js";
+import { type ClaudeMcpAttachment, claudeMcpAttachment, fetchMcpCatalog } from "./claude-mcp.js";
 import { liftResumeFlags, planClaude } from "./claude.js";
 import { resolveClaudeResume, transcriptCwd } from "./claude-resume.js";
 import { type ClaudeTranscript, findTranscriptById, listTranscriptsIn } from "./claude-transcripts.js";
@@ -83,9 +84,27 @@ export interface LaunchOptions {
    * `claude -p` / `codex exec` turn in the session's thread until Ctrl+C.
    */
   headless?: boolean;
+  /**
+   * Claude only: attach the endpoint's tools as Claude Code MCP servers
+   * (`--mcp`) or keep them on the router (`--no-mcp`). Unset follows the
+   * endpoint's `claude_tool_surface` option, else the router.
+   */
+  mcp?: boolean;
 }
 
 const DRY_RUN_KEY = "ditto_inf_<minted-at-launch>";
+
+/** `--mcp` / `--no-mcp`, else the endpoint's `claude_tool_surface`, else the router. */
+export function wantsMcp(options: Pick<LaunchOptions, "mcp">, endpoint: Pick<InferenceEndpoint, "providerOptions">): boolean {
+  if (options.mcp !== undefined) return options.mcp;
+  return endpoint.providerOptions?.claude_tool_surface === "mcp";
+}
+
+function mcpBanner(mcp: ClaudeMcpAttachment | undefined, dryRun?: boolean): string {
+  if (!mcp) return dryRun ? "mcp (catalog read at launch)" : c("yellow", "router (MCP not attached)");
+  const asks = mcp.clientApprovals ? "Claude Code asks" : "Ditto holds gated calls";
+  return `mcp ${c("dim", `(${mcp.servers} servers, ${mcp.tools} tools; ${asks})`)}`;
+}
 
 function log(line: string, options?: NoteOptions): void {
   writeNote(`${c("dim", "ditto:")} ${line}\n`, options);
@@ -523,6 +542,22 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
       })
     : undefined;
 
+  // Native MCP mode reads the endpoint's tool catalog with the key just
+  // minted, so what Claude Code attaches is exactly what this key may reach.
+  // A catalog that cannot be read falls back to the router's own tools rather
+  // than launching an agent with none.
+  const wantMcp = harness === "claude" && wantsMcp(options, endpoint);
+  let mcp: ClaudeMcpAttachment | undefined;
+  if (wantMcp && key?.key) {
+    try {
+      const attachment = claudeMcpAttachment(await fetchMcpCatalog(catalog.baseUrl, key.key, sessionId), sessionId, { yolo: options.yolo });
+      if (attachment.tools > 0) mcp = attachment;
+      else log(`${c("yellow", "native MCP unavailable")} (the catalog has no tools); the router keeps this endpoint's tools`);
+    } catch (err) {
+      log(`${c("yellow", "native MCP unavailable")} (${(err as Error).message}); the router keeps this endpoint's tools`);
+    }
+  }
+
   const plan = planFor(harness, {
     baseUrl: catalog.baseUrl,
     apiKey: key?.key ?? DRY_RUN_KEY,
@@ -536,6 +571,8 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     plan: options.plan,
     passthrough,
     toolDeny: harness === "claude" ? claudeDittoDenyRules(cwd, process.env) : undefined,
+    mcp,
+    cwd,
     env: process.env,
   }, grokHome);
 
@@ -547,6 +584,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     field("expires", `${expiresIn}${options.keepKey ? "" : c("dim", " (revoked on exit)")}`),
     budget !== undefined ? field("budget", `${budget.toLocaleString()} tokens`) : undefined,
     field("session", c("bold", sessionId)),
+    wantMcp ? field("tools", mcpBanner(mcp, options.dryRun)) : undefined,
   ]
     .filter(Boolean)
     .join("  ");
@@ -568,6 +606,10 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
           cwd,
           endpoint: { id: endpoint.id, slug: endpoint.slug, model: endpoint.model },
           sessionId,
+          // A dry run reads no catalog, so the plan above is the router's; say
+          // which surface a real launch would ask for, separately.
+          toolSurface: mcp ? "mcp" : "router",
+          toolSurfaceRequested: wantMcp ? "mcp" : "router",
           key: { name: keyName, expiresIn, spendLimitTokens: budget ?? null },
         },
         null,
@@ -609,6 +651,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
         options,
         record: nextRecord,
         grokHome,
+        mcp,
         claudeStarted: harness === "claude" && !resumeLast ? Boolean(transcript) : undefined,
       });
     } else if (remote === "tui") {
@@ -787,6 +830,8 @@ interface HeadlessRunContext extends RemoteRunContext {
   options: LaunchOptions;
   /** grok: the launch GROK_HOME reused by every headless turn. */
   grokHome?: string;
+  /** claude: the endpoint's tools as MCP servers, attached to every turn. */
+  mcp?: ClaudeMcpAttachment;
   /** claude: the session already has a conversation, so the first turn resumes it. */
   claudeStarted?: boolean;
 }
@@ -846,6 +891,8 @@ async function runHeadless(harness: Harness, ctx: HeadlessRunContext): Promise<n
         yolo: ctx.options.yolo,
         yellow: ctx.options.yellow,
         toolDeny: harness === "claude" ? claudeDittoDenyRules(ctx.cwd, process.env) : undefined,
+        mcp: ctx.mcp,
+        cwd: ctx.cwd,
         env: process.env,
       },
       prompt,

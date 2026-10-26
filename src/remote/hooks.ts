@@ -5,6 +5,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { withClaudeSettings } from "../agents/claude-mcp.js";
 import type { Harness } from "../agents/types.js";
 
 /**
@@ -110,7 +111,23 @@ export function codexNotifyOverride(socketPath: string, script = hookScriptPath(
 /** Inserts flags where each harness accepts them: after Codex's leading subcommand words (before its positional prompt), anywhere for Claude. */
 export function withHookArgs(harness: Harness, args: string[], extra: string[]): string[] {
   if (extra.length === 0) return args;
-  if (harness === "claude") return [...args, ...extra];
+  if (harness === "claude") {
+    // A `--settings` JSON already in the argv (native MCP permissions)
+    // absorbs the hooks: Claude Code honours one --settings, not two.
+    const i = extra.findIndex((a) => a === "--settings" || a.startsWith("--settings="));
+    // Merge into a --settings that is inline JSON or an absolute file (native
+    // MCP's private copy). A relative user file without MCP keeps the old
+    // append: the hooks do not know Claude's launch directory to read it.
+    const mergeable = (v: string | undefined) => v !== undefined && (v.trim().startsWith("{") || path.isAbsolute(v));
+    const hasInline = args.some((a, j) => (a === "--settings" && mergeable(args[j + 1])) || (a.startsWith("--settings=") && mergeable(a.slice("--settings=".length))));
+    const inlineExtra = i >= 0 && extra[i].startsWith("--settings=");
+    const extraValue = i < 0 ? undefined : inlineExtra ? extra[i].slice("--settings=".length) : extra[i + 1];
+    if (hasInline && extraValue?.trim().startsWith("{")) {
+      const rest = [...extra.slice(0, i), ...extra.slice(i + (inlineExtra ? 1 : 2))];
+      return [...withClaudeSettings(args, JSON.parse(extraValue) as Record<string, unknown>), ...rest];
+    }
+    return [...args, ...extra];
+  }
   let i = 0;
   while (i < args.length && (args[i] === "exec" || args[i] === "resume")) i += 1;
   return [...args.slice(0, i), ...extra, ...args.slice(i)];

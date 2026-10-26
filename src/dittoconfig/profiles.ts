@@ -52,6 +52,7 @@ const SETTING_FIELDS: Record<string, keyof EndpointInput | "codeMode" | "subagen
   tool_approval_mode: "toolApprovalMode",
   auto_approve_tools: "autoApproveTools",
   tool_deny: "toolDeny",
+  client_approvals: "clientApprovals",
   required_connections: "requiredConnections",
   kind_routes: "kindRoutes",
   model_routes: "modelRoutes",
@@ -147,11 +148,20 @@ export async function profileBody(decl: EndpointDecl, profileDir: string): Promi
     if (typeof v !== "boolean") throw new ProfileError(`endpoints.${decl.name}.settings.claude_native_tool_blocks must be true or false`);
     options.claude_native_tool_blocks = v;
   }
+  // Which surface `heyditto claude` gives the endpoint's tools by default:
+  // "mcp" attaches them as Claude Code MCP servers, "router" keeps them on
+  // the router (DITTO-1497). --mcp / --no-mcp override it per launch.
+  if (settings.claude_tool_surface !== undefined) {
+    const v = settings.claude_tool_surface;
+    delete settings.claude_tool_surface;
+    if (v !== "mcp" && v !== "router") throw new ProfileError(`endpoints.${decl.name}.settings.claude_tool_surface must be "mcp" or "router"`);
+    options.claude_tool_surface = v;
+  }
   for (const [key, value] of Object.entries(settings)) {
     const field = SETTING_FIELDS[key];
     if (!field) {
       throw new ProfileError(
-        `endpoints.${decl.name}.settings.${key}: unknown setting. Known: owner, claude_prompt, codex_prompt, claude_native_tool_blocks, ${Object.keys(SETTING_FIELDS).join(", ")}`,
+        `endpoints.${decl.name}.settings.${key}: unknown setting. Known: owner, claude_prompt, codex_prompt, claude_native_tool_blocks, claude_tool_surface, ${Object.keys(SETTING_FIELDS).join(", ")}`,
       );
     }
     body[field] = field === "toolDeny" ? denyRules(decl.name, value) : value;

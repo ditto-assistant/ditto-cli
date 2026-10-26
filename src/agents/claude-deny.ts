@@ -13,6 +13,8 @@ export const TOOL_DENY_HEADER = "X-Ditto-Tool-Deny";
 
 const NAMESPACE = "mcp__ditto";
 const VALID = /^[A-Za-z0-9_.*-]+$/;
+/** Native MCP mode's per-source servers (claude-mcp.ts): mcp__ditto-<source>[__<tool>]. */
+const SOURCE_SERVER = /^mcp__ditto-([a-z0-9][a-z0-9_-]*?)(?:__(.+))?$/i;
 
 /**
  * The deny rules for router tools, from every settings file Claude Code may
@@ -42,6 +44,11 @@ export function claudeDittoDenyRules(cwd: string, env: NodeJS.ProcessEnv): strin
         rules.push("*");
       } else if (rule.toLowerCase().startsWith(`${NAMESPACE}__`) && VALID.test(rule)) {
         rules.push(rule.slice(NAMESPACE.length + 2));
+      } else if (VALID.test(rule)) {
+        // The router names a source's tools <source>__<tool>, so a rule on
+        // the server mcp__ditto-github is the router rule github__*.
+        const source = SOURCE_SERVER.exec(rule);
+        if (source) rules.push(`${source[1]}__${source[2] ?? "*"}`);
       }
     }
   }

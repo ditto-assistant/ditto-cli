@@ -1,4 +1,5 @@
 import { TOOL_DENY_HEADER } from "./claude-deny.js";
+import { MCP_KEY_ENV, TOOL_SURFACE_HEADER, TOOL_SURFACE_MCP, attachmentSettings, withClaudeSettings } from "./claude-mcp.js";
 import { type HarnessPlan, type PlanInput, SESSION_HEADER, apiRootOf } from "./types.js";
 
 /**
@@ -26,10 +27,15 @@ export function planClaude(input: PlanInput): HarnessPlan {
 
   if (input.model) args.push("--model", input.model);
   if (input.prompt !== undefined) args.push("-p", input.prompt);
+  // Native MCP mode: the endpoint's tools as Claude Code's own servers, and
+  // the router told not to inject them a second time.
+  if (input.mcp) args.push("--mcp-config", input.mcp.config);
   args.push(...input.passthrough);
+  const finalArgs = input.mcp ? withClaudeSettings(args, attachmentSettings(input.mcp), { cwd: input.cwd }) : args;
 
   const deny = input.toolDeny?.length ? `${TOOL_DENY_HEADER}: ${input.toolDeny.join(",")}` : undefined;
-  const headers = [input.env.ANTHROPIC_CUSTOM_HEADERS?.trim(), `${SESSION_HEADER}: ${input.sessionId}`, deny]
+  const surface = input.mcp ? `${TOOL_SURFACE_HEADER}: ${TOOL_SURFACE_MCP}` : undefined;
+  const headers = [input.env.ANTHROPIC_CUSTOM_HEADERS?.trim(), `${SESSION_HEADER}: ${input.sessionId}`, deny, surface]
     .filter((h): h is string => Boolean(h))
     .join("\n");
 
@@ -39,6 +45,7 @@ export function planClaude(input: PlanInput): HarnessPlan {
     ANTHROPIC_CUSTOM_HEADERS: headers,
   };
   if (input.model) envSet.ANTHROPIC_MODEL = input.model;
+  if (input.mcp) envSet[MCP_KEY_ENV] = input.apiKey;
   // Claude Code's server-side auto-mode classifier needs the dangerous-tool-use
   // beta and `safeguards` field, which the router does not forward; a rejection
   // denies every auto-mode tool use. Decide locally unless the caller chose.
@@ -50,7 +57,7 @@ export function planClaude(input: PlanInput): HarnessPlan {
 
   return {
     command: "claude",
-    args,
+    args: finalArgs,
     envSet,
     envUnset: ["ANTHROPIC_API_KEY"],
     installHint: "install Claude Code: npm i -g @anthropic-ai/claude-code (or see https://code.claude.com)",
