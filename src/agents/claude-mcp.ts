@@ -172,12 +172,31 @@ export interface SettingsIO {
 }
 
 const PRIVATE_SETTINGS_PREFIX = "ditto-claude-settings-";
-/** A copy this old outlived the process that made it (killed by a signal). */
-const STALE_SETTINGS_MS = 24 * 60 * 60 * 1000;
-let privateSettingsDir: string | undefined;
+/** One private directory per temp root for the life of this process. */
+const privateSettingsDirs = new Map<string, string>();
 
-/** Removes this user's settings copies that a signal-killed CLI left behind. */
-export function sweepStaleSettings(tmp: string, now: number): void {
+/** The pid a settings directory belongs to: ditto-claude-settings-<pid>-<random>. */
+function ownerPid(name: string): number | undefined {
+  const m = /^ditto-claude-settings-(\d+)-/.exec(name);
+  return m ? Number(m[1]) : undefined;
+}
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM: the process exists, it is just not ours to signal.
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/**
+ * Removes settings copies whose CLI is gone (killed by a signal before its exit
+ * cleanup ran). Liveness, not age: a session can run for days, and its Claude
+ * keeps reading its settings for as long as it runs.
+ */
+export function sweepStaleSettings(tmp: string, isAlive: (pid: number) => boolean = alive): void {
   let entries: string[];
   try {
     entries = readdirSync(tmp);
@@ -187,10 +206,11 @@ export function sweepStaleSettings(tmp: string, now: number): void {
   const uid = process.getuid?.();
   for (const name of entries) {
     if (!name.startsWith(PRIVATE_SETTINGS_PREFIX)) continue;
+    const pid = ownerPid(name);
+    if (pid === undefined || pid === process.pid || isAlive(pid)) continue;
     const dir = path.join(tmp, name);
     try {
-      const st = statSync(dir);
-      if ((uid === undefined || st.uid === uid) && now - st.mtimeMs > STALE_SETTINGS_MS) rmSync(dir, { recursive: true, force: true });
+      if (uid === undefined || statSync(dir).uid === uid) rmSync(dir, { recursive: true, force: true });
     } catch {
       // Another process removed it, or it is not ours to read: leave it.
     }
@@ -204,18 +224,21 @@ export function sweepStaleSettings(tmp: string, now: number): void {
  * directory. Copies are named by content, so a long headless session that
  * re-plans every turn reuses one file per distinct value instead of piling
  * them up. The directory goes when the CLI exits; one left by a signal is
- * swept by the next launch. No signal handlers are installed: the launcher
- * owns Ctrl+C, and re-raising a signal here would cut its shutdown short.
+ * swept by a later launch once its process is gone. No signal handlers are
+ * installed: the launcher owns Ctrl+C, and re-raising a signal here would cut
+ * its shutdown short.
  */
 export function writePrivateSettings(json: string, tmp: string = os.tmpdir()): string {
-  if (!privateSettingsDir) {
-    sweepStaleSettings(tmp, Date.now());
-    const dir = mkdtempSync(path.join(tmp, PRIVATE_SETTINGS_PREFIX));
-    chmodSync(dir, 0o700);
-    process.once("exit", () => rmSync(dir, { recursive: true, force: true }));
-    privateSettingsDir = dir;
+  let dir = privateSettingsDirs.get(tmp);
+  if (!dir) {
+    sweepStaleSettings(tmp);
+    const created = mkdtempSync(path.join(tmp, `${PRIVATE_SETTINGS_PREFIX}${process.pid}-`));
+    chmodSync(created, 0o700);
+    process.once("exit", () => rmSync(created, { recursive: true, force: true }));
+    privateSettingsDirs.set(tmp, created);
+    dir = created;
   }
-  const file = path.join(privateSettingsDir, `${createHash("sha256").update(json).digest("hex").slice(0, 16)}.json`);
+  const file = path.join(dir, `${createHash("sha256").update(json).digest("hex").slice(0, 16)}.json`);
   if (!existsSync(file)) writeFileSync(file, json, { mode: 0o600 });
   return file;
 }

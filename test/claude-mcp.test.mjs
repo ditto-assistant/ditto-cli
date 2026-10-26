@@ -190,20 +190,26 @@ test("hooks merge into native MCP's private settings copy when the user passed a
   assert.deepEqual(settings, { model: "opus", permissions: { allow: ["mcp__ditto", "mcp__ditto-github"] }, hooks: { Stop: [] } });
 });
 
-test("private settings copies are reused per content and stale ones are swept", () => {
+test("private settings copies are reused per content, per temp root, and swept only when their CLI is gone", () => {
   const a = writePrivateSettings('{"a":1}');
   assert.equal(writePrivateSettings('{"a":1}'), a, "re-planning the same settings reuses one file");
   assert.notEqual(writePrivateSettings('{"a":2}'), a);
+  assert.match(path.basename(path.dirname(a)), new RegExp(`^ditto-claude-settings-${process.pid}-`));
+  const otherRoot = mkdtempSync(path.join(os.tmpdir(), "ditto-root-"));
+  assert.ok(writePrivateSettings('{"a":1}', otherRoot).startsWith(otherRoot), "a different temp root gets its own directory");
+
   const tmp = mkdtempSync(path.join(os.tmpdir(), "ditto-sweep-"));
-  const stale = path.join(tmp, "ditto-claude-settings-old");
-  const fresh = path.join(tmp, "ditto-claude-settings-new");
-  const other = path.join(tmp, "someone-else-old");
-  for (const d of [stale, fresh, other]) mkdirSync(d);
-  const old = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
-  utimesSync(stale, old, old);
-  utimesSync(other, old, old);
-  sweepStaleSettings(tmp, Date.now());
-  assert.equal(existsSync(stale), false);
-  assert.equal(existsSync(fresh), true, "a live process's copy is left alone");
+  const dead = path.join(tmp, "ditto-claude-settings-111-abc");
+  const live = path.join(tmp, "ditto-claude-settings-222-abc");
+  const old = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+  const unnamed = path.join(tmp, "ditto-claude-settings-xyz");
+  const other = path.join(tmp, "someone-else-111-abc");
+  for (const d of [dead, live, unnamed, other]) mkdirSync(d);
+  // Age is irrelevant: a month-old directory of a live session survives.
+  utimesSync(live, old, old);
+  sweepStaleSettings(tmp, (pid) => pid === 222);
+  assert.equal(existsSync(dead), false, "a dead CLI's copy is removed");
+  assert.equal(existsSync(live), true, "a live session keeps its settings however long it runs");
+  assert.equal(existsSync(unnamed), true, "a directory without an owner pid is left alone");
   assert.equal(existsSync(other), true, "only our own prefix is swept");
 });
