@@ -499,6 +499,7 @@ Options shared by both commands:
 | `--session <id>` | reuse a Ditto session id so traces land in an existing thread |
 | `--resume [id]` / `-c, --continue` | resume a local session (`heyditto sessions`) / the agent's most recent conversation. Claude also takes a Claude session id or title here, including sessions started in Claude Desktop or plain `claude`, and runs in the directory that session ran in; with no value, a terminal gets a searchable picker. Claude's own `-r` / `--resume` / `-c` after `--` do the same. |
 | `--yolo` / `--yellow` / `--plan` | bypass permissions / auto-accept edits / plan mode (Claude only) |
+| `--mcp` / `--no-mcp` | attach the endpoint's tools to Claude Code as its own MCP servers, or keep them on the router (default: the endpoint's `claude_tool_surface`, else the router) |
 | `-p, --prompt <text>` | headless run: `claude -p` or `codex exec` |
 | `-m, --model <id>` | model to request (default: the agent's own model id passes through and the endpoint routes it) |
 | `-w, --worktree [name]` | run inside `<repo>/.worktrees/<name>` on a branch of that name; `.worktrees/` is added to `.gitignore` |
@@ -519,6 +520,25 @@ How the wiring works:
   a bare `mcp__ditto` denies them all) in your user, project or local
   `settings.json` are forwarded as `X-Ditto-Tool-Deny`, and the router refuses
   those tools for the session. The header can only add denials.
+- **Claude Code with `--mcp`** attaches the endpoint's tools as its own MCP
+  servers instead: `ditto` for Ditto's built-ins, plus one server per
+  connected app or MCP server (`ditto-github`, `ditto-jira`, …). Claude Code
+  discovers them with its own ToolSearch and calls them natively. Every call
+  still runs on Ditto (`/v1/mcp/<server>`) with the credentials Ditto holds and
+  behind the endpoint's approval gate and deny rules, and the router is told
+  not to offer the same tools again. The session key reaches the MCP headers
+  as `${DITTO_ROUTER_MCP_KEY}`, never argv or disk. Who asks before a gated
+  call is the endpoint's choice:
+
+  | Endpoint | What happens to a gated call |
+  | --- | --- |
+  | default | Ditto holds it for approval; Claude Code does not ask a second time |
+  | `client_approvals = true` | Claude Code asks; `--yolo` runs it without asking. Deny rules still refuse |
+
+  `client_approvals` hands approval to whoever runs the session, so only an
+  organization's managers can turn it on for an org endpoint. Code Mode and
+  the router's own tools stay the default; set `claude_tool_surface = "mcp"`
+  in an endpoint profile to make `--mcp` the default there.
 - **Codex** speaks the Responses API only, so the endpoint is injected as a
   `ditto` model provider via `-c` overrides (nothing is written to
   `~/.codex/config.toml`) with the key in `DITTO_INFERENCE_API_KEY`.
