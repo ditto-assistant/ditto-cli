@@ -160,6 +160,36 @@ test("working-diff capture suppresses configured clean filters without changing 
   assert.equal(git(root, "config", "--get", "filter.fixture.required").trim(), "true");
 });
 
+test("unrelated non-UTF-8 config subsections do not change the snapshot or abort capture", async t => {
+  const root = await repository(t);
+  await writeFile(path.join(root, "app.ts"), "changed\n");
+  const before = await captureReviewSnapshot({ cwd: root });
+  const config = path.join(root, ".git", "config");
+  const bytes = Buffer.concat([await readFile(config), Buffer.from('\n[review-fixture "'), Buffer.from([255]), Buffer.from('"]\nvalue = true\n')]);
+  await writeFile(config, bytes);
+  const keys = spawnSync("git", ["config", "--null", "--name-only", "--list"], { cwd: root });
+  assert.equal(keys.status, 0, keys.stderr.toString());
+  assert.ok(keys.stdout.includes(Buffer.from([255])), "Git must actually return the unsupported config subsection bytes");
+  const after = await captureReviewSnapshot({ cwd: root });
+  assert.equal(after.snapshot.digest, before.snapshot.digest);
+  assert.deepEqual(await readFile(config), bytes);
+});
+
+test("undecodable active filter names fail closed before a filter can execute", async t => {
+  const root = await repository(t);
+  const config = path.join(root, ".git", "config"), marker = path.join(root, ".git", "filter-ran");
+  const bytes = Buffer.concat([await readFile(config), Buffer.from('\n[filter "fixture'), Buffer.from([255]), Buffer.from('"]\nclean = "touch .git/filter-ran; cat"\nrequired = true\n')]);
+  await writeFile(config, bytes);
+  await writeFile(path.join(root, ".gitattributes"), Buffer.concat([Buffer.from("*.ts filter=fixture"), Buffer.from([255]), Buffer.from("\n")]));
+  await writeFile(path.join(root, "app.ts"), "changed\n");
+  git(root, "diff", "--name-only");
+  assert.equal(await readFile(marker, "utf8"), "", "ordinary Git must execute the raw-byte driver in this control");
+  await rm(marker);
+  await assert.rejects(captureReviewSnapshot({ cwd: root }), /cannot safely disable a non-UTF-8 Git filter driver/);
+  await assert.rejects(readFile(marker), { code: "ENOENT" });
+  assert.deepEqual(await readFile(config), bytes);
+});
+
 async function stub(t, { partial = false, forever = false, loseAdmission = false, transientPoll = false, invalidRun = false, terminalStatus, noResult = false } = {}) {
   const calls = []; let digest, profile, lost = false, pollFailed = false;
   const server = http.createServer((req, res) => {
@@ -271,4 +301,22 @@ test("malformed admission IDs are not polled or cancelled; failed runs do not cl
     const out = await command(root, service.base, ["local"]).result;
     assert.equal(out.code, 1, out.stderr); assert.match(out.stdout, /No review result is available/); assert.doesNotMatch(out.stdout, /No findings/);
   }
+});
+
+test("failed or cancelled runs with attached findings do not render unavailable findings", async t => {
+  const root = await repository(t); await writeFile(path.join(root, "app.ts"), "bug\n");
+  for (const terminalStatus of ["failed", "cancelled"]) {
+    const service = await stub(t, { terminalStatus });
+    const out = await command(root, service.base, ["local"]).result;
+    assert.equal(out.code, 1, out.stderr);
+    assert.match(out.stdout, /No review result is available/);
+    assert.doesNotMatch(out.stdout, /Fixture defect|Real fixture finding|in reviewed scope/);
+    const json = await command(root, service.base, ["local-status", RUN, "--output", "json"]).result;
+    assert.equal(JSON.parse(json.stdout).result.findings[0].title, "Fixture defect", "JSON receipts retain the server evidence");
+  }
+  const completed = await stub(t);
+  const out = await command(root, completed.base, ["local"]).result;
+  assert.equal(out.code, 0, out.stderr);
+  assert.match(out.stdout, /1 finding in reviewed scope/);
+  assert.match(out.stdout, /Fixture defect/);
 });

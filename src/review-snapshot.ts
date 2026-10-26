@@ -35,8 +35,17 @@ export async function reviewGit(cwd: string, args: string[], input?: string, sig
     // --no-ext-diff/--no-textconv do not disable clean/process filters. Read
     // names only (never credential/config values) and override each configured
     // driver for this invocation, so preview cannot run Git LFS or custom code.
-    const keys = names(await reviewGit(cwd, ["config", "--null", "--name-only", "--list"], undefined, signal));
-    const drivers = new Set(keys.flatMap(key => /^filter\.(.+)\.(clean|smudge|process|required)$/i.exec(key)?.[1] ?? []));
+    const keys = await reviewGit(cwd, ["config", "--null", "--name-only", "--list"], undefined, signal);
+    const drivers = new Set<string>();
+    // Config subsections are arbitrary bytes, unlike snapshot paths. Match
+    // the ASCII filter framing before UTF-8 decoding, ignoring unrelated keys.
+    // A matching driver's bytes must round-trip exactly for safe -c overrides.
+    for (const key of keys.toString("latin1").split("\0")) {
+      const driver = /^filter\.([\s\S]+)\.(?:clean|smudge|process|required)$/i.exec(key)?.[1];
+      if (driver === undefined) continue;
+      try { drivers.add(utf8.decode(Buffer.from(driver, "latin1"))); }
+      catch { throw new Error("local review cannot safely disable a non-UTF-8 Git filter driver; fix that filter configuration before retrying"); }
+    }
     for (const driver of drivers) for (const [setting, value] of [["clean", ""], ["smudge", ""], ["process", ""], ["required", "false"]]) filterConfig.push("-c", `filter.${driver}.${setting}=${value}`);
   }
   return new Promise((resolve, reject) => {

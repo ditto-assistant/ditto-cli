@@ -177,10 +177,11 @@ function printLocalRun(run: LocalRun, options: LocalOptions): void {
   const result = run.result;
   process.stdout.write(`Local review ${run.status} · ${run.profile}\nRun: ${run.runId}\nSnapshot: ${run.snapshotDigest}\n`);
   const findings = result?.findings?.filter(f => !f.status || f.status === "posted") ?? [];
-  if (result && (Array.isArray(result.findings) || result.complete === true) && ["completed", "partial"].includes(run.status)) {
+  const reportable = result && (Array.isArray(result.findings) || result.complete === true) && ["completed", "partial"].includes(run.status);
+  if (reportable) {
     process.stdout.write(`${findings.length ? `${findings.length} finding${findings.length === 1 ? "" : "s"} in reviewed scope` : "No findings in reviewed scope"}\n`);
+    for (const f of findings) process.stdout.write(`\n${f.severity ?? "finding"} · ${f.path ?? ""}:${f.line ?? f.startLine ?? ""} · ${f.title ?? ""}\n${f.body ?? f.explanation ?? ""}\n`);
   } else process.stdout.write("No review result is available for this run.\n");
-  for (const f of findings) process.stdout.write(`\n${f.severity ?? "finding"} · ${f.path ?? ""}:${f.line ?? f.startLine ?? ""} · ${f.title ?? ""}\n${f.body ?? f.explanation ?? ""}\n`);
   if (!result?.complete || run.status !== "completed") process.stdout.write("Review incomplete; check coverage and errors before relying on this result.\n");
   if (result?.local?.contextComplete === false) process.stdout.write("Surrounding context was bounded; omitted files were not reviewed.\n");
   if (run.workspaceCurrent === false) process.stdout.write("The working tree changed after capture; these findings describe the saved snapshot.\n");
