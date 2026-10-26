@@ -19,6 +19,7 @@ import { pullCapsule } from "../dist/teleport/pull.js";
 import { unpushedRepos } from "../dist/teleport/offload.js";
 import { extractWorktree } from "../dist/teleport/worktree.js";
 import { writeSession } from "../dist/agents/sessions.js";
+import { cdcBoundaries } from "../dist/teleport/archive.js";
 
 const fixtureDir = fileURLToPath(new URL("./fixtures/", import.meta.url));
 
@@ -216,6 +217,7 @@ function startTeleportStub() {
             if (repo.worktree) collect(repo.worktree.chunks);
           }
           collect(manifest.harness.chunks);
+          for (const a of manifest.archives ?? []) collect(a.chunks);
           return send(200, { capsule: view(), manifest, chunks: chunkList, generation });
         }
         if (sub === "/status" && req.method === "GET") {
@@ -944,5 +946,73 @@ test("manifest carries capture provenance (excludes, detectors, .ditto digest) a
   } finally {
     process.env = prevEnv;
     await stub.close();
+  }
+});
+
+test("archive chunk boundaries are content-defined: an edit only changes nearby chunks", () => {
+  // Deterministic pseudo-random bytes: sha256 in counter mode.
+  const rand = (n, seed) => {
+    const out = Buffer.alloc(n);
+    for (let off = 0, i = 0; off < n; off += 32, i++) createHash("sha256").update(`${seed}:${i}`).digest().copy(out, off);
+    return out;
+  };
+  const base = rand(24 * 1024 * 1024, 7);
+  const edited = Buffer.concat([base.subarray(0, 1000), Buffer.from("inserted bytes"), base.subarray(1000)]);
+  const hashes = (buf) => {
+    const cuts = cdcBoundaries(buf);
+    let start = 0;
+    return cuts.map((c) => {
+      const h = createHash("sha256").update(buf.subarray(start, c)).digest("hex");
+      start = c;
+      return h;
+    });
+  };
+  const a = hashes(base);
+  const b = new Set(hashes(edited));
+  const shared = a.filter((h) => b.has(h)).length;
+  assert.ok(a.length >= 4, `expected several chunks, got ${a.length}`);
+  assert.ok(shared >= a.length - 2, `an early insert should keep all but ~1 chunk: shared ${shared}/${a.length}`);
+  for (const c of cdcBoundaries(base)) assert.ok(c <= base.length);
+});
+
+test("teleport archive backs up sources as storage and restores them byte-for-byte", async () => {
+  const stub = await startTeleportStub();
+  const cfg = tmp("teleport-archive-cfg-");
+  const sessions = tmp("teleport-archive-src-");
+  mkdirSync(path.join(sessions, "-Users-me-code-app"), { recursive: true });
+  const transcript = Array.from({ length: 4000 }, (_, i) => JSON.stringify({ type: "user", i, text: "hello ".repeat(20) })).join("\n");
+  writeFileSync(path.join(sessions, "-Users-me-code-app", "s1.jsonl"), transcript);
+  writeFileSync(path.join(sessions, "-Users-me-code-app", "s2.jsonl"), transcript.slice(0, 5000));
+  try {
+    let r = await cli(stub, cfg, ["teleport", "archive", "--source", `claude-code=${sessions}`, "--json"]);
+    assert.equal(r.status, 0, r.stderr);
+    const first = JSON.parse(r.stdout);
+    assert.equal(first.generation, 1);
+    assert.ok(first.storedBytes < first.logicalBytes / 3, `zstd should shrink JSONL: ${first.storedBytes} vs ${first.logicalBytes}`);
+    const cap = stub.capsules.get("cap-1");
+    assert.equal(cap.rootKind, "archive");
+    const manifest = cap.generations.get(1).manifest;
+    assert.equal(manifest.root.kind, "archive");
+    assert.deepEqual(manifest.repos, []);
+    assert.equal(manifest.archives[0].name, "claude-code");
+    assert.equal(manifest.archives[0].chunkCompression, "zstd");
+    assertMatchesStruct(manifest.archives[0], "Archive", goJsonTags(readFileSync(path.join(fixtureDir, "manifest.go"), "utf8")), "archives[0]");
+
+    // Unchanged second run uploads nothing new but the manifest.
+    r = await cli(stub, cfg, ["teleport", "archive", "--source", `claude-code=${sessions}`, "--json"]);
+    assert.equal(r.status, 0, r.stderr);
+    const second = JSON.parse(r.stdout);
+    assert.equal(second.generation, 2);
+    assert.ok(second.uploaded <= 1, `only the manifest may upload on an unchanged re-run, got ${second.uploaded}`);
+
+    const dest = path.join(tmp("teleport-archive-dest-"), "restored");
+    r = await cli(stub, cfg, ["teleport", "archive-restore", "claude-code", dest]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(readFileSync(path.join(dest, "-Users-me-code-app", "s1.jsonl"), "utf8"), transcript);
+    assert.equal(readFileSync(path.join(dest, "-Users-me-code-app", "s2.jsonl"), "utf8"), transcript.slice(0, 5000));
+    r = await cli(stub, cfg, ["teleport", "archive-restore", "claude-code", dest]);
+    assert.notEqual(r.status, 0, "restore must refuse an existing destination");
+  } finally {
+    stub.close();
   }
 });
