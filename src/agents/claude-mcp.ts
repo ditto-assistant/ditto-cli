@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 /**
  * Native MCP mode for Claude Code (DITTO-1497).
  *
@@ -66,16 +68,21 @@ export function claudeServerName(server: string): string {
   return server === "ditto" ? "ditto" : `ditto-${server}`;
 }
 
+/** A stalled catalog read must not hold up Claude's launch; the caller falls back to the router. */
+const CATALOG_TIMEOUT_MS = 15_000;
+
 /** Reads the endpoint's MCP catalog with the session's own key. */
 export async function fetchMcpCatalog(
   baseUrl: string,
   apiKey: string,
   sessionId: string,
   fetchImpl: typeof fetch = fetch,
+  timeoutMs = CATALOG_TIMEOUT_MS,
 ): Promise<McpCatalog> {
   const url = `${baseUrl.replace(/\/+$/, "")}/mcp`;
   const res = await fetchImpl(url, {
     headers: { Authorization: `Bearer ${apiKey}`, "X-Ditto-Session-Id": sessionId, Accept: "application/json" },
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) {
     let detail = "";
@@ -143,35 +150,38 @@ function isObject(v: unknown): v is Json {
 export function mergeSettings(a: Json, b: Json): Json {
   const out: Json = { ...a };
   for (const [k, v] of Object.entries(b)) {
-    const cur = out[k];
-    if (isObject(cur) && isObject(v)) out[k] = mergeSettings(cur, v);
-    else if (Array.isArray(cur) && Array.isArray(v)) out[k] = [...new Set([...cur, ...v])];
-    else out[k] = v;
+    const cur = Object.prototype.hasOwnProperty.call(out, k) ? out[k] : undefined;
+    let value: unknown = v;
+    if (isObject(cur) && isObject(v)) value = mergeSettings(cur, v);
+    else if (Array.isArray(cur) && Array.isArray(v)) value = [...new Set([...cur, ...v])];
+    // defineProperty, so a "__proto__" key stays data instead of hitting the setter.
+    Object.defineProperty(out, k, { value, enumerable: true, configurable: true, writable: true });
   }
   return out;
 }
 
 /**
  * Adds settings to a Claude argv. Claude Code reads a single `--settings`, so
- * a JSON value already in the argv absorbs the new keys rather than a second
- * flag silently replacing it. A `--settings <file>` is left alone and ours is
- * appended after it.
+ * the one already in the argv absorbs the new keys rather than a second flag
+ * silently replacing either. A `--settings <file>` is read and merged into one
+ * inline value; a file that cannot be read stops the launch, since dropping it
+ * would lose the user's settings and dropping ours their MCP permissions.
  */
-export function withClaudeSettings(args: string[], settings: Json): string[] {
+export function withClaudeSettings(args: string[], settings: Json, readFile: (file: string) => string = (f) => readFileSync(f, "utf8")): string[] {
   if (Object.keys(settings).length === 0) return args;
   for (let i = 0; i < args.length; i += 1) {
     const a = args[i];
     const inline = a.startsWith("--settings=");
     if (a !== "--settings" && !inline) continue;
     const value = inline ? a.slice("--settings=".length) : args[i + 1];
-    if (value === undefined || !value.trim().startsWith("{")) continue;
+    if (value === undefined) continue;
     let parsed: unknown;
     try {
-      parsed = JSON.parse(value);
-    } catch {
-      continue;
+      parsed = JSON.parse(value.trim().startsWith("{") ? value : readFile(value));
+    } catch (err) {
+      throw new Error(`--settings ${value}: cannot be merged with native MCP permissions (${(err as Error).message})`);
     }
-    if (!isObject(parsed)) continue;
+    if (!isObject(parsed)) throw new Error(`--settings ${value}: not a JSON object`);
     const merged = JSON.stringify(mergeSettings(parsed, settings));
     const out = [...args];
     if (inline) out[i] = `--settings=${merged}`;

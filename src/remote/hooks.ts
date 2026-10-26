@@ -114,11 +114,13 @@ export function withHookArgs(harness: Harness, args: string[], extra: string[]):
   if (harness === "claude") {
     // A `--settings` JSON already in the argv (native MCP permissions)
     // absorbs the hooks: Claude Code honours one --settings, not two.
-    const i = extra.indexOf("--settings");
+    const i = extra.findIndex((a) => a === "--settings" || a.startsWith("--settings="));
     const hasInline = args.some((a, j) => (a === "--settings" && args[j + 1]?.trim().startsWith("{")) || a.startsWith("--settings={"));
-    if (hasInline && i >= 0 && extra[i + 1]?.trim().startsWith("{")) {
-      const rest = [...extra.slice(0, i), ...extra.slice(i + 2)];
-      return [...withClaudeSettings(args, JSON.parse(extra[i + 1]) as Record<string, unknown>), ...rest];
+    const inlineExtra = i >= 0 && extra[i].startsWith("--settings=");
+    const extraValue = i < 0 ? undefined : inlineExtra ? extra[i].slice("--settings=".length) : extra[i + 1];
+    if (hasInline && extraValue?.trim().startsWith("{")) {
+      const rest = [...extra.slice(0, i), ...extra.slice(i + (inlineExtra ? 1 : 2))];
+      return [...withClaudeSettings(args, JSON.parse(extraValue) as Record<string, unknown>), ...rest];
     }
     return [...args, ...extra];
   }

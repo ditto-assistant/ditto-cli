@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import http from "node:http";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import { planClaude } from "../dist/agents/claude.js";
@@ -88,14 +91,34 @@ test("planClaude: native MCP attaches the servers, sets the permissions and tell
   assert.ok(plan.args.includes("--verbose"));
 });
 
-test("withClaudeSettings merges into a JSON --settings and leaves a file alone", () => {
+test("withClaudeSettings merges into the one --settings, inline or a file", () => {
   const merged = withClaudeSettings(["--settings", '{"permissions":{"allow":["Bash"]},"model":"x"}'], { permissions: { allow: ["mcp__ditto"] } });
   assert.deepEqual(merged.length, 2);
   assert.deepEqual(JSON.parse(merged[1]), { permissions: { allow: ["Bash", "mcp__ditto"] }, model: "x" });
-  assert.deepEqual(withClaudeSettings(["--settings", "/tmp/s.json"], { a: 1 }), ["--settings", "/tmp/s.json", "--settings", '{"a":1}']);
+  // A settings file is read and merged into one inline value: Claude Code
+  // honours a single --settings, so appending a second would lose one of them.
+  const dir = mkdtempSync(path.join(os.tmpdir(), "ditto-settings-"));
+  const file = path.join(dir, "s.json");
+  writeFileSync(file, '{"model":"y","permissions":{"deny":["WebFetch"]}}');
+  const fromFile = withClaudeSettings(["-p", "x", "--settings", file], { permissions: { allow: ["mcp__ditto"] } });
+  assert.equal(fromFile.filter((a) => a === "--settings").length, 1);
+  assert.deepEqual(JSON.parse(fromFile[3]), { model: "y", permissions: { deny: ["WebFetch"], allow: ["mcp__ditto"] } });
+  assert.throws(() => withClaudeSettings(["--settings", path.join(dir, "missing.json")], { a: 1 }), /cannot be merged with native MCP permissions/);
+  assert.throws(() => withClaudeSettings(["--settings", "[1]"], { a: 1 }), /cannot be merged|not a JSON object/);
+  // "__proto__" in settings JSON is data, never a prototype swap.
+  const proto = JSON.parse(withClaudeSettings(["--settings", '{"a":1}'], JSON.parse('{"__proto__":{"polluted":true}}'))[1]);
+  assert.deepEqual(Object.keys(proto), ["a", "__proto__"]);
+  assert.equal({}.polluted, undefined);
   assert.deepEqual(withClaudeSettings(["--settings={}"], { a: 1 }), ['--settings={"a":1}']);
   assert.deepEqual(withClaudeSettings(["-p", "x"], {}), ["-p", "x"]);
   assert.deepEqual(mergeSettings({ a: [1], b: { c: 1 } }, { a: [1, 2], b: { d: 2 } }), { a: [1, 2], b: { c: 1, d: 2 } });
+});
+
+test("withHookArgs folds an inline --settings= hook flag too", () => {
+  const args = withHookArgs("claude", ["--settings", '{"permissions":{"allow":["mcp__ditto"]}}'], ['--settings={"hooks":{"Stop":[]}}', "--verbose"]);
+  assert.deepEqual(args.filter((a) => a.startsWith("--settings")).length, 1);
+  assert.deepEqual(JSON.parse(args[1]), { permissions: { allow: ["mcp__ditto"] }, hooks: { Stop: [] } });
+  assert.equal(args.at(-1), "--verbose");
 });
 
 test("withHookArgs folds the hooks into native MCP's --settings: one flag, both settings", () => {
@@ -134,6 +157,15 @@ test("fetchMcpCatalog reads GET <base>/mcp with the session key and reports refu
     assert.deepEqual(seen, { url: "/v1/mcp", auth: "Bearer good", session: "sess-9" });
     assert.equal(got.servers.length, 3);
     await assert.rejects(fetchMcpCatalog(base, "bad", "s"), /403: needs an endpoint key/);
+    // A server that never answers cannot hold up the launch.
+    const stall = http.createServer(() => {});
+    await new Promise((resolve) => stall.listen(0, "127.0.0.1", resolve));
+    try {
+      await assert.rejects(fetchMcpCatalog(`http://127.0.0.1:${stall.address().port}/v1`, "good", "s", fetch, 100), /timeout|aborted/i);
+    } finally {
+      stall.closeAllConnections();
+      stall.close();
+    }
   } finally {
     server.closeAllConnections();
     server.close();

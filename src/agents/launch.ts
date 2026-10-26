@@ -550,7 +550,9 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   let mcp: ClaudeMcpAttachment | undefined;
   if (wantMcp && key?.key) {
     try {
-      mcp = claudeMcpAttachment(await fetchMcpCatalog(catalog.baseUrl, key.key, sessionId), sessionId, { yolo: options.yolo });
+      const attachment = claudeMcpAttachment(await fetchMcpCatalog(catalog.baseUrl, key.key, sessionId), sessionId, { yolo: options.yolo });
+      if (attachment.tools > 0) mcp = attachment;
+      else log(`${c("yellow", "native MCP unavailable")} (the catalog has no tools); the router keeps this endpoint's tools`);
     } catch (err) {
       log(`${c("yellow", "native MCP unavailable")} (${(err as Error).message}); the router keeps this endpoint's tools`);
     }
@@ -603,7 +605,10 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
           cwd,
           endpoint: { id: endpoint.id, slug: endpoint.slug, model: endpoint.model },
           sessionId,
-          toolSurface: wantMcp ? "mcp" : "router",
+          // A dry run reads no catalog, so the plan above is the router's; say
+          // which surface a real launch would ask for, separately.
+          toolSurface: mcp ? "mcp" : "router",
+          toolSurfaceRequested: wantMcp ? "mcp" : "router",
           key: { name: keyName, expiresIn, spendLimitTokens: budget ?? null },
         },
         null,
