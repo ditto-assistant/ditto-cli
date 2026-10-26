@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -13,7 +13,9 @@ import {
   claudeServerName,
   fetchMcpCatalog,
   mergeSettings,
+  sweepStaleSettings,
   withClaudeSettings,
+  writePrivateSettings,
 } from "../dist/agents/claude-mcp.js";
 import { wantsMcp } from "../dist/agents/launch.js";
 import { withHookArgs } from "../dist/remote/hooks.js";
@@ -175,4 +177,33 @@ test("fetchMcpCatalog reads GET <base>/mcp with the session key and reports refu
     server.closeAllConnections();
     server.close();
   }
+});
+
+test("hooks merge into native MCP's private settings copy when the user passed a settings file", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "ditto-hook-settings-"));
+  writeFileSync(path.join(dir, "mine.json"), '{"model":"opus"}');
+  const mcp = claudeMcpAttachment(catalog(false), "s1");
+  const plan = planClaude({ baseUrl: "https://router.test/v1", apiKey: "k", sessionId: "s1", passthrough: ["--settings", "mine.json"], env: {}, mcp, cwd: dir });
+  const args = withHookArgs("claude", plan.args, ["--settings", JSON.stringify({ hooks: { Stop: [] } })]);
+  assert.equal(args.filter((a) => a === "--settings").length, 1, "the hooks must not become a second, ignored --settings");
+  const settings = JSON.parse(readFileSync(args[args.indexOf("--settings") + 1], "utf8"));
+  assert.deepEqual(settings, { model: "opus", permissions: { allow: ["mcp__ditto", "mcp__ditto-github"] }, hooks: { Stop: [] } });
+});
+
+test("private settings copies are reused per content and stale ones are swept", () => {
+  const a = writePrivateSettings('{"a":1}');
+  assert.equal(writePrivateSettings('{"a":1}'), a, "re-planning the same settings reuses one file");
+  assert.notEqual(writePrivateSettings('{"a":2}'), a);
+  const tmp = mkdtempSync(path.join(os.tmpdir(), "ditto-sweep-"));
+  const stale = path.join(tmp, "ditto-claude-settings-old");
+  const fresh = path.join(tmp, "ditto-claude-settings-new");
+  const other = path.join(tmp, "someone-else-old");
+  for (const d of [stale, fresh, other]) mkdirSync(d);
+  const old = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+  utimesSync(stale, old, old);
+  utimesSync(other, old, old);
+  sweepStaleSettings(tmp, Date.now());
+  assert.equal(existsSync(stale), false);
+  assert.equal(existsSync(fresh), true, "a live process's copy is left alone");
+  assert.equal(existsSync(other), true, "only our own prefix is swept");
 });

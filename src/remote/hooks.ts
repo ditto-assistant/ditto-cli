@@ -115,7 +115,11 @@ export function withHookArgs(harness: Harness, args: string[], extra: string[]):
     // A `--settings` JSON already in the argv (native MCP permissions)
     // absorbs the hooks: Claude Code honours one --settings, not two.
     const i = extra.findIndex((a) => a === "--settings" || a.startsWith("--settings="));
-    const hasInline = args.some((a, j) => (a === "--settings" && args[j + 1]?.trim().startsWith("{")) || a.startsWith("--settings={"));
+    // Merge into a --settings that is inline JSON or an absolute file (native
+    // MCP's private copy). A relative user file without MCP keeps the old
+    // append: the hooks do not know Claude's launch directory to read it.
+    const mergeable = (v: string | undefined) => v !== undefined && (v.trim().startsWith("{") || path.isAbsolute(v));
+    const hasInline = args.some((a, j) => (a === "--settings" && mergeable(args[j + 1])) || (a.startsWith("--settings=") && mergeable(a.slice("--settings=".length))));
     const inlineExtra = i >= 0 && extra[i].startsWith("--settings=");
     const extraValue = i < 0 ? undefined : inlineExtra ? extra[i].slice("--settings=".length) : extra[i + 1];
     if (hasInline && extraValue?.trim().startsWith("{")) {

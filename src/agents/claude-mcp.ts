@@ -1,4 +1,5 @@
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -170,18 +171,52 @@ export interface SettingsIO {
   writePrivate?: (json: string) => string;
 }
 
+const PRIVATE_SETTINGS_PREFIX = "ditto-claude-settings-";
+/** A copy this old outlived the process that made it (killed by a signal). */
+const STALE_SETTINGS_MS = 24 * 60 * 60 * 1000;
+let privateSettingsDir: string | undefined;
+
+/** Removes this user's settings copies that a signal-killed CLI left behind. */
+export function sweepStaleSettings(tmp: string, now: number): void {
+  let entries: string[];
+  try {
+    entries = readdirSync(tmp);
+  } catch {
+    return;
+  }
+  const uid = process.getuid?.();
+  for (const name of entries) {
+    if (!name.startsWith(PRIVATE_SETTINGS_PREFIX)) continue;
+    const dir = path.join(tmp, name);
+    try {
+      const st = statSync(dir);
+      if ((uid === undefined || st.uid === uid) && now - st.mtimeMs > STALE_SETTINGS_MS) rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // Another process removed it, or it is not ours to read: leave it.
+    }
+  }
+}
+
 /**
  * A private copy of merged settings for the life of this process. A user's
  * settings file can hold secrets, so its contents never go into Claude's
- * argv (visible in process listings); the merged copy is a 0600 file in a
- * 0700 directory, removed when the CLI exits.
+ * argv (visible in process listings); the copy is a 0600 file in a 0700
+ * directory. Copies are named by content, so a long headless session that
+ * re-plans every turn reuses one file per distinct value instead of piling
+ * them up. The directory goes when the CLI exits; one left by a signal is
+ * swept by the next launch. No signal handlers are installed: the launcher
+ * owns Ctrl+C, and re-raising a signal here would cut its shutdown short.
  */
-export function writePrivateSettings(json: string): string {
-  const dir = mkdtempSync(path.join(os.tmpdir(), "ditto-claude-settings-"));
-  chmodSync(dir, 0o700);
-  const file = path.join(dir, "settings.json");
-  writeFileSync(file, json, { mode: 0o600 });
-  process.once("exit", () => rmSync(dir, { recursive: true, force: true }));
+export function writePrivateSettings(json: string, tmp: string = os.tmpdir()): string {
+  if (!privateSettingsDir) {
+    sweepStaleSettings(tmp, Date.now());
+    const dir = mkdtempSync(path.join(tmp, PRIVATE_SETTINGS_PREFIX));
+    chmodSync(dir, 0o700);
+    process.once("exit", () => rmSync(dir, { recursive: true, force: true }));
+    privateSettingsDir = dir;
+  }
+  const file = path.join(privateSettingsDir, `${createHash("sha256").update(json).digest("hex").slice(0, 16)}.json`);
+  if (!existsSync(file)) writeFileSync(file, json, { mode: 0o600 });
   return file;
 }
 
