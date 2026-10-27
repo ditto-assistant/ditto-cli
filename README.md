@@ -628,7 +628,7 @@ Options shared by both commands:
 | `--session <id>` | reuse a Ditto session id so traces land in an existing thread |
 | `--resume [id]` / `-c, --continue` | resume a local session (`heyditto sessions`) / the agent's most recent conversation. Claude also takes a Claude session id or title here, including sessions started in Claude Desktop or plain `claude`, and runs in the directory that session ran in; with no value, a terminal gets a searchable picker. Claude's own `-r` / `--resume` / `-c` after `--` do the same. |
 | `--yolo` / `--yellow` / `--plan` | bypass permissions / auto-accept edits / plan mode (Claude only) |
-| `--mcp` / `--no-mcp` | attach the endpoint's tools to Claude Code as its own MCP servers, or keep them on the router (default: the endpoint's `claude_tool_surface`, else the router) |
+| `--mcp` / `--no-mcp` | attach the endpoint's tools to Claude Code as its own MCP servers, or keep them on the router (default: the endpoint's `claude_tool_surface`, else MCP) |
 | `-p, --prompt <text>` | headless run: `claude -p` or `codex exec` |
 | `-m, --model <id>` | model to request (default: the agent's own model id passes through and the endpoint routes it) |
 | `-w, --worktree [name]` | run inside `<repo>/.worktrees/<name>` on a branch of that name; `.worktrees/` is added to `.gitignore` |
@@ -644,13 +644,12 @@ How the wiring works:
   token, which skips Claude's "use this API key?" prompt) and
   `ANTHROPIC_CUSTOM_HEADERS` with the session id. Any inherited
   `ANTHROPIC_API_KEY` is removed from the child environment.
-  Router tools run on the server, so Claude Code's own permission rules never
-  see them. `permissions.deny` entries for `mcp__ditto__<tool>` (globs allowed;
+  With `--no-mcp`, router tools run on the server, so Claude Code's own
+  permission rules never see them. `permissions.deny` entries for `mcp__ditto__<tool>` (globs allowed;
   a bare `mcp__ditto` denies them all) in your user, project or local
   `settings.json` are forwarded as `X-Ditto-Tool-Deny`, and the router refuses
   those tools for the session. The header can only add denials.
-- **Claude Code with `--mcp`** attaches the endpoint's tools as its own MCP
-  servers instead: `ditto` for Ditto's built-ins, plus one server per
+- **Claude Code** gets the endpoint's tools as its own MCP servers by default: `ditto` for Ditto's built-ins, plus one server per
   connected app or MCP server (`ditto-github`, `ditto-jira`, …). Claude Code
   discovers them with its own ToolSearch and calls them natively. Every call
   still runs on Ditto (`/v1/mcp/<server>`) with the credentials Ditto holds and
@@ -665,9 +664,12 @@ How the wiring works:
   | `client_approvals = true` | Claude Code asks; `--yolo` runs it without asking. Deny rules still refuse |
 
   `client_approvals` hands approval to whoever runs the session, so only an
-  organization's managers can turn it on for an org endpoint. Code Mode and
-  the router's own tools stay the default; set `claude_tool_surface = "mcp"`
-  in an endpoint profile to make `--mcp` the default there.
+  organization's managers can turn it on for an org endpoint. An endpoint
+  with no tools attaches nothing, and one the MCP surface cannot serve falls
+  back to the router's tools. `--no-mcp` keeps the tools on the router (Code
+  Mode or injected tools, as described above) for one session, and
+  `claude_tool_surface = "router"` in an endpoint profile makes that the
+  endpoint's default.
 - **Codex** speaks the Responses API only, so the endpoint is injected as a
   `ditto` model provider via `-c` overrides (nothing is written to
   `~/.codex/config.toml`) with the key in `DITTO_INFERENCE_API_KEY`.
