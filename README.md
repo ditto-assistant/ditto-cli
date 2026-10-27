@@ -222,6 +222,58 @@ heyditto search "launch notes" --include-public --filter-username peyton
 
 ### `review`
 
+#### Review a working diff before opening a PR
+
+```sh
+heyditto review local --preview
+heyditto review local --staged --profile quick --org omniaura
+heyditto review local --base main --context-file .tmp/task.md --output json
+heyditto review local-status <run-id> --org omniaura
+heyditto review local-cancel <run-id> --org omniaura
+```
+
+`local` uses your existing login and selected organization, and the current
+checkout's GitHub origin identifies its configured Review repository. Override
+that mapping with `--repository owner/name`, or the checkout with `--directory`.
+The backend must support local Review runs and the repository must be enabled.
+The same permissions and spending policy as manual PR reviews apply.
+
+The default reviews staged, unstaged and eligible untracked changes. `--staged`
+reviews the index bytes, including when a file also has unstaged edits.
+`--base main` includes branch and working changes since the merge base with
+`main`. It cannot be combined with `--staged`. No commit, push, PR or index
+mutation is required.
+
+`--preview` is offline: it shows the selected paths, snapshot digest, file and
+byte counts, exclusions and omitted context without logging in or uploading.
+Running without `--preview` uploads the selected source changes and bounded
+surrounding tracked source to Ditto Review, which uses the existing independent
+review and verification engine. The immutable snapshot is limited to 16 MiB of
+decoded source and 4096 files per tree. Every eligible changed file must fit;
+nearby surrounding files fill the remaining budget. Binary files, symlinks and
+submodules are recorded as skipped rather than followed or executed.
+Git paths must be valid UTF-8. Unsupported path encodings abort capture before
+upload rather than changing path identity or silently omitting changes.
+
+Choose `quick` (default), `standard` or `deep`. The service returns the effective
+time and budget ceilings; queue and capture time are additional. These profiles
+are effort policies, not measured speed guarantees. `--timeout` bounds the
+whole CLI operation and requests cancellation when it expires. Ctrl-C also
+requests cancellation; use the printed run ID to inspect or cancel a run later.
+An uncertain admission is identified by its request ID and is never retried
+automatically. Use the printed recovery command with `--request-id <uuid>` to
+recover that same admission. The server reuses the original run for identical
+input and refuses changes to the source snapshot, profile or context under that
+ID, so this recovery does not start another paid attempt.
+
+Readable and JSON results identify the reviewed snapshot, findings, coverage,
+cost receipts and whether the current working tree still matches. Partial
+reviews return a nonzero exit code. Bounded surrounding context is stated
+explicitly; "no findings in reviewed scope" is not an assertion that the
+checkout is bug-free. Results are unpublished local reviews and post nothing
+to GitHub. Organization learning-memory and complete hosted repository-policy
+parity remain separate capabilities and are not implied by this command.
+
 Manage Ditto Review and follow reviews from either `ditto` or `heyditto`.
 Commands use your selected organization (`orgs use`) or `--org`; without one,
 they use your personal workspace. Repositories must already be set up for
