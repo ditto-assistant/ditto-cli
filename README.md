@@ -674,6 +674,9 @@ can change. `heyditto endpoints show <endpoint>` prints all of it back, and
 | `--tool-compression on\|off` | swap harness tool descriptions for stored condensed rewrites |
 | `--precompact-at <tokens>` | start a background compaction snapshot at this prompt size; `0` = off |
 | `--routing cheap\|fast\|balanced` | how a provider is picked for a model |
+| `--failover on\|off` | opt into fallback; off by default, sticky for the session |
+| `--failover-model <id\|same>` | use a different, potentially cheaper fallback model, or keep the same model |
+| `--failover-max-cost <usd>` | required ceiling for cold-cache input and bounded output across fallback attempts in each request; zero never means unlimited |
 | `--model-mode default\|passthrough` | what happens to a request model that is neither alias, route nor provider id |
 | `--billing-mode ditto\|byok\|both` | whose provider keys pay for requests |
 | `--stream-granularity final\|tool\|full` | how much server-side tool activity the stream shows |
@@ -1112,7 +1115,20 @@ Settings: `owner`, `claude_prompt` / `codex_prompt` (`file`, `mode`,
 `record_trace`, `record_attachments`, `trace_retention_days`, `batch`,
 `batch_max_requests`, `tools`, `tool_approval_mode`, `auto_approve_tools`,
 `tool_deny`, `claude_native_tool_blocks`, `required_connections`, `kind_routes`, `model_routes`,
-`subagent_routes`, `aliases`.
+`subagent_routes`, `aliases`, `failover`.
+
+Failover is off unless explicitly enabled. For example, a repository profile can
+set `failover = { enabled = true, model = "openai/gpt-5.6-luna", max_cost_usd = 0.25 }`.
+The equivalent command is `heyditto endpoints set <slug> --failover on
+--failover-model openai/gpt-5.6-luna --failover-max-cost 0.25 --yes`.
+It uses only the endpoint's permitted provider keys and billing mode. Switching
+may refill the prompt cache, so the Router checks a conservative cold-cache quote
+before sending the request. Missing pricing, an unbounded cost, or a quote above
+the cap stops fallback. The chosen provider and model stay pinned for normal
+turns and compaction, across backend restarts, until a new session (or seven days
+of inactivity). The cap applies to each request on the fallback, not the session
+total. Endpoint/key spend limits still apply separately. A session identifier is
+required for fallback; Claude Code and Codex supply one automatically.
 
 `tool_deny` lists router tools the endpoint never runs, whatever a client asks:
 tool names, globs such as `"gmail__send_*"`, or a class (`"class:gated"`,

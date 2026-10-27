@@ -92,7 +92,10 @@ export interface EndpointActivation {
   url?: string;
 }
 
+export interface RouterFailover { enabled: boolean; model: string; maxCostUsd: number }
+
 export interface InferenceEndpoint {
+  failover?: RouterFailover;
   id: string;
   slug: string;
   name: string;
@@ -142,6 +145,7 @@ export interface InferenceEndpoint {
 
 /** Partial body for POST / PATCH /api/v5/inference/endpoints. */
 export interface EndpointInput {
+  failover?: Partial<RouterFailover>;
   name?: string;
   slug?: string;
   model?: string;
@@ -291,7 +295,14 @@ export async function createEndpoint(input: EndpointInput = {}): Promise<Inferen
 }
 
 export async function updateEndpoint(id: string, patch: EndpointInput): Promise<InferenceEndpoint> {
-  return apiFetch<InferenceEndpoint>(endpointPath(id), { method: "PATCH", body: patch });
+  const body = { ...patch };
+  if (body.providerOptions) {
+    body.providerOptions = { ...body.providerOptions };
+    // The server preserves the latest typed policy under its row lock.
+    // Replaying an options snapshot could undo a concurrent opt-out.
+    delete body.providerOptions.ditto_failover;
+  }
+  return apiFetch<InferenceEndpoint>(endpointPath(id), { method: "PATCH", body });
 }
 
 export async function deleteEndpoint(id: string): Promise<void> {

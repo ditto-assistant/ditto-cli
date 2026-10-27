@@ -12,7 +12,7 @@ const ORG = { id: "cccccccc-cccc-cccc-cccc-cccccccccccc", slug: "omniaura", name
 const PROMPT = "You are an autonomous coding agent. Merge when CI is green.\n";
 
 /** A stateful endpoints API: personal endpoints carry no companyId, org ones carry ORG.id. */
-function startStub(initial = []) {
+function startStub(initial = [], beforePatch = () => {}) {
   const endpoints = initial.map((e) => ({ ...e }));
   const writes = [];
   const server = http.createServer((req, res) => {
@@ -43,8 +43,10 @@ function startStub(initial = []) {
       const m = url.pathname.match(/^\/api\/v5\/inference\/endpoints\/([^/]+)$/);
       if (m && req.method === "PATCH") {
         const input = JSON.parse(body);
-        writes.push({ method: "PATCH", id: m[1], body: input });
+        writes.push({ method: "PATCH", id: m[1], body: structuredClone(input) });
         const e = endpoints.find((x) => x.id === m[1]);
+        beforePatch(e);
+        if (input.failover) input.failover = { ...e.failover, ...input.failover };
         Object.assign(e, input);
         return json(200, e);
       }
@@ -93,6 +95,69 @@ code_mode = true
 kind_routes = { aside = "z-ai/glm-5.3-flash" }
 claude_prompt = { file = "../prompts/claude.md", mode = "replace" }
 `;
+
+test("repo apply persists opt-in fallback settings and then makes no further write", async () => {
+  const stub = await startStub();
+  const dir = await repo({ ".ditto/config.toml": CONFIG, ".ditto/endpoints/dev.toml": ORG_PROFILE + 'failover = { enabled = true, model = "openai/gpt-5.6-luna", max_cost_usd = 0.25 }\n', ".ditto/prompts/claude.md": PROMPT });
+  try {
+    const out = await run(["repo", "apply"], stub.base, dir);
+    assert.equal(out.status, 0, out.stderr);
+    assert.deepEqual(stub.writes[0].body.failover, { enabled: true, model: "openai/gpt-5.6-luna", maxCostUsd: 0.25 });
+    const again = await run(["repo", "apply"], stub.base, dir);
+    assert.equal(again.status, 0, again.stderr);
+    assert.equal(stub.writes.length, 1);
+  } finally { stub.close(); }
+});
+
+test("disabled failover profiles may omit a cap, enabled profiles may not", async () => {
+  for (const enabled of [false, true]) {
+    const stub = await startStub();
+    const dir = await repo({ ".ditto/config.toml": CONFIG, ".ditto/endpoints/dev.toml": ORG_PROFILE + `failover = { enabled = ${enabled} }\n`, ".ditto/prompts/claude.md": PROMPT });
+    try {
+      const out = await run(["repo", "apply"], stub.base, dir);
+      if (enabled) {
+        assert.notEqual(out.status, 0);
+        assert.equal(stub.writes.length, 0);
+      } else {
+        assert.equal(out.status, 0, out.stderr);
+        assert.deepEqual(stub.writes[0].body.failover, { enabled: false, model: "", maxCostUsd: 0 });
+      }
+    } finally { stub.close(); }
+  }
+});
+
+test("profile opt-out preserves omitted model and cap without replaying hidden authorization", async () => {
+  for (const reset of [false, true]) {
+    const policy = { enabled: true, model: "openai/gpt-5.6-luna", maxCostUsd: 0.25 };
+    const stub = await startStub([{ id: "existing", slug: "ditto-dev", companyId: ORG.id, failover: policy, providerOptions: { ditto_failover: policy } }]);
+    const setting = reset ? 'failover = { enabled = false, model = "", max_cost_usd = 0 }\n' : 'failover = { enabled = false }\n';
+    const dir = await repo({ ".ditto/config.toml": CONFIG, ".ditto/endpoints/dev.toml": ORG_PROFILE + setting, ".ditto/prompts/claude.md": PROMPT });
+    try {
+      const out = await run(["repo", "apply"], stub.base, dir);
+      assert.equal(out.status, 0, out.stderr);
+      assert.deepEqual(stub.writes[0].body.failover, reset ? { enabled: false, model: "", maxCostUsd: 0 } : { enabled: false });
+      assert.equal(stub.writes[0].body.providerOptions.ditto_failover, undefined);
+      const again = await run(["repo", "apply"], stub.base, dir);
+      assert.equal(again.status, 0, again.stderr);
+      assert.equal(stub.writes.length, 1);
+    } finally { stub.close(); }
+  }
+});
+
+test("profile opt-out preserves policy edits made after planning, explicit resets override them", async () => {
+  for (const reset of [false, true]) {
+    const current = { enabled: true, model: "old/model", maxCostUsd: 0.25 };
+    const concurrent = { enabled: true, model: "new/model", maxCostUsd: 0.5 };
+    const stub = await startStub([{ id: "existing", slug: "ditto-dev", companyId: ORG.id, failover: current }], e => { e.failover = concurrent; });
+    const setting = reset ? 'failover = { enabled = false, model = "", max_cost_usd = 0 }\n' : 'failover = { enabled = false }\n';
+    const dir = await repo({ ".ditto/config.toml": CONFIG, ".ditto/endpoints/dev.toml": ORG_PROFILE + setting, ".ditto/prompts/claude.md": PROMPT });
+    try {
+      const out = await run(["repo", "apply"], stub.base, dir);
+      assert.equal(out.status, 0, out.stderr);
+      assert.deepEqual(stub.endpoints[0].failover, reset ? { enabled: false, model: "", maxCostUsd: 0 } : { ...concurrent, enabled: false });
+    } finally { stub.close(); }
+  }
+});
 
 test("repo apply creates an org profile with the checked-in prompt, then is a no-op", async () => {
   const stub = await startStub();

@@ -117,6 +117,15 @@ export async function profileBody(decl: EndpointDecl, profileDir: string): Promi
   if (decl.model) body.model = decl.model;
   if (decl.description) body.name = decl.description;
   const options: Record<string, unknown | null> = {};
+  const fallback = settings.failover;
+  delete settings.failover;
+  if (fallback !== undefined) {
+    if (!fallback || typeof fallback !== "object" || Array.isArray(fallback)) throw new ProfileError("settings.failover must be a table");
+    const f = fallback as Record<string, unknown>;
+    const cap = f.max_cost_usd === undefined && f.enabled === false ? 0 : f.max_cost_usd;
+    if (Object.keys(f).some(k => !["enabled", "model", "max_cost_usd"].includes(k)) || typeof f.enabled !== "boolean" || (f.model !== undefined && typeof f.model !== "string") || typeof cap !== "number" || !Number.isFinite(cap) || cap < 0 || cap > 1_000_000 || (f.enabled && cap < 0.000001)) throw new ProfileError("settings.failover needs enabled, optional model and a finite max_cost_usd (required and positive when enabled)");
+    body.failover = { enabled: f.enabled, model: typeof f.model === "string" ? f.model.trim() : "", maxCostUsd: cap };
+  }
   for (const harness of HARNESSES) {
     const raw = settings[`${harness}_prompt`];
     delete settings[`${harness}_prompt`];
@@ -251,9 +260,20 @@ export async function planProfile(decl: EndpointDecl, profileDir: string): Promi
     for (const [k, v] of Object.entries(plan.body)) plan.changes[k] = [undefined, summarise(k, v)];
     return plan;
   }
+  if (body.failover) {
+    const declared = (decl.settings as Record<string, unknown>).failover as Record<string, unknown>;
+    const wanted = body.failover as Record<string, unknown>;
+    // The API merges omitted fields under its row lock. Never replay a GET
+    // snapshot: another editor may have changed it before this plan applies.
+    if (declared.model === undefined) delete wanted.model;
+    if (declared.max_cost_usd === undefined) delete wanted.maxCostUsd;
+  }
   const cur = current as unknown as Record<string, unknown>;
   for (const [k, v] of Object.entries(body)) {
-    if (!same(cur[k], v)) {
+    const matches = k === "failover"
+      ? Object.entries(v as Record<string, unknown>).every(([field, value]) => same((current.failover as unknown as Record<string, unknown> | undefined)?.[field], value))
+      : same(cur[k], v);
+    if (!matches) {
       plan.body[k] = v;
       plan.changes[k] = [summarise(k, cur[k]), summarise(k, v)];
     }
