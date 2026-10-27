@@ -35,6 +35,7 @@ import { registerCodexAppCommand } from "./agents/codexapp.js";
 import { registerAppCommands } from "./app-commands.js";
 import { registerConfigCommands } from "./dittoconfig/commands.js";
 import { deviceLogin } from "./device-login.js";
+import { registerSelfUpdateCommands } from "./self-update.js";
 
 type OutputFormat = "json" | "text" | "markdown" | "raw";
 const OUTPUT_FORMATS: readonly OutputFormat[] = ["json", "text", "markdown", "raw"];
@@ -902,6 +903,7 @@ function buildProgram(): Command {
     .name("heyditto")
     .description("Save, search, fetch, and traverse Ditto memories from the shell.")
     .version(packageVersion, "-v, --version", "print the CLI version")
+    .option("--no-auto-update", "disable background CLI updates for this invocation")
     .helpCommand("help [command]", "show help for a command")
     .enablePositionalOptions()
     .showHelpAfterError()
@@ -1245,6 +1247,7 @@ your own workspace or an app workspace.`,
   registerAppCommands(program, addExamples, outputOption);
   registerOrgCommands(program, addExamples, outputOption, orgOption);
   registerReviewCommands(program, addExamples, outputOption, orgOption);
+  registerSelfUpdateCommands(program, outputOption);
   registerHarnessCommands(program, addExamples);
   registerCodexAppCommand(program, addExamples);
   registerSessionCommands(program, addExamples);

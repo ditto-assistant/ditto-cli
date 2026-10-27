@@ -43,10 +43,89 @@ heyditto subjects "memory architecture" --top-k 5
 ```bash
 npm install -g @heyditto/cli
 # or one-shot via npx
-npx -y @heyditto/cli search "what did I say about X"
+npx -y --package @heyditto/cli heyditto search "what did I say about X"
 ```
 
 The package installs two equivalent binaries: `ditto` and `heyditto`. They run the same CLI — use whichever you prefer. We recommend **`heyditto`** on macOS because Apple ships `/usr/bin/ditto` (a file-copy utility) that can shadow the npm CLI.
+
+The published npm package is **`@heyditto/cli`**. Use the installed `heyditto`
+binary or the scoped `npx --package` form above; the unscoped `heyditto` npm name
+is not our published package.
+
+### Occasional background updates
+
+Eligible global npm installations check for a newer CLI about every six hours
+when invoked. The check and download run quietly in a finite background worker;
+your current command keeps running its selected version. A fully verified update
+takes effect on a later invocation. Help, version, offline and review `--preview`
+commands do not start a network check. JSON stdout is unchanged.
+
+```sh
+heyditto self-update status --output json
+heyditto self-update check             # verify and activate for the next invocation
+heyditto self-update disable
+heyditto self-update enable
+heyditto self-update pin               # retain the currently selected version
+heyditto self-update unpin
+DITTO_CLI_AUTO_UPDATE=0 heyditto search "a memory"  # suppress this background check
+DITTO_CLI_PINNED=1 heyditto --version   # run the installed package, bypassing cached updates
+```
+
+`self-update check` uses the same bounded verification path even when automatic
+checks are disabled, and explicitly activates the verified update for the next
+invocation. A persistent pin still prevents it from installing another
+version. `heyditto --no-auto-update <command>` also suppresses a background check;
+`DISABLE_AUTOUPDATER=1` is supported. Disabling checks retains a validated version
+already selected by an earlier launch (or an explicit manual check). It ignores
+new background candidates, including a worker that finishes publishing after
+disable has acknowledged. Running commands keep their selected version. A pin
+selects its retained version even if a newer update has downloaded concurrently.
+All `self-update` controls run the pinned, previously activated or bundled
+version; they never adopt a staged candidate before executing the control.
+`status` only inspects. `enable` and `unpin` allow a later ordinary launch to
+activate a candidate; `check` can activate only after its explicit manual action.
+An ordinary launch that already selected a version under an enabled policy may
+finish and record that selection after a concurrent disable returns. Disable
+does not restart or undo commands already in progress.
+
+Manual checks return their own worker result in `manualResult`, separately from
+shared last-attempt health. If another worker is active, `check` reports `busy`
+and exits 75; retry it after that worker finishes. A missing or incomplete worker
+result exits nonzero. A concurrent change to shared health cannot turn a blocked
+manual request into a successful check.
+
+Homebrew, Nix and operating-system package locations, project installs, npm
+scripts, CI and ephemeral `npx` executions keep their package-manager version;
+the updater does not replace their files or override their ownership. Historical
+`npm install -g @heyditto/cli@<version>` intent is not recoverable reliably from
+installed npm metadata. Use the persistent pin or `DITTO_CLI_PINNED=1` when that
+global installation must remain exact. Older CLI versions need one normal npm
+upgrade before they have this updater.
+
+Updates are stored under the CLI config directory's `updates/` folder, with
+separate immutable version directories, an atomic candidate pointer and
+append-only activation markers for each
+OS, CPU architecture and libc target. Enable/disable is one shared user
+preference; pins and cached bundles are target-specific. Each control writes its
+own atomic preference file, so concurrent pin and disable commands cannot
+overwrite each other's intent. Relative
+`DITTO_CONFIG_DIR` values are resolved before starting a worker. Every
+root and locked dependency archive is restricted to the public npm registry and
+checked against SHA512 integrity; archive links, unsafe paths and special files
+are rejected. No npm configuration, credentials, project files, install scripts,
+daemon, sudo or command restart is used. Compatible prebuilt PTY packages and
+ordinary executable bits are retained for coding-agent commands.
+
+Each attempt is bounded to 60 seconds plus five seconds of worker cleanup,
+128 MiB downloaded, 512 MiB unpacked and
+50,000 files. Cached versions are retained so active commands can still read
+them; at 2 GiB per target, the updater pauses for manual cleanup instead of deleting a
+potentially active version. Immutable attempt leases also have a metadata cap.
+A crashed attempt blocks at most its six-hour window and never steals another
+worker's live lease. `self-update status` reports the bundled, selected and
+cached versions, eligibility, policy and last result. Invalid selection metadata
+falls back before execution; a cached CLI execution failure is quarantined for
+the next invocation and **never retries the command**.
 
 ### macOS: name collision with Apple's `/usr/bin/ditto`
 
