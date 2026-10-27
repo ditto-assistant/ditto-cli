@@ -140,10 +140,13 @@ test("withHookArgs folds the hooks into native MCP's --settings: one flag, both 
   assert.deepEqual(settings.hooks, { Stop: [] });
 });
 
-test("wantsMcp: the flag wins, then the endpoint's claude_tool_surface, then the router", () => {
-  assert.equal(wantsMcp({}, {}), false);
+test("wantsMcp: the flag wins, then the endpoint's claude_tool_surface, then native MCP", () => {
+  assert.equal(wantsMcp({}, {}), true, "native MCP is the default for Claude Code");
+  assert.equal(wantsMcp({}, { providerOptions: {} }), true);
   assert.equal(wantsMcp({}, { providerOptions: { claude_tool_surface: "mcp" } }), true);
+  assert.equal(wantsMcp({}, { providerOptions: { claude_tool_surface: "router" } }), false, "an endpoint can keep its tools on the router");
   assert.equal(wantsMcp({ mcp: false }, { providerOptions: { claude_tool_surface: "mcp" } }), false);
+  assert.equal(wantsMcp({ mcp: false }, {}), false, "--no-mcp keeps the router for one session");
   assert.equal(wantsMcp({ mcp: true }, { providerOptions: { claude_tool_surface: "router" } }), true);
 });
 

@@ -87,20 +87,30 @@ export interface LaunchOptions {
   /**
    * Claude only: attach the endpoint's tools as Claude Code MCP servers
    * (`--mcp`) or keep them on the router (`--no-mcp`). Unset follows the
-   * endpoint's `claude_tool_surface` option, else the router.
+   * endpoint's `claude_tool_surface` option, else native MCP.
    */
   mcp?: boolean;
 }
 
 const DRY_RUN_KEY = "ditto_inf_<minted-at-launch>";
 
-/** `--mcp` / `--no-mcp`, else the endpoint's `claude_tool_surface`, else the router. */
+/**
+ * `--mcp` / `--no-mcp`, else the endpoint's `claude_tool_surface`, else native
+ * MCP: Claude Code gets an endpoint's tools as its own servers unless the
+ * endpoint keeps them on the router (`claude_tool_surface = "router"`).
+ */
 export function wantsMcp(options: Pick<LaunchOptions, "mcp">, endpoint: Pick<InferenceEndpoint, "providerOptions">): boolean {
   if (options.mcp !== undefined) return options.mcp;
-  return endpoint.providerOptions?.claude_tool_surface === "mcp";
+  return endpoint.providerOptions?.claude_tool_surface !== "router";
 }
 
-function mcpBanner(mcp: ClaudeMcpAttachment | undefined, dryRun?: boolean): string {
+/** Someone chose native MCP for this launch, rather than getting it by default. */
+function mcpChosen(options: Pick<LaunchOptions, "mcp">, endpoint: Pick<InferenceEndpoint, "providerOptions">): boolean {
+  return options.mcp === true || endpoint.providerOptions?.claude_tool_surface === "mcp";
+}
+
+function mcpBanner(mcp: ClaudeMcpAttachment | undefined, dryRun?: boolean, noTools?: boolean): string {
+  if (noTools) return c("dim", "none (the endpoint has no tools)");
   if (!mcp) return dryRun ? "mcp (catalog read at launch)" : c("yellow", "router (MCP not attached)");
   return `mcp ${c("dim", `(${mcp.servers} servers, ${mcp.tools} tools; ${mcpApprovalNote(mcp)})`)}`;
 }
@@ -544,16 +554,20 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   // Native MCP mode reads the endpoint's tool catalog with the key just
   // minted, so what Claude Code attaches is exactly what this key may reach.
   // A catalog that cannot be read falls back to the router's own tools rather
-  // than launching an agent with none.
+  // than launching an agent with none. Native MCP is the default, so the
+  // fallback is only flagged when someone asked for MCP; an endpoint the
+  // surface refuses (an app's) would otherwise warn on every launch.
   const wantMcp = harness === "claude" && wantsMcp(options, endpoint);
   let mcp: ClaudeMcpAttachment | undefined;
+  let noTools = false;
   if (wantMcp && key?.key) {
     try {
       const attachment = claudeMcpAttachment(await fetchMcpCatalog(catalog.baseUrl, key.key, sessionId), sessionId, { yolo: options.yolo });
       if (attachment.tools > 0) mcp = attachment;
-      else log(`${c("yellow", "native MCP unavailable")} (the catalog has no tools); the router keeps this endpoint's tools`);
+      else noTools = true;
     } catch (err) {
-      log(`${c("yellow", "native MCP unavailable")} (${(err as Error).message}); the router keeps this endpoint's tools`);
+      const note = mcpChosen(options, endpoint) ? c("yellow", "native MCP unavailable") : c("dim", "native MCP unavailable");
+      log(`${note} (${(err as Error).message}); the router keeps this endpoint's tools`);
     }
   }
 
@@ -583,7 +597,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     field("expires", `${expiresIn}${options.keepKey ? "" : c("dim", " (revoked on exit)")}`),
     budget !== undefined ? field("budget", `${budget.toLocaleString()} tokens`) : undefined,
     field("session", c("bold", sessionId)),
-    wantMcp ? field("tools", mcpBanner(mcp, options.dryRun)) : undefined,
+    wantMcp ? field("tools", mcpBanner(mcp, options.dryRun, noTools)) : undefined,
   ]
     .filter(Boolean)
     .join("  ");

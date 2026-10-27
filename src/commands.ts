@@ -1438,8 +1438,8 @@ export function registerHarnessCommands(program: Command, addExamples: (c: Comma
     if (harness === "claude") {
       // --mcp first, then --no-mcp: neither flag leaves the endpoint's
       // claude_tool_surface default in charge (commander keeps it undefined).
-      cmd.option("--mcp", "attach the endpoint's tools as Claude Code MCP servers (one per app) instead of router tools");
-      cmd.option("--no-mcp", "keep the endpoint's tools on the router (Code Mode / injected tools)");
+      cmd.option("--mcp", "attach the endpoint's tools as Claude Code MCP servers, one per app (default unless the endpoint sets claude_tool_surface = \"router\")");
+      cmd.option("--no-mcp", "keep the endpoint's tools on the router for this session (Code Mode / injected tools)");
     }
     cmd.action(async (args: string[], options) => {
       await launchHarness(harness, args, options);
