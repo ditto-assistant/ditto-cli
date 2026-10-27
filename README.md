@@ -87,7 +87,10 @@ global installation must remain exact. Older CLI versions need one normal npm
 upgrade before they have this updater.
 
 Updates are stored under the CLI config directory's `updates/` folder, with
-separate immutable version directories and an atomic selection pointer. Every
+separate immutable version directories and an atomic selection pointer for each
+OS, CPU architecture and libc target. Enable/disable is one shared user
+preference; pins and cached bundles are target-specific. Relative
+`DITTO_CONFIG_DIR` values are resolved before starting a worker. Every
 root and locked dependency archive is restricted to the public npm registry and
 checked against SHA512 integrity; archive links, unsafe paths and special files
 are rejected. No npm configuration, credentials, project files, install scripts,
@@ -97,7 +100,7 @@ ordinary executable bits are retained for coding-agent commands.
 Each attempt is bounded to 60 seconds plus five seconds of worker cleanup,
 128 MiB downloaded, 512 MiB unpacked and
 50,000 files. Cached versions are retained so active commands can still read
-them; at 2 GiB, the updater pauses for manual cleanup instead of deleting a
+them; at 2 GiB per target, the updater pauses for manual cleanup instead of deleting a
 potentially active version. Immutable attempt leases also have a metadata cap.
 A crashed attempt blocks at most its six-hour window and never steals another
 worker's live lease. `self-update status` reports the bundled, selected and

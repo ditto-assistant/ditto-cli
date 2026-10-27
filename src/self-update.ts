@@ -8,12 +8,27 @@ import type { Command, Option } from "commander";
 import { configDir, packageName, packageVersion } from "./config.js";
 
 export const UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1000;
-export interface UpdatePolicy { enabled?: boolean; pinnedVersion?: string }
+export interface UpdatePolicy { enabled?: boolean; pinnedVersion?: string; pins?: Record<string, string> }
 export interface UpdateHealth { lastAttemptAt?: number; lastSuccessAt?: number; status?: string; detail?: string; lease?: string }
-export interface UpdatePointer { version: string; installedAt: string }
+export interface UpdatePointer { version: string; installedAt: string; target?: string }
 export interface UpdateLease { pid: number; nonce: string; createdAt: number; deadlineAt: number }
 export const updateLeaseSlot = (now = Date.now()): string => `${Math.floor(now / UPDATE_INTERVAL_MS)}.json`;
-export const updateRoot = (): string => path.join(configDir(), "updates");
+export function updateTarget(platform: string = process.platform, arch: string = process.arch, libc?: string): string {
+  const family = platform === "linux" ? libc ?? ((process.report.getReport() as { header?: { glibcVersionRuntime?: string } }).header?.glibcVersionRuntime ? "glibc" : "musl") : "none";
+  if (!/^[a-z0-9]+$/.test(platform) || !/^[a-z0-9]+$/.test(arch) || !["none", "glibc", "musl"].includes(family)) throw new Error("unsupported update target");
+  return `${platform}-${arch}-${family}`;
+}
+export const updateRoot = (target = updateTarget()): string => {
+  if (!/^[a-z0-9]+-[a-z0-9]+-(none|glibc|musl)$/.test(target)) throw new Error("invalid update target");
+  return path.resolve(configDir(), "updates", target);
+};
+export function updatePolicyFile(cache: string, target = updateTarget()): string {
+  return path.join(path.basename(cache) === target && path.basename(path.dirname(cache)) === "updates" ? path.dirname(cache) : cache, "settings.json");
+}
+export async function effectiveUpdatePolicy(cache: string, target = updateTarget()): Promise<UpdatePolicy> {
+  const raw = await readUpdateJSON<UpdatePolicy>(updatePolicyFile(cache, target), 4096) ?? {};
+  return { ...raw, pinnedVersion: raw.pins?.[target] ?? raw.pinnedVersion };
+}
 export const stableVersion = (value: unknown): value is string => typeof value === "string" && /^\d{1,6}\.\d{1,6}\.\d{1,6}$/.test(value);
 export function newerVersion(a: string, b: string): boolean {
   if (!stableVersion(a) || !stableVersion(b)) return false;
@@ -22,7 +37,7 @@ export function newerVersion(a: string, b: string): boolean {
   return false;
 }
 export function supportsNode(range: unknown, version = process.versions.node): boolean {
-  return typeof range === "string" && stableVersion(version) && satisfies(version, range);
+  return typeof range === "string" && range.length <= 256 && stableVersion(version) && satisfies(version, range);
 }
 
 /** No auth file, npmrc, repository, shell, or credential environment is read. */
@@ -63,19 +78,23 @@ export async function writeUpdateJSON(file: string, data: unknown, beforePublish
 
 export function updateEligibility(root: string, env: NodeJS.ProcessEnv = process.env, args: string[] = process.argv.slice(2)): string | undefined {
   const normalized = root.replaceAll("\\", "/");
-  if (env.DITTO_CLI_AUTO_UPDATE === "0" || env.DISABLE_AUTOUPDATER === "1" || args.includes("--no-auto-update")) return "disabled for this invocation";
   if (env.DITTO_CLI_PINNED === "1") return "explicit installed-version pin";
   if (env.CI || env.GITHUB_ACTIONS || env.GITLAB_CI || env.BUILD_NUMBER) return "CI execution";
   if (env.npm_lifecycle_event || env.npm_command === "exec" || env.npm_config_package || /\/(?:_npx|\.pnpm|\.yarn)\//.test(normalized)) return "ephemeral or package-script execution";
   if (/\/(?:Cellar|Caskroom|nix\/store|snap)\//i.test(normalized) || /^\/(?:usr\/(?:share|lib)|nix|snap)\//.test(normalized)) return "package-manager-owned installation";
   const windowsGlobal = process.platform === "win32" && env.APPDATA && normalized === path.join(env.APPDATA, "npm/node_modules/@heyditto/cli").replaceAll("\\", "/");
   if (!normalized.endsWith("/lib/node_modules/@heyditto/cli") && !windowsGlobal) return "project or unmanaged installation";
+  // Disabling checks does not grant ownership or permission to delegate. Only
+  // an otherwise eligible installation may retain its selected cached version.
+  if (env.DITTO_CLI_AUTO_UPDATE === "0" || env.DISABLE_AUTOUPDATER === "1" || args.includes("--no-auto-update")) return "disabled for this invocation";
   return undefined;
 }
 
-export async function selectCachedRelease(cache: string, bundledVersion: string, policy: UpdatePolicy, nodeVersion = process.versions.node): Promise<{ root: string; version: string } | undefined> {
+export async function selectCachedRelease(cache: string, bundledVersion: string, policy: UpdatePolicy, nodeVersion = process.versions.node, target = updateTarget()): Promise<{ root: string; version: string } | undefined> {
+  cache = path.resolve(cache);
   const pointer = policy.pinnedVersion ? { version: policy.pinnedVersion } : await readUpdateJSON<UpdatePointer>(path.join(cache, "current.json"), 4096);
   if (!pointer || !stableVersion(pointer.version) || (!newerVersion(pointer.version, bundledVersion) && pointer.version !== policy.pinnedVersion) || (policy.pinnedVersion && pointer.version !== policy.pinnedVersion)) return undefined;
+  if ("target" in pointer && pointer.target !== target) return undefined;
   try { await lstat(path.join(cache, "quarantine", `${pointer.version}.json`)); return undefined; }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") return undefined; }
   const root = path.join(cache, "versions", pointer.version, "package");
@@ -86,8 +105,8 @@ export async function selectCachedRelease(cache: string, bundledVersion: string,
   if (await realpath(root) !== root) return undefined;
   const pkg = await readUpdateJSON<{ name?: string; version?: string; engines?: { node?: string }; bin?: Record<string, string> }>(path.join(root, "package.json"));
   const lock = await readUpdateJSON<{ bootstrap?: number; packageVersion?: string }>(path.join(root, "dist/update-lock.json"), 1024 * 1024);
-  const receipt = await readUpdateJSON<{ version?: string; rootIntegrity?: string }>(path.join(path.dirname(root), "verified.json"), 4096);
-  if (pkg?.name !== packageName || pkg.version !== pointer.version || pkg.bin?.heyditto !== "dist/entry.js" || !supportsNode(pkg.engines?.node, nodeVersion) || lock?.bootstrap !== 1 || lock.packageVersion !== pointer.version || receipt?.version !== pointer.version || !/^sha512-[A-Za-z0-9+/]{86}==$/.test(receipt?.rootIntegrity ?? "")) return undefined;
+  const receipt = await readUpdateJSON<{ version?: string; rootIntegrity?: string; target?: string; nodeRanges?: string[] }>(path.join(path.dirname(root), "verified.json"), 65536);
+  if (pkg?.name !== packageName || pkg.version !== pointer.version || pkg.bin?.heyditto !== "dist/entry.js" || !supportsNode(pkg.engines?.node, nodeVersion) || lock?.bootstrap !== 1 || lock.packageVersion !== pointer.version || receipt?.version !== pointer.version || receipt.target !== target || !Array.isArray(receipt.nodeRanges) || receipt.nodeRanges.length > 257 || !receipt.nodeRanges.every(range => supportsNode(range, nodeVersion)) || !/^sha512-[A-Za-z0-9+/]{86}==$/.test(receipt?.rootIntegrity ?? "")) return undefined;
   for (const file of ["dist/cli.js", "dist/entry.js", "dist/update-worker.js"]) {
     const absolute = path.join(root, file), stat = await lstat(absolute);
     if (!stat.isFile() || stat.isSymbolicLink() || await realpath(absolute) !== absolute) return undefined;
@@ -110,14 +129,14 @@ export async function startupUpdate(bundledRoot: string): Promise<string> {
   const cache = updateRoot();
   let policy: UpdatePolicy, health: UpdateHealth;
   try {
-    policy = await readUpdateJSON<UpdatePolicy>(path.join(cache, "settings.json"), 4096) ?? {};
+    policy = await effectiveUpdatePolicy(cache);
     health = await readUpdateJSON<UpdateHealth>(path.join(cache, "health.json"), 4096) ?? {};
   } catch { return root; }
   let selected: { root: string; version: string } | undefined;
   try { selected = await selectCachedRelease(cache, packageVersion, policy); } catch { /* invalid pointer falls back */ }
   const active = selected ?? { root, version: packageVersion };
   const args = process.argv.slice(2);
-  if (eligibility || policy.enabled === false || policy.pinnedVersion || !stableVersion(active.version) || args[0] === "self-update" || args.some(a => ["--preview", "--offline", "--help", "-h", "--version", "-v"].includes(a))) return active.root;
+  if (eligibility || policy.enabled === false || policy.pinnedVersion || !stableVersion(active.version) || !args.length || ["self-update", "help"].includes(args[0]) || args.some(a => ["--preview", "--offline", "--help", "-h", "--version", "-v"].includes(a))) return active.root;
   const last = health.lastAttemptAt;
   if (typeof last === "number" && Number.isFinite(last) && Date.now() - last < UPDATE_INTERVAL_MS) return active.root;
   try {
@@ -150,17 +169,20 @@ export function registerSelfUpdateCommands(program: Command, outputOption: () =>
   const group = program.command("self-update").description("inspect, disable or pin occasional background CLI updates");
   const action = (kind: "status" | "enable" | "disable" | "pin" | "unpin" | "check") => async (options: { output?: string }) => {
     const cache = updateRoot();
+    const target = updateTarget(), policyFile = updatePolicyFile(cache, target);
     const invalidMetadata: string[] = [];
     const safeRead = async <T>(file: string, limit = 4096): Promise<T | undefined> => {
       try { return await readUpdateJSON<T>(path.join(cache, file), limit); }
       catch { invalidMetadata.push(file); return undefined; }
     };
-    const settings = await safeRead<UpdatePolicy>("settings.json") ?? {};
+    let settings: UpdatePolicy;
+    try { settings = await readUpdateJSON<UpdatePolicy>(policyFile, 4096) ?? {}; }
+    catch { invalidMetadata.push("settings.json"); settings = {}; }
     if (kind === "enable") settings.enabled = true;
     if (kind === "disable") settings.enabled = false;
-    if (kind === "pin") settings.pinnedVersion = packageVersion;
-    if (kind === "unpin") delete settings.pinnedVersion;
-    if (!["status", "check"].includes(kind)) await writeUpdateJSON(path.join(cache, "settings.json"), settings);
+    if (kind === "pin") settings.pins = { ...settings.pins, [target]: packageVersion };
+    if (kind === "unpin") { if (settings.pins) delete settings.pins[target]; delete settings.pinnedVersion; }
+    if (!["status", "check"].includes(kind)) await writeUpdateJSON(policyFile, settings);
     let invokedRoot = fileURLToPath(new URL("../", import.meta.url));
     if (process.argv[1]) invokedRoot = await realpath(process.argv[1]).then(file => path.dirname(path.dirname(file))).catch(() => invokedRoot);
     const eligibilityReason = updateEligibility(invokedRoot, process.env, []);
@@ -183,7 +205,7 @@ export function registerSelfUpdateCommands(program: Command, outputOption: () =>
     const bundled = await readUpdateJSON<{ version?: string }>(path.join(invokedRoot, "package.json"), 65536).catch(() => undefined);
     const pointer = await safeRead<UpdatePointer>("current.json");
     const checkAllowed = !eligibilityReason || eligibilityReason === "disabled for this invocation";
-    const state = { version: packageVersion, bundledVersion: bundled?.version ?? packageVersion, selectedVersion: packageVersion, cachedVersion: stableVersion(pointer?.version) ? pointer.version : null, eligible: !eligibilityReason, eligibilityReason: eligibilityReason ?? null, checkRequested: kind === "check", checkAllowed: kind === "check" ? checkAllowed : null, manualExitCode: manualExitCode ?? null, enabled: settings.enabled !== false, pinnedVersion: settings.pinnedVersion ?? null, checkIntervalHours: 6, health, worker: worker ?? null, cache, historicalNpmPinDetectable: false, invalidMetadata };
+    const state = { version: packageVersion, bundledVersion: bundled?.version ?? packageVersion, selectedVersion: packageVersion, cachedVersion: stableVersion(pointer?.version) ? pointer.version : null, target, policyFile, policyScope: "user", pinScope: "runtime_target", eligible: !eligibilityReason, eligibilityReason: eligibilityReason ?? null, checkRequested: kind === "check", checkAllowed: kind === "check" ? checkAllowed : null, manualExitCode: manualExitCode ?? null, enabled: settings.enabled !== false, pinnedVersion: settings.pins?.[target] ?? settings.pinnedVersion ?? null, checkIntervalHours: 6, health, worker: worker ?? null, cache, historicalNpmPinDetectable: false, invalidMetadata };
     if (options.output === "json") process.stdout.write(JSON.stringify(state) + "\n");
     else process.stdout.write(`CLI ${state.selectedVersion} (bundled ${state.bundledVersion}, cached ${state.cachedVersion ?? "none"}): background updates ${state.enabled ? "enabled" : "disabled"}${state.pinnedVersion ? `, pinned to ${state.pinnedVersion}` : ""}${eligibilityReason ? `\nLaunch: ${eligibilityReason}` : ""}\nLast attempt: ${health.status ?? "none"}${health.detail ? ` (${health.detail})` : ""}${worker ? `\nWorker lease: ${worker} (leases are never stolen)` : ""}\n`);
     if (kind === "check" && (!checkAllowed || health.status === "failed")) process.exitCode ||= 1;

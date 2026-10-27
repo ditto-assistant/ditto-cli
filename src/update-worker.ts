@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
 import { Parser } from "tar";
 import { satisfies } from "semver";
-import { newerVersion, privateDirectory, readUpdateJSON, selectCachedRelease, stableVersion, supportsNode, updateLeaseSlot, writeUpdateJSON, type UpdateHealth, type UpdateLease, type UpdatePolicy } from "./self-update.js";
+import { effectiveUpdatePolicy, newerVersion, privateDirectory, readUpdateJSON, selectCachedRelease, stableVersion, supportsNode, updateLeaseSlot, updateTarget, writeUpdateJSON, type UpdateHealth, type UpdateLease } from "./self-update.js";
 
 const NAME = "@heyditto/cli";
 const REGISTRY = "https://registry.npmjs.org";
@@ -164,7 +164,8 @@ function validateDependencies(root: string, packages: Map<string, PackageJSON>, 
 export async function runUpdate(options: WorkerOptions): Promise<void> {
   const limits = { ...UPDATE_LIMITS, ...options.limits }, cache = path.resolve(options.cache);
   const fetcher = options.fetch ?? fetch, platform = options.platform ?? process.platform, arch = options.arch ?? process.arch;
-  const libc = options.libc ?? (platform === "linux" && (process.report.getReport() as { header?: { glibcVersionRuntime?: string } }).header?.glibcVersionRuntime ? "glibc" : "musl");
+  const target = updateTarget(platform, arch, options.libc), libc = target.split("-")[2];
+  if (path.basename(path.dirname(cache)) === "updates" && /^[a-z0-9]+-[a-z0-9]+-(?:glibc|musl|none)$/.test(path.basename(cache)) && path.basename(cache) !== target) throw new Error("updater process target differs from its cache namespace");
   await privateDirectory(cache);
   const clock = options.now ?? Date.now, started = performance.now(), now = clock(), nonce = randomUUID();
   const window = updateLeaseSlot(now).slice(0, -5), slot = options.manual ? `${window}-manual-${nonce}.json` : `${window}.json`;
@@ -194,7 +195,7 @@ export async function runUpdate(options: WorkerOptions): Promise<void> {
   };
   const assertPublishable = async () => {
     await assertLease();
-    const policy = await readUpdateJSON<UpdatePolicy>(path.join(cache, "settings.json"), 4096) ?? {};
+    const policy = await effectiveUpdatePolicy(cache, target);
     if (policy.pinnedVersion || policy.enabled === false && !options.manual) throw new Error("update policy changed before publication");
   };
   try {
@@ -208,7 +209,7 @@ export async function runUpdate(options: WorkerOptions): Promise<void> {
       try { process.kill(other.pid, 0); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ESRCH") alive = false; }
       if (alive) { health.status = "adjacent worker active"; return; }
     }
-    const policy = await readUpdateJSON<UpdatePolicy>(path.join(cache, "settings.json"), 4096) ?? {};
+    const policy = await effectiveUpdatePolicy(cache, target);
     if (policy.enabled === false && !options.manual || policy.pinnedVersion) { health.status = policy.pinnedVersion ? "pinned" : "disabled"; return; }
     await writeUpdateJSON(path.join(cache, "health.json"), health);
     let downloaded = 0;
@@ -233,11 +234,11 @@ export async function runUpdate(options: WorkerOptions): Promise<void> {
     if (metadata.name !== NAME || !stableVersion(metadata.version) || metadata.repository?.url !== "git+https://github.com/ditto-assistant/ditto-cli.git") throw new Error("unexpected public CLI package identity");
     if (!newerVersion(metadata.version, options.currentVersion)) { health.status = "current"; return; }
     if (!supportsNode(metadata.engines?.node, options.nodeVersion)) throw new Error("new CLI version does not support this Node runtime");
-    const completed = await selectCachedRelease(cache, options.currentVersion, { pinnedVersion: metadata.version }, options.nodeVersion).catch(() => undefined);
+    const completed = await selectCachedRelease(cache, options.currentVersion, { pinnedVersion: metadata.version }, options.nodeVersion, target).catch(() => undefined);
     if (completed) {
       const receipt = await readUpdateJSON<{ rootIntegrity?: string }>(path.join(path.dirname(completed.root), "verified.json"), 4096);
       if (receipt?.rootIntegrity !== metadata.dist?.integrity) throw new Error("immutable version integrity changed at the registry");
-      await writeUpdateJSON(path.join(cache, "current.json"), { version: metadata.version, installedAt: new Date().toISOString() }, assertPublishable);
+      await writeUpdateJSON(path.join(cache, "current.json"), { version: metadata.version, installedAt: new Date().toISOString(), target }, assertPublishable);
       health = { ...health, status: "selected verified cached version", lastSuccessAt: Date.now() };
       return;
     }
@@ -275,18 +276,20 @@ export async function runUpdate(options: WorkerOptions): Promise<void> {
       packages.set(item.path, dependency); await writeArchive(path.join(packageRoot, item.path), files, controller.signal);
     }
     validateDependencies(packageRoot, packages, all, selected);
-    await writeUpdateJSON(path.join(stage, "verified.json"), { version: pkg.version, rootIntegrity: metadata.dist?.integrity });
+    const receipt = { version: pkg.version, rootIntegrity: metadata.dist?.integrity, target, nodeRanges: [...new Set([...packages.values()].map(value => value.engines?.node).filter((range): range is string => typeof range === "string"))] };
+    if (Buffer.byteLength(JSON.stringify(receipt)) > 65536) throw new Error("update compatibility receipt exceeds its bound");
+    await writeUpdateJSON(path.join(stage, "verified.json"), receipt);
     // Supported PTY platform packages are required by their consumer graph;
     // binaries/helper executables keep only ordinary execute bits, no scripts.
     check();
-    const latestPolicy = await readUpdateJSON<UpdatePolicy>(path.join(cache, "settings.json"), 4096) ?? {};
+    const latestPolicy = await effectiveUpdatePolicy(cache, target);
     if (latestPolicy.enabled === false && !options.manual || latestPolicy.pinnedVersion) { health.status = "disabled during download"; return; }
     await privateDirectory(path.join(cache, "versions"));
     const destination = path.join(cache, "versions", pkg.version);
     try { await lstat(destination); throw new Error("candidate version already exists; retaining the current version"); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
     await rename(stage, destination); stage = undefined;
-    await writeUpdateJSON(path.join(cache, "current.json"), { version: pkg.version, installedAt: new Date().toISOString() }, assertPublishable);
+    await writeUpdateJSON(path.join(cache, "current.json"), { version: pkg.version, installedAt: new Date().toISOString(), target }, assertPublishable);
     health = { ...health, status: "installed for next invocation", lastSuccessAt: Date.now() };
   } catch (error) {
     health.status = "failed";

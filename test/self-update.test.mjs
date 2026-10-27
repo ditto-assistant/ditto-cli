@@ -9,7 +9,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { Header } from "tar";
-import { cleanUpdateEnvironment, privateDirectory, quarantineCachedRelease, selectCachedRelease, supportsNode, updateEligibility, updateLeaseSlot, UPDATE_INTERVAL_MS, writeUpdateJSON } from "../dist/self-update.js";
+import { cleanUpdateEnvironment, effectiveUpdatePolicy, privateDirectory, quarantineCachedRelease, selectCachedRelease as selectRuntimeCachedRelease, supportsNode, updateEligibility, updateLeaseSlot, updateTarget, UPDATE_INTERVAL_MS, writeUpdateJSON } from "../dist/self-update.js";
 import { registryURL, runUpdate, unpackArchive, UPDATE_LIMITS } from "../dist/update-worker.js";
 import { executeSelectedCLI } from "../dist/entry-runner.js";
 
@@ -17,7 +17,10 @@ const project = fileURLToPath(new URL("../", import.meta.url));
 const currentPackageVersion = JSON.parse(await readFile(path.join(project, "package.json"), "utf8")).version;
 const registry = "https://registry.npmjs.org";
 const latest = `${registry}/%40heyditto%2Fcli/latest`;
-const version = "2.34.0";
+const version = `${currentPackageVersion.split(".")[0]}.${Number(currentPackageVersion.split(".")[1]) + 1}.0`;
+const fixtureTarget = "linux-x64-glibc", runtimeTarget = updateTarget();
+const runtimeCache = config => path.join(config, "updates", runtimeTarget);
+const selectCachedRelease = (cache, bundled, policy) => selectRuntimeCachedRelease(cache, bundled, policy, process.versions.node, fixtureTarget);
 const sri = bytes => "sha512-" + createHash("sha512").update(bytes).digest("base64");
 
 function tarball(entries) {
@@ -75,7 +78,7 @@ function fixture({ mutateRoot, mutateLock, corruptDependency, foreignRoot = fals
   return { fetch, requests, bodies, lock };
 }
 
-const update = (cache, service, extra = {}) => runUpdate({ cache, currentVersion: "2.33.0", platform: "linux", arch: "x64", fetch: service.fetch, ...extra });
+const update = (cache, service, extra = {}) => runUpdate({ cache, currentVersion: "2.33.0", platform: "linux", arch: "x64", libc: "glibc", fetch: service.fetch, ...extra });
 const pointer = cache => readFile(path.join(cache, "current.json"), "utf8").then(JSON.parse);
 const health = cache => readFile(path.join(cache, "health.json"), "utf8").then(JSON.parse);
 
@@ -191,10 +194,10 @@ test("persistent updater commands preserve stdout JSON and never invoke a projec
 });
 
 test("normal global launch returns before its worker finishes, throttles later invocations and strips command context", async t => {
-  const directory = await temporary(t), globalRoot = path.join(directory, "prefix/lib/node_modules/@heyditto/cli"), config = path.join(directory, "config"), cache = path.join(config, "updates");
+  const directory = await temporary(t), globalRoot = path.join(directory, "prefix/lib/node_modules/@heyditto/cli"), config = path.join(directory, "config"), cache = runtimeCache(config);
   await mkdir(path.join(globalRoot, "dist"), { recursive: true }); await mkdir(cache, { recursive: true, mode: 0o700 });
   const harness = path.join(directory, "harness.mjs");
-  await writeFile(harness, `import {writeFile} from 'node:fs/promises'; import {startupUpdate} from ${JSON.stringify(new URL("../dist/self-update.js", import.meta.url).href)}; await writeFile(${JSON.stringify(path.join(cache, "parent.pid"))}, String(process.pid)); const root=await startupUpdate(process.argv[2]); process.stdout.write(JSON.stringify({root})+'\\n');`);
+  await writeFile(harness, `import {writeFile} from 'node:fs/promises'; import {startupUpdate} from ${JSON.stringify(new URL("../dist/self-update.js", import.meta.url).href)}; await writeFile(${JSON.stringify(path.join(cache, "parent.pid"))}, String(process.pid)); const invoked=process.argv[2]; process.argv=[process.argv[0],invoked+'/dist/entry.js',...process.argv.slice(3)]; const root=await startupUpdate(invoked); process.stdout.write(JSON.stringify({root})+'\\n');`);
   await writeFile(path.join(globalRoot, "dist/update-worker.js"), `
 const fs=require('node:fs/promises'), path=require('node:path');
 (async()=>{
@@ -218,6 +221,10 @@ const fs=require('node:fs/promises'), path=require('node:path');
   await rm(path.join(cache, "health.json")); await rm(path.join(cache, "worker-result.json"));
   const offline = execute(["review", "local", "--preview"]); assert.equal(offline.status, 0, offline.stderr);
   await delay(100); await assert.rejects(readFile(path.join(cache, "worker-result.json")), { code: "ENOENT" });
+  for (const args of [["help", "search"], []]) {
+    const help = execute(args); assert.equal(help.status, 0, help.stderr);
+    await delay(100); await assert.rejects(readFile(path.join(cache, "worker-result.json")), { code: "ENOENT" });
+  }
 });
 
 test("worker network timeout retains an immutable lease and leaves the selected pointer unchanged", async t => {
@@ -308,14 +315,17 @@ test("a global bin symlink resolves its actual package ownership for an explicit
   await cp(path.join(project, "package.json"), path.join(globalRoot, "package.json"));
   await symlink(path.join(project, "node_modules"), path.join(globalRoot, "node_modules"), "dir");
   await symlink(path.join(globalRoot, "dist/entry.js"), bin);
-  await writeUpdateJSON(path.join(config, "updates/settings.json"), { enabled: false, pinnedVersion: currentPackageVersion });
-  const result = spawnSync(process.execPath, [bin, "self-update", "check", "--output", "json"], { cwd: directory, encoding: "utf8", env: { DITTO_CONFIG_DIR: config, DITTO_API_KEY: "never-uploaded", PATH: "" } });
-  assert.equal(result.status, 0, result.stderr); assert.equal(result.stderr, "");
-  const data = JSON.parse(result.stdout);
-  assert.equal(data.checkAllowed, true); assert.equal(data.eligible, true); assert.equal(data.health.status, "pinned");
-  assert.equal(data.bundledVersion, currentPackageVersion); assert.equal(data.selectedVersion, currentPackageVersion); assert.equal(data.enabled, false);
-  const lease = JSON.parse(await readFile(path.join(config, "updates/leases", data.health.lease), "utf8"));
-  assert.notEqual(lease.pid, result.pid, "manual checks must use a separate bounded, credential-free worker too");
+  await writeUpdateJSON(path.join(config, "updates/settings.json"), { enabled: false, pins: { [runtimeTarget]: currentPackageVersion } });
+  for (const configOverride of [config, "config"]) {
+    const result = spawnSync(process.execPath, [bin, "self-update", "check", "--output", "json"], { cwd: directory, encoding: "utf8", env: { DITTO_CONFIG_DIR: configOverride, DITTO_API_KEY: "never-uploaded", PATH: "" } });
+    assert.equal(result.status, 0, result.stderr); assert.equal(result.stderr, "");
+    const data = JSON.parse(result.stdout);
+    assert.equal(data.cache, runtimeCache(config), "relative config overrides must resolve before child cwd changes");
+    assert.equal(data.checkAllowed, true); assert.equal(data.eligible, true); assert.equal(data.health.status, "pinned");
+    assert.equal(data.bundledVersion, currentPackageVersion); assert.equal(data.selectedVersion, currentPackageVersion); assert.equal(data.enabled, false);
+    const lease = JSON.parse(await readFile(path.join(runtimeCache(config), "leases", data.health.lease), "utf8"));
+    assert.notEqual(lease.pid, result.pid, "manual checks must use a separate bounded, credential-free worker too");
+  }
   await assert.rejects(readFile(path.join(config, "config.json")), { code: "ENOENT" });
 });
 
@@ -361,7 +371,7 @@ test("sandbox staging preserves the installed platform's real prebuilt PTY and e
   const cache = path.join(await temporary(t), "updates");
   await runUpdate({ cache, currentVersion: "2.33.0", fetch: async value => new Response(bodies.get(String(value)) ?? null, { status: bodies.has(String(value)) ? 200 : 404 }) });
   assert.equal((await health(cache)).status, "installed for next invocation", (await health(cache)).detail);
-  const selected = await selectCachedRelease(cache, "2.33.0", {});
+  const selected = await selectRuntimeCachedRelease(cache, "2.33.0", {});
   const result = spawnSync(process.execPath, [path.join(selected.root, "dist/entry.js")], { cwd: cache, encoding: "utf8", env: {}, timeout: 5000 });
   assert.equal(result.status, 0, result.stderr); assert.equal(JSON.parse(result.stdout).pty, true);
 });
@@ -376,4 +386,69 @@ test("a fully verified version survives a crash before pointer publication and i
   assert.equal((await health(cache)).status, "selected verified cached version");
   assert.equal(service.requests.length - priorRequests, 1, "the registry identity is checked but verified dependencies are not downloaded again");
   assert.equal((await pointer(cache)).version, version); assert.deepEqual(await readFile(path.join(selected.root, "node_modules/fixture/index.js")), before);
+});
+
+test("disable controls never weaken installed pins, CI, ephemeral execution or manager ownership", () => {
+  const global = "/home/person/prefix/lib/node_modules/@heyditto/cli";
+  const denials = [
+    { root: global, env: { DITTO_CLI_PINNED: "1" } }, { root: global, env: { CI: "true" } },
+    { root: global, env: { npm_command: "exec" } }, { root: global, env: { npm_lifecycle_event: "test" } },
+    { root: "/project/node_modules/@heyditto/cli", env: {} },
+    { root: "/opt/homebrew/Cellar/heyditto/2/lib/node_modules/@heyditto/cli", env: {} },
+    { root: "/nix/store/heyditto/lib/node_modules/@heyditto/cli", env: {} },
+    { root: "/home/person/.npm/_npx/hash/node_modules/@heyditto/cli", env: {} },
+  ];
+  let inspected = 0;
+  for (const disable of [{ env: { DITTO_CLI_AUTO_UPDATE: "0" }, args: [] }, { env: { DISABLE_AUTOUPDATER: "1" }, args: [] }, { env: {}, args: ["--no-auto-update"] }]) {
+    assert.equal(updateEligibility(global, disable.env, disable.args), "disabled for this invocation");
+    for (const denied of denials) {
+      const reason = updateEligibility(denied.root, { ...denied.env, ...disable.env }, disable.args);
+      assert.ok(reason && reason !== "disabled for this invocation", `${denied.root}: ${JSON.stringify(denied.env)} must stay protected`);
+      inspected++;
+    }
+  }
+  assert.equal(inspected, 24);
+});
+
+test("disable plus installed pin cannot delegate a cached CLI, and project manual checks cannot gain permission", async t => {
+  const directory = await temporary(t), config = path.join(directory, "config"), cache = runtimeCache(config), globalRoot = path.join(directory, "prefix/lib/node_modules/@heyditto/cli");
+  await mkdir(globalRoot, { recursive: true }); await update(cache, fixture(), { platform: process.platform, arch: process.arch, libc: runtimeTarget.split("-")[2] });
+  const harness = path.join(directory, "selection.mjs");
+  await writeFile(harness, `import {startupUpdate} from ${JSON.stringify(new URL("../dist/self-update.js", import.meta.url).href)}; process.stdout.write(JSON.stringify({root:await startupUpdate(process.argv[2])})+'\\n');`);
+  const selected = spawnSync(process.execPath, [harness, globalRoot], { cwd: directory, encoding: "utf8", env: { DITTO_CONFIG_DIR: config, DITTO_CLI_AUTO_UPDATE: "0", DITTO_CLI_PINNED: "1" } });
+  assert.equal(selected.status, 0, selected.stderr); assert.equal(JSON.parse(selected.stdout).root, globalRoot);
+  const checked = spawnSync(process.execPath, [path.join(project, "dist/entry.js"), "self-update", "check", "--output", "json"], { cwd: directory, encoding: "utf8", env: { DITTO_CONFIG_DIR: config, DITTO_CLI_AUTO_UPDATE: "0" } });
+  assert.equal(checked.status, 1, checked.stderr); assert.equal(JSON.parse(checked.stdout).checkAllowed, false);
+});
+
+test("persistent disable is shared across targets while pins remain target-specific", async t => {
+  const base = path.join(await temporary(t), "config/updates"), x64 = path.join(base, "linux-x64-glibc"), arm64 = path.join(base, "linux-arm64-glibc");
+  await writeUpdateJSON(path.join(base, "settings.json"), { enabled: false, pins: { "linux-x64-glibc": version } });
+  assert.equal((await effectiveUpdatePolicy(x64, "linux-x64-glibc")).pinnedVersion, version);
+  assert.equal((await effectiveUpdatePolicy(arm64, "linux-arm64-glibc")).pinnedVersion, undefined);
+  for (const [cache, arch] of [[x64, "x64"], [arm64, "arm64"]]) {
+    const service = fixture();
+    await runUpdate({ cache, currentVersion: "2.33.0", platform: "linux", arch, libc: "glibc", fetch: service.fetch });
+    assert.equal(service.requests.length, 0); assert.equal((await effectiveUpdatePolicy(cache, `linux-${arch}-glibc`)).enabled, false);
+  }
+});
+
+test("foreign target receipts cannot be selected, recovered or overwritten by another architecture", async t => {
+  const cache = path.join(await temporary(t), "updates"), now = Date.now();
+  await update(cache, fixture(), { now: () => now });
+  const oldPointer = await readFile(path.join(cache, "current.json")), oldReceipt = await readFile(path.join(cache, "versions", version, "verified.json"));
+  assert.equal(await selectRuntimeCachedRelease(cache, "2.33.0", {}, process.versions.node, "linux-arm64-glibc"), undefined);
+  await update(cache, fixture(), { now: () => now + UPDATE_INTERVAL_MS, arch: "arm64" });
+  assert.match((await health(cache)).detail, /already exists/);
+  assert.deepEqual(await readFile(path.join(cache, "current.json")), oldPointer);
+  assert.deepEqual(await readFile(path.join(cache, "versions", version, "verified.json")), oldReceipt);
+  const receipt = JSON.parse(oldReceipt); receipt.nodeRanges = ["<1.0.0"];
+  await writeFile(path.join(cache, "versions", version, "verified.json"), JSON.stringify(receipt));
+  assert.equal(await selectCachedRelease(cache, "2.33.0", {}), undefined, "stored transitive Node requirements must remain compatible");
+});
+
+test("relative cache selection resolves once against the caller directory", async t => {
+  const cache = path.join(await temporary(t), "updates"); await update(cache, fixture());
+  const selected = await selectCachedRelease(path.relative(process.cwd(), cache), "2.33.0", {});
+  assert.equal(selected.root, path.join(cache, "versions", version, "package")); assert.ok(path.isAbsolute(selected.root));
 });
