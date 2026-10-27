@@ -12,6 +12,7 @@ import {
   claudeMcpAttachment,
   claudeServerName,
   fetchMcpCatalog,
+  mcpApprovalNote,
   mergeSettings,
   sweepStaleSettings,
   withClaudeSettings,
@@ -54,6 +55,7 @@ test("claudeMcpAttachment: one http server per source, the key only as a variabl
   });
   assert.equal(mcp.servers, 2);
   assert.equal(mcp.tools, 3);
+  assert.equal(mcp.gated, 1);
 });
 
 test("claudeMcpAttachment: Ditto holds gated calls, so Claude Code is not asked twice", () => {
@@ -216,4 +218,14 @@ test("private settings copies are reused per content, per temp root, and swept o
   assert.equal(existsSync(live), true, "a live session keeps its settings however long it runs");
   assert.equal(existsSync(unnamed), true, "a directory without an owner pid is left alone");
   assert.equal(existsSync(other), true, "only our own prefix is swept");
+});
+
+test("mcpApprovalNote says who stops a gated call, and never claims a gate that is not there", () => {
+  assert.equal(mcpApprovalNote(claudeMcpAttachment(catalog(false), "s")), "Ditto holds 1 gated");
+  assert.equal(mcpApprovalNote(claudeMcpAttachment(catalog(true), "s")), "Claude Code asks before 1 gated");
+  assert.equal(mcpApprovalNote(claudeMcpAttachment(catalog(true), "s", { yolo: true })), "1 gated run unasked (--yolo)");
+  // An endpoint whose approval mode is off marks nothing gated: nobody holds or asks.
+  const off = { ...catalog(true), approvalMode: "off", servers: catalog(true).servers.map((s) => ({ ...s, tools: s.tools.map((t) => ({ ...t, approval: false })) })) };
+  assert.equal(mcpApprovalNote(claudeMcpAttachment(off, "s")), "no gated tools");
+  assert.equal(mcpApprovalNote(claudeMcpAttachment({ ...off, clientApprovals: false }, "s")), "no gated tools");
 });

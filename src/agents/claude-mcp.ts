@@ -63,6 +63,8 @@ export interface ClaudeMcpAttachment {
   ask: string[];
   servers: number;
   tools: number;
+  /** Tools Ditto's policy would hold for a person. */
+  gated: number;
   clientApprovals: boolean;
 }
 
@@ -112,6 +114,7 @@ export function claudeMcpAttachment(catalog: McpCatalog, sessionId: string, opts
   const allow: string[] = [];
   const ask: string[] = [];
   let tools = 0;
+  let gated = 0;
   for (const server of catalog.servers) {
     if (server.tools.length === 0) continue;
     const name = claudeServerName(server.name);
@@ -121,6 +124,7 @@ export function claudeMcpAttachment(catalog: McpCatalog, sessionId: string, opts
       headers: { Authorization: `Bearer \${${MCP_KEY_ENV}}`, "X-Ditto-Session-Id": sessionId },
     };
     tools += server.tools.length;
+    gated += server.tools.filter((t) => t.approval).length;
     if (!catalog.clientApprovals) {
       // Ditto's gate is the authority here; a Claude prompt on top would ask twice.
       allow.push(`mcp__${name}`);
@@ -139,8 +143,16 @@ export function claudeMcpAttachment(catalog: McpCatalog, sessionId: string, opts
     ask,
     servers: Object.keys(mcpServers).length,
     tools,
+    gated,
     clientApprovals: catalog.clientApprovals,
   };
+}
+
+/** Who stops a gated call, for the launch banner: only what is actually true. */
+export function mcpApprovalNote(mcp: ClaudeMcpAttachment): string {
+  if (mcp.gated === 0) return "no gated tools";
+  if (!mcp.clientApprovals) return `Ditto holds ${mcp.gated} gated`;
+  return mcp.ask.length ? `Claude Code asks before ${mcp.ask.length} gated` : `${mcp.gated} gated run unasked (--yolo)`;
 }
 
 type Json = Record<string, unknown>;

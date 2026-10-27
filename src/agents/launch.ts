@@ -25,7 +25,7 @@ import { findProfileEndpoint, repoDefaultProfile } from "../dittoconfig/profiles
 import { err as c } from "../ui.js";
 import { holdNotesForTui, type NoteOptions, releaseNotes, writeNote } from "../terminal-note.js";
 import { claudeDittoDenyRules } from "./claude-deny.js";
-import { type ClaudeMcpAttachment, claudeMcpAttachment, fetchMcpCatalog } from "./claude-mcp.js";
+import { type ClaudeMcpAttachment, claudeMcpAttachment, fetchMcpCatalog, mcpApprovalNote } from "./claude-mcp.js";
 import { liftResumeFlags, planClaude } from "./claude.js";
 import { resolveClaudeResume, transcriptCwd } from "./claude-resume.js";
 import { type ClaudeTranscript, findTranscriptById, listTranscriptsIn } from "./claude-transcripts.js";
@@ -102,8 +102,7 @@ export function wantsMcp(options: Pick<LaunchOptions, "mcp">, endpoint: Pick<Inf
 
 function mcpBanner(mcp: ClaudeMcpAttachment | undefined, dryRun?: boolean): string {
   if (!mcp) return dryRun ? "mcp (catalog read at launch)" : c("yellow", "router (MCP not attached)");
-  const asks = mcp.clientApprovals ? "Claude Code asks" : "Ditto holds gated calls";
-  return `mcp ${c("dim", `(${mcp.servers} servers, ${mcp.tools} tools; ${asks})`)}`;
+  return `mcp ${c("dim", `(${mcp.servers} servers, ${mcp.tools} tools; ${mcpApprovalNote(mcp)})`)}`;
 }
 
 function log(line: string, options?: NoteOptions): void {
