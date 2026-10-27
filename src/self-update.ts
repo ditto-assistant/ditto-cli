@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { lstat, mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { link, lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -123,6 +123,49 @@ export async function selectCachedRelease(cache: string, bundledVersion: string,
   return { root, version: pointer.version };
 }
 
+/** Only a validated startup selection or an explicit manual check activates a
+ * version. Background workers publish candidates, never these markers. */
+export async function recordCachedActivation(cache: string, version: string, target = updateTarget()): Promise<void> {
+  if (!stableVersion(version)) throw new Error("invalid activation version");
+  const directory = path.join(path.resolve(cache), "activated"), file = path.join(directory, `${version}.json`);
+  await privateDirectory(directory);
+  const existing = await readUpdateJSON<{ version?: string; target?: string }>(file, 4096);
+  if (existing) {
+    if (existing.version !== version || existing.target !== target) throw new Error("invalid cached activation");
+    return;
+  }
+  if ((await readdir(directory)).length >= 4096) throw new Error("activation metadata requires manual cleanup");
+  const pending = path.join(directory, `.pending-${randomUUID()}`);
+  await writeFile(pending, JSON.stringify({ version, target }) + "\n", { flag: "wx", mode: 0o600 });
+  try { await link(pending, file); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    const winner = await readUpdateJSON<{ version?: string; target?: string }>(file, 4096);
+    if (winner?.version !== version || winner.target !== target) throw new Error("invalid concurrent cached activation");
+  } finally { await rm(pending, { force: true }).catch(() => undefined); }
+}
+
+export async function selectActivatedRelease(cache: string, bundledVersion: string, nodeVersion = process.versions.node, target = updateTarget()): Promise<{ root: string; version: string } | undefined> {
+  cache = path.resolve(cache);
+  const directory = path.join(cache, "activated");
+  try {
+    const stat = await lstat(directory);
+    if (!stat.isDirectory() || stat.isSymbolicLink() || await realpath(directory) !== directory || (typeof process.getuid === "function" && stat.uid !== process.getuid()) || (process.platform !== "win32" && (stat.mode & 0o022))) return undefined;
+    const files = await readdir(directory);
+    if (files.length > 4096) return undefined;
+    const versions = files.filter(name => name.endsWith(".json") && stableVersion(name.slice(0, -5))).map(name => name.slice(0, -5)).filter(version => newerVersion(version, bundledVersion)).sort((a, b) => newerVersion(a, b) ? -1 : newerVersion(b, a) ? 1 : 0);
+    for (const version of versions.slice(0, 16)) {
+      try {
+        const marker = await readUpdateJSON<{ version?: string; target?: string }>(path.join(directory, `${version}.json`), 4096);
+        if (marker?.version !== version || marker.target !== target) continue;
+        const selected = await selectCachedRelease(cache, bundledVersion, { pinnedVersion: version }, nodeVersion, target);
+        if (selected) return selected;
+      } catch { /* invalid activation cannot grant execution permission */ }
+    }
+  } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  return undefined;
+}
+
 export async function quarantineCachedRelease(root: string, cache = updateRoot()): Promise<void> {
   const relative = path.relative(cache, root).split(path.sep);
   if (relative.length !== 3 || relative[0] !== "versions" || !stableVersion(relative[1]) || relative[2] !== "package") return;
@@ -136,17 +179,32 @@ export async function startupUpdate(bundledRoot: string): Promise<string> {
   const eligibility = updateEligibility(root);
   if (eligibility && eligibility !== "disabled for this invocation") return root;
   const cache = updateRoot();
-  let policy: UpdatePolicy, health: UpdateHealth;
+  const [candidate, activated, health] = await Promise.all([
+    selectCachedRelease(cache, packageVersion, {}).catch(() => undefined),
+    selectActivatedRelease(cache, packageVersion).catch(() => undefined),
+    readUpdateJSON<UpdateHealth>(path.join(cache, "health.json"), 4096).catch(() => undefined),
+  ]);
+  let policy: UpdatePolicy;
   try {
+    // Validate the staged candidate BEFORE the final policy read. A candidate
+    // published after an acknowledged disable cannot become this selection.
     policy = await effectiveUpdatePolicy(cache);
-    health = await readUpdateJSON<UpdateHealth>(path.join(cache, "health.json"), 4096) ?? {};
   } catch { return root; }
   let selected: { root: string; version: string } | undefined;
-  try { selected = await selectCachedRelease(cache, packageVersion, policy); } catch { /* invalid pointer falls back */ }
+  if (policy.pinnedVersion) {
+    try { selected = await selectCachedRelease(cache, packageVersion, policy); } catch { /* invalid pin falls back */ }
+  } else if (eligibility || policy.enabled === false) selected = activated;
+  else {
+    selected = candidate && (!activated || newerVersion(candidate.version, activated.version)) ? candidate : activated;
+    if (selected) {
+      try { await recordCachedActivation(cache, selected.version); }
+      catch { selected = activated; } // Never select a new version we cannot retain.
+    }
+  }
   const active = selected ?? { root, version: packageVersion };
   const args = process.argv.slice(2);
   if (eligibility || policy.enabled === false || policy.pinnedVersion || !stableVersion(active.version) || !args.length || ["self-update", "help"].includes(args[0]) || args.some(a => ["--preview", "--offline", "--help", "-h", "--version", "-v"].includes(a))) return active.root;
-  const last = health.lastAttemptAt;
+  const last = health?.lastAttemptAt;
   if (typeof last === "number" && Number.isFinite(last) && Date.now() - last < UPDATE_INTERVAL_MS) return active.root;
   try {
     await privateDirectory(cache);
@@ -212,11 +270,12 @@ export function registerSelfUpdateCommands(program: Command, outputOption: () =>
     }
     const bundled = await readUpdateJSON<{ version?: string }>(path.join(invokedRoot, "package.json"), 65536).catch(() => undefined);
     const pointer = await safeRead<UpdatePointer>("current.json");
+    const activated = await selectActivatedRelease(cache, bundled?.version ?? packageVersion).catch(() => undefined);
     const checkAllowed = !eligibilityReason || eligibilityReason === "disabled for this invocation";
-    const state = { version: packageVersion, bundledVersion: bundled?.version ?? packageVersion, selectedVersion: packageVersion, cachedVersion: stableVersion(pointer?.version) ? pointer.version : null, target, policyFile: preferences.enabled, pinFile: preferences.pin, policyScope: "user", pinScope: "runtime_target", eligible: !eligibilityReason, eligibilityReason: eligibilityReason ?? null, checkRequested: kind === "check", checkAllowed: kind === "check" ? checkAllowed : null, manualExitCode: manualExitCode ?? null, enabled: settings.enabled !== false, pinnedVersion: settings.pinnedVersion ?? null, checkIntervalHours: 6, health, worker: worker ?? null, cache, historicalNpmPinDetectable: false, invalidMetadata };
+    const state = { version: packageVersion, bundledVersion: bundled?.version ?? packageVersion, selectedVersion: packageVersion, cachedVersion: stableVersion(pointer?.version) ? pointer.version : null, stagedVersion: stableVersion(pointer?.version) ? pointer.version : null, activatedVersion: activated?.version ?? null, target, policyFile: preferences.enabled, pinFile: preferences.pin, policyScope: "user", pinScope: "runtime_target", eligible: !eligibilityReason, eligibilityReason: eligibilityReason ?? null, checkRequested: kind === "check", checkAllowed: kind === "check" ? checkAllowed : null, manualExitCode: manualExitCode ?? null, enabled: settings.enabled !== false, pinnedVersion: settings.pinnedVersion ?? null, checkIntervalHours: 6, health, worker: worker ?? null, cache, historicalNpmPinDetectable: false, invalidMetadata };
     if (options.output === "json") process.stdout.write(JSON.stringify(state) + "\n");
-    else process.stdout.write(`CLI ${state.selectedVersion} (bundled ${state.bundledVersion}, cached ${state.cachedVersion ?? "none"}): background updates ${state.enabled ? "enabled" : "disabled"}${state.pinnedVersion ? `, pinned to ${state.pinnedVersion}` : ""}${eligibilityReason ? `\nLaunch: ${eligibilityReason}` : ""}\nLast attempt: ${health.status ?? "none"}${health.detail ? ` (${health.detail})` : ""}${worker ? `\nWorker lease: ${worker} (leases are never stolen)` : ""}\n`);
+    else process.stdout.write(`CLI ${state.selectedVersion} (bundled ${state.bundledVersion}, staged ${state.stagedVersion ?? "none"}, activated ${state.activatedVersion ?? "none"}): background updates ${state.enabled ? "enabled" : "disabled"}${state.pinnedVersion ? `, pinned to ${state.pinnedVersion}` : ""}${eligibilityReason ? `\nLaunch: ${eligibilityReason}` : ""}\nLast attempt: ${health.status ?? "none"}${health.detail ? ` (${health.detail})` : ""}${worker ? `\nWorker lease: ${worker} (leases are never stolen)` : ""}\n`);
     if (kind === "check" && (!checkAllowed || health.status === "failed")) process.exitCode ||= 1;
   };
-  for (const [kind, description] of [["status", "show update policy, installation eligibility and last attempt"], ["check", "check now and stage a verified update for the next invocation"], ["enable", "enable occasional updates for eligible global installations"], ["disable", "disable background downloads; retain the selected version"], ["pin", "keep the currently selected CLI version"], ["unpin", "resume updates after a version pin"]] as const) group.command(kind).description(description).addOption(outputOption()).action(action(kind));
+  for (const [kind, description] of [["status", "show update policy, installation eligibility and last attempt"], ["check", "check now and activate a verified update for the next invocation"], ["enable", "enable occasional updates for eligible global installations"], ["disable", "disable background downloads and new automatic activations"], ["pin", "keep the currently selected CLI version"], ["unpin", "resume updates after a version pin"]] as const) group.command(kind).description(description).addOption(outputOption()).action(action(kind));
 }

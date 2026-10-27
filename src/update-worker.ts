@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
 import { Parser } from "tar";
 import { satisfies } from "semver";
-import { effectiveUpdatePolicy, newerVersion, privateDirectory, readUpdateJSON, selectCachedRelease, stableVersion, supportsNode, updateLeaseSlot, updateTarget, writeUpdateJSON, type UpdateHealth, type UpdateLease } from "./self-update.js";
+import { effectiveUpdatePolicy, newerVersion, privateDirectory, readUpdateJSON, recordCachedActivation, selectCachedRelease, stableVersion, supportsNode, updateLeaseSlot, updateTarget, writeUpdateJSON, type UpdateHealth, type UpdateLease } from "./self-update.js";
 
 const NAME = "@heyditto/cli";
 const REGISTRY = "https://registry.npmjs.org";
@@ -239,7 +239,8 @@ export async function runUpdate(options: WorkerOptions): Promise<void> {
       const receipt = await readUpdateJSON<{ rootIntegrity?: string }>(path.join(path.dirname(completed.root), "verified.json"), 4096);
       if (receipt?.rootIntegrity !== metadata.dist?.integrity) throw new Error("immutable version integrity changed at the registry");
       await writeUpdateJSON(path.join(cache, "current.json"), { version: metadata.version, installedAt: new Date().toISOString(), target }, assertPublishable);
-      health = { ...health, status: "selected verified cached version", lastSuccessAt: Date.now() };
+      if (options.manual) await recordCachedActivation(cache, metadata.version, target);
+      health = { ...health, status: options.manual ? "activated verified cached version" : "staged verified cached version", lastSuccessAt: Date.now() };
       return;
     }
     const rootArchive = await download(metadata.dist?.tarball, limits.archiveBytes);
@@ -290,7 +291,8 @@ export async function runUpdate(options: WorkerOptions): Promise<void> {
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
     await rename(stage, destination); stage = undefined;
     await writeUpdateJSON(path.join(cache, "current.json"), { version: pkg.version, installedAt: new Date().toISOString(), target }, assertPublishable);
-    health = { ...health, status: "installed for next invocation", lastSuccessAt: Date.now() };
+    if (options.manual) await recordCachedActivation(cache, pkg.version, target);
+    health = { ...health, status: options.manual ? "activated for next invocation" : "staged for next enabled invocation", lastSuccessAt: Date.now() };
   } catch (error) {
     health.status = "failed";
     health.detail = (error instanceof Error ? error.message : "update failed").slice(0, 180);

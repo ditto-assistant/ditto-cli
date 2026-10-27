@@ -62,7 +62,7 @@ commands do not start a network check. JSON stdout is unchanged.
 
 ```sh
 heyditto self-update status --output json
-heyditto self-update check             # check now; stage for the next invocation
+heyditto self-update check             # verify and activate for the next invocation
 heyditto self-update disable
 heyditto self-update enable
 heyditto self-update pin               # retain the currently selected version
@@ -72,11 +72,14 @@ DITTO_CLI_PINNED=1 heyditto --version   # run the installed package, bypassing c
 ```
 
 `self-update check` uses the same bounded verification path even when automatic
-checks are disabled. A persistent pin still prevents it from installing another
+checks are disabled, and explicitly activates the verified update for the next
+invocation. A persistent pin still prevents it from installing another
 version. `heyditto --no-auto-update <command>` also suppresses a background check;
-`DISABLE_AUTOUPDATER=1` is supported. Disabling checks retains an already selected
-cached version. A pin selects its retained version even if a newer update has
-been downloaded concurrently.
+`DISABLE_AUTOUPDATER=1` is supported. Disabling checks retains a validated version
+already selected by an earlier launch (or an explicit manual check). It ignores
+new background candidates, including a worker that finishes publishing after
+disable has acknowledged. Running commands keep their selected version. A pin
+selects its retained version even if a newer update has downloaded concurrently.
 
 Homebrew, Nix and operating-system package locations, project installs, npm
 scripts, CI and ephemeral `npx` executions keep their package-manager version;
@@ -87,7 +90,8 @@ global installation must remain exact. Older CLI versions need one normal npm
 upgrade before they have this updater.
 
 Updates are stored under the CLI config directory's `updates/` folder, with
-separate immutable version directories and an atomic selection pointer for each
+separate immutable version directories, an atomic candidate pointer and
+append-only activation markers for each
 OS, CPU architecture and libc target. Enable/disable is one shared user
 preference; pins and cached bundles are target-specific. Each control writes its
 own atomic preference file, so concurrent pin and disable commands cannot

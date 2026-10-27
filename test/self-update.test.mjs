@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import fs from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { gzipSync } from "node:zlib";
@@ -9,7 +11,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { Header } from "tar";
-import { cleanUpdateEnvironment, effectiveUpdatePolicy, privateDirectory, quarantineCachedRelease, selectCachedRelease as selectRuntimeCachedRelease, supportsNode, updateEligibility, updateLeaseSlot, updateTarget, UPDATE_INTERVAL_MS, writeUpdateJSON } from "../dist/self-update.js";
+import { cleanUpdateEnvironment, effectiveUpdatePolicy, privateDirectory, quarantineCachedRelease, recordCachedActivation, selectActivatedRelease, selectCachedRelease as selectRuntimeCachedRelease, supportsNode, updateEligibility, updateLeaseSlot, updateTarget, UPDATE_INTERVAL_MS, writeUpdateJSON } from "../dist/self-update.js";
 import { registryURL, runUpdate, unpackArchive, UPDATE_LIMITS } from "../dist/update-worker.js";
 import { executeSelectedCLI } from "../dist/entry-runner.js";
 
@@ -40,7 +42,7 @@ async function temporary(t) {
   return directory;
 }
 
-function fixture({ mutateRoot, mutateLock, corruptDependency, foreignRoot = false } = {}) {
+function fixture({ mutateRoot, mutateLock, corruptDependency, foreignRoot = false, release = version } = {}) {
   const graph = [
     { path: "node_modules/fixture", name: "fixture", version: "1.0.0", dependencies: { nested: "^1.0.0" }, content: "import value from 'nested'; export default value;" },
     { path: "node_modules/fixture/node_modules/nested", name: "nested", version: "1.0.0", content: "export default 'locked nested dependency';" },
@@ -56,16 +58,16 @@ function fixture({ mutateRoot, mutateLock, corruptDependency, foreignRoot = fals
     bodies.set(resolved, corruptDependency && index === 1 ? tarball({ "package.json": JSON.stringify(pkg), "index.js": "export default 'tampered valid archive';" }) : archive);
     return { path: item.path, name: item.name, version: item.version, resolved, integrity: sri(archive), optional: item.optional, os: item.os, cpu: item.cpu };
   });
-  const lock = { version: 1, bootstrap: 1, name: "@heyditto/cli", packageVersion: version, packages };
+  const lock = { version: 1, bootstrap: 1, name: "@heyditto/cli", packageVersion: release, packages };
   mutateLock?.(lock);
-  const pkg = { name: "@heyditto/cli", version, type: "module", bin: { heyditto: "dist/entry.js", ditto: "dist/entry.js" }, engines: { node: ">=22" }, dependencies: { fixture: "^1.0.0" }, optionalDependencies: { "@lydell/node-pty": "1.2.0-beta.15" }, scripts: { postinstall: "touch INSTALL-SCRIPT-RAN" } };
+  const pkg = { name: "@heyditto/cli", version: release, type: "module", bin: { heyditto: "dist/entry.js", ditto: "dist/entry.js" }, engines: { node: ">=22" }, dependencies: { fixture: "^1.0.0" }, optionalDependencies: { "@lydell/node-pty": "1.2.0-beta.15" }, scripts: { postinstall: "touch INSTALL-SCRIPT-RAN" } };
   const files = {
     "package.json": JSON.stringify(pkg), "dist/update-lock.json": JSON.stringify(lock),
     "dist/entry.js": "import './cli.js';", "dist/update-worker.js": "// fixture finite worker",
-    "dist/cli.js": `import dep from 'fixture'; import pty from '@lydell/node-pty'; process.stdout.write(JSON.stringify({version:'${version}',dep,pty})+'\\n');`,
+    "dist/cli.js": `import dep from 'fixture'; import pty from '@lydell/node-pty'; process.stdout.write(JSON.stringify({version:'${release}',dep,pty})+'\\n');`,
   };
   mutateRoot?.(files);
-  const rootArchive = tarball(files), tarURL = foreignRoot ? "https://example.invalid/package.tgz" : `${registry}/@heyditto/cli/-/cli-${version}.tgz`;
+  const rootArchive = tarball(files), tarURL = foreignRoot ? "https://example.invalid/package.tgz" : `${registry}/@heyditto/cli/-/cli-${release}.tgz`;
   bodies.set(tarURL, rootArchive);
   bodies.set(latest, Buffer.from(JSON.stringify({ ...pkg, repository: { url: "git+https://github.com/ditto-assistant/ditto-cli.git" }, dist: { tarball: tarURL, integrity: sri(rootArchive) } })));
   const fetch = async (url, init) => {
@@ -85,7 +87,7 @@ const health = cache => readFile(path.join(cache, "health.json"), "utf8").then(J
 test("locked update verifies every dependency, selects the platform prebuilt, and changes only the next invocation", async t => {
   const cache = path.join(await temporary(t), "updates"), service = fixture();
   await update(cache, service);
-  assert.equal((await health(cache)).status, "installed for next invocation");
+  assert.equal((await health(cache)).status, "staged for next enabled invocation");
   assert.equal((await pointer(cache)).version, version);
   assert.equal(service.requests.length, 6, "metadata, root, and four compatible dependencies are fetched once");
   assert.ok(!service.requests.some(url => url.endsWith("dependency-4.tgz")));
@@ -301,6 +303,7 @@ test("an explicit manual check can update while auto-updates are disabled but ca
   await writeUpdateJSON(path.join(cache, "settings.json"), { enabled: false });
   await update(cache, service, { manual: true });
   assert.equal((await pointer(cache)).version, version);
+  assert.equal((await selectActivatedRelease(cache, "2.33.0", process.versions.node, fixtureTarget)).version, version, "explicit manual checks activate without enabling automatic updates");
   assert.deepEqual(JSON.parse(await readFile(path.join(cache, "settings.json"), "utf8")), { enabled: false });
   const pinnedCache = path.join(await temporary(t), "updates"), pinned = fixture();
   await writeUpdateJSON(path.join(pinnedCache, "settings.json"), { pinnedVersion: "2.33.0" });
@@ -370,7 +373,7 @@ test("sandbox staging preserves the installed platform's real prebuilt PTY and e
   bodies.set(latest, Buffer.from(JSON.stringify({ ...pkg, repository: { url: "git+https://github.com/ditto-assistant/ditto-cli.git" }, dist: { tarball: url, integrity: sri(archive) } })));
   const cache = path.join(await temporary(t), "updates");
   await runUpdate({ cache, currentVersion: "2.33.0", fetch: async value => new Response(bodies.get(String(value)) ?? null, { status: bodies.has(String(value)) ? 200 : 404 }) });
-  assert.equal((await health(cache)).status, "installed for next invocation", (await health(cache)).detail);
+  assert.equal((await health(cache)).status, "staged for next enabled invocation", (await health(cache)).detail);
   const selected = await selectRuntimeCachedRelease(cache, "2.33.0", {});
   const result = spawnSync(process.execPath, [path.join(selected.root, "dist/entry.js")], { cwd: cache, encoding: "utf8", env: {}, timeout: 5000 });
   assert.equal(result.status, 0, result.stderr); assert.equal(JSON.parse(result.stdout).pty, true);
@@ -383,7 +386,7 @@ test("a fully verified version survives a crash before pointer publication and i
   await rm(path.join(cache, "current.json"));
   const priorRequests = service.requests.length;
   await update(cache, service, { now: () => now + UPDATE_INTERVAL_MS });
-  assert.equal((await health(cache)).status, "selected verified cached version");
+  assert.equal((await health(cache)).status, "staged verified cached version");
   assert.equal(service.requests.length - priorRequests, 1, "the registry identity is checked but verified dependencies are not downloaded again");
   assert.equal((await pointer(cache)).version, version); assert.deepEqual(await readFile(path.join(selected.root, "node_modules/fixture/index.js")), before);
 });
@@ -483,4 +486,53 @@ fs.readFile=async function(file,...args){const result=await read.call(this,file,
     if (scenario === "disable") { assert.equal(firstPolicy.enabled, false); assert.equal(otherPolicy.enabled, false); }
     else { assert.equal(firstPolicy.pinnedVersion, currentPackageVersion); assert.equal(otherPolicy.pinnedVersion, currentPackageVersion); }
   }
+});
+
+test("a pointer rename gated after its final policy check cannot activate a candidate after disable acknowledges", async t => {
+  const directory = await temporary(t), config = path.join(directory, "config"), cache = runtimeCache(config);
+  const globalRoot = path.join(directory, "prefix/lib/node_modules/@heyditto/cli"), harness = path.join(directory, "launch.mjs");
+  await mkdir(globalRoot, { recursive: true });
+  await writeFile(harness, `import {startupUpdate} from ${JSON.stringify(new URL("../dist/self-update.js", import.meta.url).href)}; const invoked=process.argv[2]; process.argv=[process.execPath,invoked+'/dist/entry.js','--version']; console.log(JSON.stringify({root:await startupUpdate(invoked)}));`);
+  const launch = (extra = {}) => {
+    const result = spawnSync(process.execPath, [harness, globalRoot], { cwd: directory, env: { DITTO_CONFIG_DIR: config, ...extra }, encoding: "utf8", timeout: 8000 });
+    assert.equal(result.status, 0, result.stderr); return JSON.parse(result.stdout).root;
+  };
+  const native = { platform: process.platform, arch: process.arch, libc: runtimeTarget.split("-")[2] };
+  await update(cache, fixture(), native);
+  const priorRoot = path.join(cache, "versions", version, "package"); assert.equal(launch(), priorRoot);
+  const later = `${version.split(".")[0]}.${Number(version.split(".")[1]) + 1}.0`;
+  let reached, release;
+  const atRename = new Promise(resolve => reached = resolve), proceed = new Promise(resolve => release = resolve);
+  const rename = fs.rename;
+  fs.rename = async (from, to) => { if (to === path.join(cache, "current.json")) { reached(); await proceed; } return rename(from, to); };
+  syncBuiltinESMExports();
+  const worker = update(cache, fixture({ release: later }), { ...native, now: () => Date.now() + 3 * UPDATE_INTERVAL_MS });
+  try {
+    await Promise.race([atRename, delay(8000, undefined, { ref: false }).then(() => { throw new Error("worker never reached candidate rename"); })]);
+    const disabled = spawnSync(process.execPath, [path.join(project, "dist/entry.js"), "self-update", "disable", "--output", "json"], { cwd: directory, env: { DITTO_CONFIG_DIR: config }, encoding: "utf8", timeout: 8000 });
+    assert.equal(disabled.status, 0, disabled.stderr); assert.equal(JSON.parse(disabled.stdout).enabled, false);
+    assert.equal((await pointer(cache)).version, version, "disable acknowledges before the held candidate publication");
+  } finally { release(); await worker; fs.rename = rename; syncBuiltinESMExports(); }
+  assert.equal((await pointer(cache)).version, later, "the test must actually exercise late pointer publication");
+  assert.equal(launch(), priorRoot, "disabled startup must retain the actually selected version, not the late candidate");
+  await writeUpdateJSON(path.join(config, "updates/enabled.json"), { enabled: true });
+  assert.equal(launch({ DITTO_CLI_AUTO_UPDATE: "0" }), priorRoot, "invocation disable also ignores an unactivated candidate");
+  const laterRoot = path.join(cache, "versions", later, "package"); assert.equal(launch(), laterRoot, "enabled startup selects the verified candidate");
+  await writeUpdateJSON(path.join(config, "updates/enabled.json"), { enabled: false });
+  assert.equal(launch(), laterRoot, "a later disable retains the version a launch actually selected");
+});
+
+test("activation markers are immutable, target-bound and cannot turn an invalid or unverified bundle into executable code", async t => {
+  const cache = path.join(await temporary(t), "updates"); await update(cache, fixture());
+  assert.equal(await selectActivatedRelease(cache, "2.33.0", process.versions.node, fixtureTarget), undefined, "background staging alone is not activation");
+  await Promise.all([recordCachedActivation(cache, version, fixtureTarget), recordCachedActivation(cache, version, fixtureTarget)]);
+  const marker = path.join(cache, "activated", `${version}.json`), before = await readFile(marker);
+  await recordCachedActivation(cache, version, fixtureTarget); assert.deepEqual(await readFile(marker), before);
+  assert.equal((await selectActivatedRelease(cache, "2.33.0", process.versions.node, fixtureTarget)).version, version);
+  assert.equal(await selectActivatedRelease(cache, "2.33.0", process.versions.node, "linux-arm64-glibc"), undefined);
+  await recordCachedActivation(cache, "999.0.0", fixtureTarget);
+  assert.equal((await selectActivatedRelease(cache, "2.33.0", process.versions.node, fixtureTarget)).version, version, "an unverified newer marker cannot grant execution");
+  await writeFile(marker, JSON.stringify({ version, target: "linux-arm64-glibc" }));
+  assert.equal(await selectActivatedRelease(cache, "2.33.0", process.versions.node, fixtureTarget), undefined);
+  await assert.rejects(recordCachedActivation(cache, version, fixtureTarget), /invalid cached activation/);
 });
