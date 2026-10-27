@@ -46,6 +46,16 @@ export function planClaude(input: PlanInput): HarnessPlan {
   };
   if (input.model) envSet.ANTHROPIC_MODEL = input.model;
   if (input.mcp) envSet[MCP_KEY_ENV] = input.apiKey;
+  if (input.mcpOnly) {
+    // Endpoint keys are only MCP credentials in this mode. Never forward one
+    // to Anthropic or inherit a parent launch's inference gateway settings.
+    return {
+      command: "claude", args: finalArgs,
+      envSet: input.mcp ? { [MCP_KEY_ENV]: input.apiKey } : {},
+      envUnset: ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_CUSTOM_HEADERS", "ANTHROPIC_MODEL", ...(input.env.ANTHROPIC_BASE_URL && input.env.ANTHROPIC_BASE_URL !== "https://api.anthropic.com" ? ["ANTHROPIC_API_KEY"] : [])],
+      installHint: "install Claude Code and sign in with `claude auth login`",
+    };
+  }
   // Claude Code's server-side auto-mode classifier needs the dangerous-tool-use
   // beta and `safeguards` field, which the router does not forward; a rejection
   // denies every auto-mode tool use. Decide locally unless the caller chose.

@@ -7,6 +7,8 @@ import type { Harness } from "./types.js";
 export interface SessionRecord {
   id: string;
   harness: Harness;
+  mcpOnly?: boolean;
+  remoteTransport?: "cli" | "channels";
   endpointId: string;
   endpointSlug: string;
   /** Last key minted for this session; revoked on exit unless --keep-key. */
