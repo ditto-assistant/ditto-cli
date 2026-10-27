@@ -388,6 +388,11 @@ test("planClaude: resume, continue, model and header merging", () => {
   assert.equal(withModel.envSet.ANTHROPIC_MODEL, "opus");
   const merged = planClaude({ ...base, env: { ANTHROPIC_CUSTOM_HEADERS: "X-Team: a" } });
   assert.equal(merged.envSet.ANTHROPIC_CUSTOM_HEADERS, "X-Team: a\nX-Ditto-Session-Id: s1");
+  // Launched from inside another heyditto session: the parent's session id and
+  // tool surface are its own, not the caller's. Its deny rules only tighten.
+  const nested = planClaude({ ...base, env: { ANTHROPIC_CUSTOM_HEADERS: "X-Team: a\nX-Ditto-Session-Id: parent\nx-ditto-tool-surface: mcp\nX-Ditto-Tool-Deny: gmail__*" } });
+  assert.equal(nested.envSet.ANTHROPIC_CUSTOM_HEADERS, "X-Team: a\nX-Ditto-Tool-Deny: gmail__*\nX-Ditto-Session-Id: s1");
+  assert.equal(planClaude({ ...base, env: { ANTHROPIC_CUSTOM_HEADERS: "X-Ditto-Session-Id: parent" } }).envSet.ANTHROPIC_CUSTOM_HEADERS, "X-Ditto-Session-Id: s1");
   assert.equal(childEnv(merged, { ANTHROPIC_API_KEY: "old", HOME: "/h" }).ANTHROPIC_API_KEY, undefined);
 });
 

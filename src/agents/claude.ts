@@ -35,7 +35,7 @@ export function planClaude(input: PlanInput): HarnessPlan {
 
   const deny = input.toolDeny?.length ? `${TOOL_DENY_HEADER}: ${input.toolDeny.join(",")}` : undefined;
   const surface = input.mcp ? `${TOOL_SURFACE_HEADER}: ${TOOL_SURFACE_MCP}` : undefined;
-  const headers = [input.env.ANTHROPIC_CUSTOM_HEADERS?.trim(), `${SESSION_HEADER}: ${input.sessionId}`, deny, surface]
+  const headers = [inheritedHeaders(input.env.ANTHROPIC_CUSTOM_HEADERS), `${SESSION_HEADER}: ${input.sessionId}`, deny, surface]
     .filter((h): h is string => Boolean(h))
     .join("\n");
 
@@ -87,4 +87,20 @@ export function liftResumeFlags(args: string[]): { args: string[]; resume?: stri
     else out.push(a);
   }
   return { args: out, ...(resume !== undefined ? { resume } : {}), ...(cont ? { continue: true } : {}) };
+}
+
+/**
+ * Headers that describe one launch. A `heyditto claude` started inside another
+ * inherits the parent's, and a second session id would file the child's turns
+ * under the parent's thread, and a stale tool surface would leave a `--no-mcp`
+ * child with no tools at all. Inherited deny rules stay: they only tighten.
+ */
+const LAUNCH_HEADERS = new Set([SESSION_HEADER, TOOL_SURFACE_HEADER].map((h) => h.toLowerCase()));
+
+/** The caller's own custom headers, minus a parent launch's. */
+function inheritedHeaders(raw: string | undefined): string | undefined {
+  const kept = (raw ?? "")
+    .split("\n")
+    .filter((line) => line.trim() && !LAUNCH_HEADERS.has(line.split(":", 1)[0].trim().toLowerCase()));
+  return kept.length ? kept.join("\n").trim() : undefined;
 }
