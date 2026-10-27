@@ -322,6 +322,13 @@ reviews the index bytes, including when a file also has unstaged edits.
 `main`. It cannot be combined with `--staged`. No commit, push, PR or index
 mutation is required.
 
+Absent tracked files marked skip-worktree in a sparse checkout use their pinned
+index bytes; materialized files keep their working bytes. Ordinary unflagged
+deletions remain deletions. A collapsed sparse index is rejected before upload:
+run `git sparse-checkout reapply --no-sparse-index` manually before retrying.
+Capture never expands the index, materializes sparse files or fetches missing
+objects. Required unavailable blobs must be supplied manually before review.
+
 `--preview` is offline: it shows the selected paths, snapshot digest, file and
 byte counts, capture time, exclusions and omitted context without logging in or
 uploading. When the server advertises anchored snapshots and a local origin

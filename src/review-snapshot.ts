@@ -29,7 +29,7 @@ export interface ReviewSnapshot {
   baseDeletedPaths?: string[];
   headDeletedPaths?: string[];
 }
-interface GitEntry { oid: string; mode: string }
+interface GitEntry { oid: string; mode: string; skipWorktree?: boolean }
 export interface SnapshotOptions { staged?: boolean; base?: string; cwd?: string; signal?: AbortSignal; allowAnchor?: boolean }
 export interface SnapshotCapture { root: string; snapshot: ReviewSnapshot; bytes: number; captureMs: number; fallbackReason?: string }
 const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
@@ -93,15 +93,17 @@ function safePath(file: string): void {
 
 async function entries(cwd: string, ref: string | undefined, index: boolean, signal?: AbortSignal): Promise<Map<string, GitEntry>> {
   if (!index && !ref) return new Map();
-  const rows = names(await reviewGit(cwd, index ? ["ls-files", "--stage", "-z"] : ["ls-tree", "-rz", "--full-tree", ref!], undefined, signal));
+  const rows = names(await reviewGit(cwd, index ? ["ls-files", "--stage", "-t", "--sparse", "-z"] : ["ls-tree", "-rz", "--full-tree", ref!], undefined, signal));
   const out = new Map<string, GitEntry>();
   for (const row of rows) {
     const tab = row.indexOf("\t");
     if (tab < 0) throw new Error("invalid git tree entry");
     const fields = row.slice(0, tab).split(" "), file = row.slice(tab + 1);
+    const tag = index ? fields.shift() : undefined;
+    if (index && ["040000", "40000"].includes(fields[0])) throw new Error("local review cannot capture collapsed sparse-index directories; run git sparse-checkout reapply --no-sparse-index manually before retrying (capture never expands the index)");
     safePath(file);
     if (index && fields[2] !== "0") throw new Error("resolve unmerged index entries before reviewing a working diff");
-    out.set(file, { mode: fields[0], oid: fields[index ? 1 : 2] });
+    out.set(file, { mode: fields[0], oid: fields[index ? 1 : 2], ...(tag === "S" ? { skipWorktree: true } : {}) });
   }
   return out;
 }
@@ -140,7 +142,8 @@ class SkipFile extends Error {}
 
 /** Reject symlinks (including parent directories); do not follow them outside
  * the checkout. Verify the opened inode and stat again after reading. */
-async function workingFile(root: string, file: string, read: boolean): Promise<{ size: number; mode: "100644" | "100755"; data?: Buffer } | undefined> {
+interface WorkingFile { size: number; mode: "100644" | "100755"; data?: Buffer }
+async function workingFile(root: string, file: string, read: boolean, absent?: () => void): Promise<WorkingFile | undefined> {
   const absolute = path.join(root, file);
   let before;
   try {
@@ -153,7 +156,8 @@ async function workingFile(root: string, file: string, read: boolean): Promise<{
     }
     before = await lstat(absolute);
   } catch (error) {
-    if (["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) return undefined;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") { absent?.(); return undefined; }
+    if ((error as NodeJS.ErrnoException).code === "ENOTDIR") return undefined;
     throw error;
   }
   if (before.isDirectory()) return undefined; // A tracked file was replaced by a directory.
@@ -171,6 +175,16 @@ async function workingFile(root: string, file: string, read: boolean): Promise<{
     if (!resolved.startsWith(root + path.sep) || named.isSymbolicLink() || named.dev !== opened.dev || named.ino !== opened.ino || after.size !== opened.size || after.mtimeMs !== opened.mtimeMs || after.ctimeMs !== opened.ctimeMs || data.length !== opened.size) throw new Error(`file changed while capturing ${file}; retry the review`);
     return { size: data.length, mode, data };
   } finally { await handle.close(); }
+}
+
+async function selectedHead(root: string, file: string, entry: GitEntry | undefined, read: boolean): Promise<{ working?: WorkingFile; index?: GitEntry }> {
+  let absent = false;
+  const working = await workingFile(root, file, read, () => { absent = true; });
+  if (entry?.skipWorktree && !working) {
+    if (absent) return { index: entry };
+    throw new Error(`selected skip-worktree path is replaced by a non-file; resolve it manually before retrying: ${file}`);
+  }
+  return { working };
 }
 
 function textFile(data: Buffer): boolean {
@@ -220,6 +234,7 @@ async function captureAnchored(root: string, baseSha: string | undefined, base: 
   catch (error) { if (options.signal?.aborted) throw error; throw new AnchorUnavailable("the local origin anchor has no available common baseline"); }
   const anchor = await entries(root, anchorSha, false, options.signal), head = new Map(base), working = new Map<string, Buffer>();
   let workingBytes = 0;
+  const logicalIndexHeads = new Set<string>();
   for (const file of changedPaths) {
     if (options.signal?.aborted) throw options.signal.reason;
     if (base.has(file) && !regularEntry(base.get(file))) throw new AnchorUnavailable("a selected symlink or submodule requires bounded capture");
@@ -227,9 +242,11 @@ async function captureAnchored(root: string, baseSha: string | undefined, base: 
     const staged = index.get(file);
     if (staged && !regularEntry(staged)) throw new AnchorUnavailable("a selected symlink or submodule requires bounded capture");
     if (options.staged) { if (staged) head.set(file, staged); else head.delete(file); continue; }
-    let value;
-    try { value = await workingFile(root, file, true); }
+    let source;
+    try { source = await selectedHead(root, file, staged, true); }
     catch (error) { if (error instanceof SkipFile) throw new AnchorUnavailable("a selected path cannot be represented as a regular anchored file"); throw error; }
+    if (source.index) { head.set(file, source.index); logicalIndexHeads.add(file); continue; }
+    const value = source.working;
     if (!value?.data) { head.delete(file); continue; }
     if (!textFile(value.data)) throw new AnchorUnavailable("a selected binary or non-UTF-8 file requires bounded capture");
     workingBytes += value.data.length;
@@ -243,7 +260,7 @@ async function captureAnchored(root: string, baseSha: string | undefined, base: 
   const baseDeletedPaths = deleted(base), headDeletedPaths = deleted(head);
   if ([baseOverlay, headOverlay, baseDeletedPaths, headDeletedPaths].some(list => list.length > LOCAL_REVIEW_MAX_FILES)) throw new AnchorUnavailable("committed or selected overlays exceed anchored file limits");
   if ([...baseOverlay, ...headOverlay].some(([, entry]) => !regularEntry(entry))) throw new AnchorUnavailable("a committed binary, symlink or submodule overlay requires bounded capture");
-  const policyIds = [...new Set(changedPaths.flatMap(file => [base.get(file), ...(options.staged ? [index.get(file)] : [])]).filter(regularEntry).map(entry => entry.oid))];
+  const policyIds = [...new Set(changedPaths.flatMap(file => [base.get(file), ...(options.staged || logicalIndexHeads.has(file) ? [index.get(file)] : [])]).filter(regularEntry).map(entry => entry.oid))];
   const ids = [...new Set([...baseOverlay, ...headOverlay].map(([, entry]) => entry.oid).concat(policyIds).filter(oid => !working.has(oid)))];
   const sizes = await objectSizes(root, ids, options.signal);
   if (policyIds.reduce((bytes, oid) => bytes + (working.get(oid)?.length ?? sizes.get(oid)!), 0) > LOCAL_REVIEW_MAX_BYTES) throw new AnchorUnavailable("selected baseline bytes exceed the anchored source-policy bound");
@@ -297,20 +314,22 @@ export async function captureReviewSnapshot(options: SnapshotOptions = {}): Prom
   try { return { root, ...await captureAnchored(root, baseSha, base, index, headPaths, changedPaths, honorFileMode, options), captureMs: performance.now() - started }; }
   catch (error) { if (!(error instanceof AnchorUnavailable)) throw error; fallbackReason = error.message; }
   const regular = (entry: GitEntry | undefined) => !!entry && (entry.mode === "100644" || entry.mode === "100755");
-  const ids = [...new Set([...base.values(), ...(options.staged ? index.values() : [])].filter(regular).map(e => e.oid))];
+  const indexSources = options.staged ? [...index.values()] : [...index].filter(([file, entry]) => changed.has(file) && entry.skipWorktree).map(([, entry]) => entry);
+  const ids = [...new Set([...base.values(), ...indexSources].filter(regular).map(e => e.oid))];
   const sizes = await objectSizes(root, ids, options.signal);
-  const metadata = new Map<string, { baseSize: number; headSize: number }>();
+  const metadata = new Map<string, { baseSize: number; headSize: number; indexHead: boolean }>();
   const skipped: ReviewSnapshot["skipped"] = [];
   for (const file of all) {
     if (options.signal?.aborted) throw options.signal.reason;
     const b = base.get(file), h = index.get(file);
     if ((b && !regular(b)) || (headPaths.has(file) && h && !regular(h))) { skipped.push({ path: file, reason: "symlink or submodule" }); continue; }
     try {
-      const working = !options.staged && changed.has(file) && headPaths.has(file) ? await workingFile(root, file, false) : undefined;
+      const source = !options.staged && changed.has(file) && headPaths.has(file) ? await selectedHead(root, file, h, false) : undefined;
+      const indexHead = !!source?.index;
       // Unchanged surrounding context intentionally comes from the pinned
       // comparison tree. Avoid thousands of live reads (and attribute/filter
       // execution) for bytes Git did not select as changes.
-      metadata.set(file, { baseSize: b ? sizes.get(b.oid)! : 0, headSize: options.staged ? (h ? sizes.get(h.oid)! : 0) : changed.has(file) ? (working?.size ?? 0) : b ? sizes.get(b.oid)! : 0 });
+      metadata.set(file, { baseSize: b ? sizes.get(b.oid)! : 0, headSize: options.staged || indexHead ? (h ? sizes.get(h.oid)! : 0) : changed.has(file) ? (source?.working?.size ?? 0) : b ? sizes.get(b.oid)! : 0, indexHead });
     } catch (error) { if (error instanceof SkipFile) skipped.push({ path: file, reason: error.message }); else throw error; }
   }
   const distance = (file: string): number => {
@@ -329,7 +348,7 @@ export async function captureReviewSnapshot(options: SnapshotOptions = {}): Prom
     }
     selected.push(file); total += size.baseSize + size.headSize; baseCount = nextBase; headCount = nextHead;
   }
-  const selectedIds = [...new Set(selected.flatMap(file => [base.get(file), ...(options.staged ? [index.get(file)] : [])].filter((e): e is GitEntry => regular(e)).map(e => e.oid)))];
+  const selectedIds = [...new Set(selected.flatMap(file => [base.get(file), ...(options.staged || metadata.get(file)!.indexHead ? [index.get(file)] : [])].filter((e): e is GitEntry => regular(e)).map(e => e.oid)))];
   const content = await blobs(root, selectedIds, options.signal);
   const baseFiles: SnapshotFile[] = [], headFiles: SnapshotFile[] = [];
   for (const file of selected) {
@@ -337,9 +356,13 @@ export async function captureReviewSnapshot(options: SnapshotOptions = {}): Prom
     const before = b ? content.get(b.oid)! : undefined;
     let after: Buffer | undefined, headMode: SnapshotFile["mode"] = "100644";
     try {
-      if (options.staged) { after = h ? content.get(h.oid) : undefined; headMode = h?.mode as SnapshotFile["mode"] ?? "100644"; }
+      if (options.staged || metadata.get(file)!.indexHead) { after = h ? content.get(h.oid) : undefined; headMode = h?.mode as SnapshotFile["mode"] ?? "100644"; }
       else if (!changed.has(file)) { after = before; headMode = b?.mode as SnapshotFile["mode"] ?? "100644"; }
-      else if (headPaths.has(file)) { const value = await workingFile(root, file, true); after = value?.data; headMode = honorFileMode ? value?.mode ?? "100644" : h?.mode as SnapshotFile["mode"] ?? "100644"; }
+      else if (headPaths.has(file)) {
+        const source = await selectedHead(root, file, h, true);
+        if (source.index) throw new Error(`skip-worktree file became absent during capture; retry the review: ${file}`);
+        const value = source.working; after = value?.data; headMode = honorFileMode ? value?.mode ?? "100644" : h?.mode as SnapshotFile["mode"] ?? "100644";
+      }
     } catch (error) { if (error instanceof SkipFile) { skipped.push({ path: file, reason: error.message }); continue; } throw error; }
     if ((before && !textFile(before)) || (after && !textFile(after))) { skipped.push({ path: file, reason: "binary or non-UTF-8 file" }); continue; }
     if (before) baseFiles.push({ path: file, contentBase64: before.toString("base64"), mode: b!.mode as SnapshotFile["mode"] });

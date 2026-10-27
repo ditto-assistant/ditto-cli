@@ -8,13 +8,14 @@ import { captureReviewSnapshot, snapshotDigest } from "../dist/review-snapshot.j
 import { gitBlobOID, gitTreeOID } from "../dist/review-git-tree.js";
 
 const git = (cwd, ...args) => {
-  const out = spawnSync("git", args, { cwd, encoding: "utf8", env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" } });
+  const out = spawnSync("git", args, { cwd, encoding: "utf8", env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_OPTIONAL_LOCKS: "0" } });
   assert.equal(out.status, 0, out.stderr); return out.stdout.trim();
 };
 const write = async (root, file, bytes) => { await mkdir(path.dirname(path.join(root, file)), { recursive: true }); await writeFile(path.join(root, file), bytes); };
 async function fixture(t, files = { "app.ts": "anchor\n", "removed.ts": "old\n", "context/caller.ts": "caller\n" }) {
   const root = await mkdtemp(path.join(os.tmpdir(), "ditto-anchor-review-")); t.after(() => rm(root, { recursive: true, force: true }));
   git(root, "init", "-b", "main"); git(root, "config", "user.name", "Anchor fixture"); git(root, "config", "user.email", "anchor@example.test");
+  git(root, "config", "core.hooksPath", "/dev/null");
   git(root, "remote", "add", "origin", "git@github.com:acme/project.git");
   for (const [file, bytes] of Object.entries(files)) await write(root, file, bytes);
   git(root, "add", "."); git(root, "commit", "-m", "anchor");
@@ -88,4 +89,100 @@ test("unsupported selected or committed overlays fall back without claiming clou
   git(root, "update-ref", "-d", "refs/remotes/origin/main");
   const noAnchor = await captureReviewSnapshot({ cwd: root, allowAnchor: true });
   assert.equal(noAnchor.snapshot.version, 1); assert.match(noAnchor.fallbackReason, /no locally known/);
+});
+
+async function preservesGit(root, action) {
+  const index = await readFile(path.join(root, ".git/index")), config = await readFile(path.join(root, ".git/config"));
+  const refs = git(root, "for-each-ref", "--format=%(refname) %(objectname)");
+  try { return await action(); }
+  finally {
+    assert.deepEqual(await readFile(path.join(root, ".git/index")), index, "capture must not rewrite the index");
+    assert.deepEqual(await readFile(path.join(root, ".git/config")), config, "capture must not rewrite config");
+    assert.equal(git(root, "for-each-ref", "--format=%(refname) %(objectname)"), refs, "capture must not change refs");
+  }
+}
+const sparse = root => { git(root, "sparse-checkout", "init", "--cone", "--no-sparse-index"); git(root, "sparse-checkout", "set", "kept"); };
+
+test("sparse --base capture keeps absent skip-worktree committed bytes and the materialized tree identity", async t => {
+  const { root } = await fixture(t, { "kept/main.ts": "kept\n", "outside/changed.ts": "before\n", "outside/deleted.ts": "removed\n" });
+  git(root, "switch", "-c", "feature"); await write(root, "outside/changed.ts", "committed after\n"); await write(root, "outside/added.ts", "committed addition\n");
+  git(root, "rm", "outside/deleted.ts"); git(root, "add", "."); git(root, "commit", "-m", "unpushed outside changes");
+  const actualHead = git(root, "rev-parse", "HEAD^{tree}");
+  const materialized = await captureReviewSnapshot({ cwd: root, base: "main", allowAnchor: true });
+  const materializedV1 = await captureReviewSnapshot({ cwd: root, base: "main", allowAnchor: false });
+  sparse(root); assert.match(git(root, "ls-files", "-t", "outside/changed.ts"), /^S /);
+  await assert.rejects(readFile(path.join(root, "outside/changed.ts")), { code: "ENOENT" });
+  await preservesGit(root, async () => {
+    const captured = await captureReviewSnapshot({ cwd: root, base: "main", allowAnchor: true });
+    assert.equal(captured.snapshot.version, 2); assert.equal(captured.snapshot.headTreeSha, actualHead);
+    assert.equal(captured.snapshot.digest, materialized.snapshot.digest, "sparse and materialized logical state must be identical");
+    assert.deepEqual(captured.snapshot.headDeletedPaths, ["outside/deleted.ts"]);
+    assert.equal(content(captured.snapshot.headFiles, "outside/changed.ts"), "committed after\n");
+    const legacy = await captureReviewSnapshot({ cwd: root, base: "main", allowAnchor: false });
+    assert.equal(legacy.snapshot.digest, materializedV1.snapshot.digest, "bounded fallback must preserve the same logical bytes");
+  });
+  await assert.rejects(readFile(path.join(root, "outside/changed.ts")), { code: "ENOENT" }, "capture must not materialize sparse files");
+});
+
+test("staged sparse bytes remain distinct from materialized working edits", async t => {
+  const { root } = await fixture(t, { "kept/main.ts": "kept\n", "outside/changed.ts": "before\n" }); sparse(root);
+  await write(root, ".git/staged-source", "hidden staged bytes\n");
+  const oid = git(root, "hash-object", "-w", ".git/staged-source");
+  git(root, "update-index", "--cacheinfo", `100755,${oid},outside/changed.ts`); git(root, "update-index", "--skip-worktree", "outside/changed.ts");
+  const expectedIndex = git(root, "write-tree");
+  await preservesGit(root, async () => {
+    const staged = await captureReviewSnapshot({ cwd: root, staged: true, allowAnchor: true });
+    const working = await captureReviewSnapshot({ cwd: root, allowAnchor: true });
+    assert.equal(staged.snapshot.headTreeSha, expectedIndex); assert.equal(working.snapshot.headTreeSha, expectedIndex);
+    assert.equal(content(working.snapshot.headFiles, "outside/changed.ts"), "hidden staged bytes\n");
+    assert.equal(working.snapshot.headFiles.find(file => file.path === "outside/changed.ts").mode, "100755");
+  });
+  await write(root, "outside/changed.ts", "materialized working bytes\n");
+  const working = await preservesGit(root, () => captureReviewSnapshot({ cwd: root, allowAnchor: true }));
+  const staged = await preservesGit(root, () => captureReviewSnapshot({ cwd: root, staged: true, allowAnchor: true }));
+  assert.equal(content(working.snapshot.headFiles, "outside/changed.ts"), "materialized working bytes\n");
+  assert.equal(content(staged.snapshot.headFiles, "outside/changed.ts"), "hidden staged bytes\n");
+  git(root, "add", "--sparse", "outside/changed.ts"); assert.equal(working.snapshot.headTreeSha, git(root, "write-tree"));
+});
+
+test("ordinary unflagged deletion in a sparse checkout remains reviewable", async t => {
+  const { root } = await fixture(t, { "kept/main.ts": "delete this\n", "outside/context.ts": "hidden context\n" }); sparse(root);
+  assert.match(git(root, "ls-files", "-t", "kept/main.ts"), /^H /); await rm(path.join(root, "kept/main.ts"));
+  const captured = await preservesGit(root, () => captureReviewSnapshot({ cwd: root, allowAnchor: true }));
+  assert.equal(captured.snapshot.version, 2); assert.deepEqual(captured.snapshot.headDeletedPaths, ["kept/main.ts"]);
+  git(root, "add", "-u"); assert.equal(captured.snapshot.headTreeSha, git(root, "write-tree"));
+});
+
+test("missing selected sparse blobs abort before upload without fetching or rewriting Git state", async t => {
+  const { root } = await fixture(t, { "kept/main.ts": "kept\n", "outside/changed.ts": "before\n" });
+  git(root, "switch", "-c", "feature"); await write(root, "outside/changed.ts", "unique committed sparse bytes\n"); git(root, "add", "."); git(root, "commit", "-m", "outside change"); sparse(root);
+  const oid = git(root, "rev-parse", "HEAD:outside/changed.ts"), objectFile = path.join(root, ".git/objects", oid.slice(0, 2), oid.slice(2));
+  await rm(objectFile);
+  git(root, "config", "core.repositoryformatversion", "1"); git(root, "config", "extensions.partialClone", "origin"); git(root, "config", "remote.origin.promisor", "true");
+  git(root, "config", "remote.origin.url", path.join(root, "missing-local-promisor"));
+  const trace = path.join(os.tmpdir(), path.basename(root) + "-trace.json"), previousTrace = process.env.GIT_TRACE2_EVENT;
+  t.after(() => rm(trace, { force: true })); process.env.GIT_TRACE2_EVENT = trace;
+  const fetches = async () => (await readFile(trace, "utf8")).trim().split("\n").map(line => JSON.parse(line)).filter(event => event.event === "child_start" && event.argv?.includes("fetch"));
+  try {
+    for (const allowAnchor of [true, false]) await preservesGit(root, async () => {
+      await assert.rejects(captureReviewSnapshot({ cwd: root, base: "main", allowAnchor }), /available Git blob objects|missing.*object/i);
+    });
+    assert.equal((await fetches()).length, 0, "capture must never attempt a promisor fetch");
+    // Positive instrumentation control: ordinary Git with lazy fetch explicitly
+    // enabled attempts this fixture's missing LOCAL remote, never the network.
+    spawnSync("git", ["cat-file", "--batch-check"], { cwd: root, input: oid + "\n", encoding: "utf8", env: { ...process.env, GIT_NO_LAZY_FETCH: "0", GIT_OPTIONAL_LOCKS: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" } });
+    assert.ok((await fetches()).length > 0, "the control must detect an actual lazy-fetch attempt");
+  } finally { if (previousTrace === undefined) delete process.env.GIT_TRACE2_EVENT; else process.env.GIT_TRACE2_EVENT = previousTrace; }
+});
+
+test("collapsed sparse-index directories fail closed until the user explicitly expands the index", async t => {
+  const { root } = await fixture(t, { "kept/main.ts": "kept\n", "outside/context.ts": "hidden\n" });
+  git(root, "sparse-checkout", "init", "--cone", "--sparse-index"); git(root, "sparse-checkout", "set", "kept");
+  assert.match(git(root, "ls-files", "--stage", "--sparse"), /040000 .*outside\//);
+  await write(root, "kept/main.ts", "working change\n");
+  await preservesGit(root, async () => { await assert.rejects(captureReviewSnapshot({ cwd: root, allowAnchor: true }), /collapsed sparse-index.*--no-sparse-index/); });
+  git(root, "sparse-checkout", "reapply", "--no-sparse-index");
+  const captured = await preservesGit(root, () => captureReviewSnapshot({ cwd: root, allowAnchor: true }));
+  assert.equal(captured.snapshot.version, 2); assert.deepEqual(captured.snapshot.changedPaths, ["kept/main.ts"]);
+  await assert.rejects(readFile(path.join(root, "outside/context.ts")), { code: "ENOENT" });
 });
