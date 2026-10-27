@@ -1,0 +1,192 @@
+import { spawn } from "node:child_process";
+import { lstat, mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
+import { satisfies } from "semver";
+import type { Command, Option } from "commander";
+import { configDir, packageName, packageVersion } from "./config.js";
+
+export const UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1000;
+export interface UpdatePolicy { enabled?: boolean; pinnedVersion?: string }
+export interface UpdateHealth { lastAttemptAt?: number; lastSuccessAt?: number; status?: string; detail?: string; lease?: string }
+export interface UpdatePointer { version: string; installedAt: string }
+export interface UpdateLease { pid: number; nonce: string; createdAt: number; deadlineAt: number }
+export const updateLeaseSlot = (now = Date.now()): string => `${Math.floor(now / UPDATE_INTERVAL_MS)}.json`;
+export const updateRoot = (): string => path.join(configDir(), "updates");
+export const stableVersion = (value: unknown): value is string => typeof value === "string" && /^\d{1,6}\.\d{1,6}\.\d{1,6}$/.test(value);
+export function newerVersion(a: string, b: string): boolean {
+  if (!stableVersion(a) || !stableVersion(b)) return false;
+  const left = a.split(".").map(Number), right = b.split(".").map(Number);
+  for (let i = 0; i < 3; i++) if (left[i] !== right[i]) return left[i] > right[i];
+  return false;
+}
+export function supportsNode(range: unknown, version = process.versions.node): boolean {
+  return typeof range === "string" && stableVersion(version) && satisfies(version, range);
+}
+
+/** No auth file, npmrc, repository, shell, or credential environment is read. */
+export function cleanUpdateEnvironment(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const clean: NodeJS.ProcessEnv = {};
+  for (const key of ["SYSTEMROOT", "WINDIR", "TEMP", "TMP", "TMPDIR", "LANG", "LC_ALL"]) if (env[key]) clean[key] = env[key];
+  return clean;
+}
+
+export async function privateDirectory(directory: string): Promise<void> {
+  const absolute = path.resolve(directory);
+  let cursor = path.parse(absolute).root;
+  for (const part of absolute.slice(cursor.length).split(path.sep)) {
+    cursor = path.join(cursor, part);
+    try { if ((await lstat(cursor)).isSymbolicLink()) throw new Error("updater paths cannot traverse symlinks"); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") break; throw error; }
+  }
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const stat = await lstat(directory);
+  if (!stat.isDirectory() || stat.isSymbolicLink() || await realpath(directory) !== absolute || (typeof process.getuid === "function" && stat.uid !== process.getuid()) || (process.platform !== "win32" && (stat.mode & 0o022) !== 0)) throw new Error("updater directory is not privately owned");
+}
+export async function readUpdateJSON<T>(file: string, max = 65536): Promise<T | undefined> {
+  try {
+    const stat = await lstat(file);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > max) throw new Error("invalid updater metadata");
+    return JSON.parse(await readFile(file, "utf8")) as T;
+  } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+}
+export async function writeUpdateJSON(file: string, data: unknown, beforePublish?: () => Promise<void>): Promise<void> {
+  await privateDirectory(path.dirname(file));
+  const temporary = `${file}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporary, JSON.stringify(data) + "\n", { flag: "wx", mode: 0o600 });
+    await beforePublish?.();
+    await rename(temporary, file);
+  } finally { await rm(temporary, { force: true }).catch(() => undefined); }
+}
+
+export function updateEligibility(root: string, env: NodeJS.ProcessEnv = process.env, args: string[] = process.argv.slice(2)): string | undefined {
+  const normalized = root.replaceAll("\\", "/");
+  if (env.DITTO_CLI_AUTO_UPDATE === "0" || env.DISABLE_AUTOUPDATER === "1" || args.includes("--no-auto-update")) return "disabled for this invocation";
+  if (env.DITTO_CLI_PINNED === "1") return "explicit installed-version pin";
+  if (env.CI || env.GITHUB_ACTIONS || env.GITLAB_CI || env.BUILD_NUMBER) return "CI execution";
+  if (env.npm_lifecycle_event || env.npm_command === "exec" || env.npm_config_package || /\/(?:_npx|\.pnpm|\.yarn)\//.test(normalized)) return "ephemeral or package-script execution";
+  if (/\/(?:Cellar|Caskroom|nix\/store|snap)\//i.test(normalized) || /^\/(?:usr\/(?:share|lib)|nix|snap)\//.test(normalized)) return "package-manager-owned installation";
+  const windowsGlobal = process.platform === "win32" && env.APPDATA && normalized === path.join(env.APPDATA, "npm/node_modules/@heyditto/cli").replaceAll("\\", "/");
+  if (!normalized.endsWith("/lib/node_modules/@heyditto/cli") && !windowsGlobal) return "project or unmanaged installation";
+  return undefined;
+}
+
+export async function selectCachedRelease(cache: string, bundledVersion: string, policy: UpdatePolicy, nodeVersion = process.versions.node): Promise<{ root: string; version: string } | undefined> {
+  const pointer = policy.pinnedVersion ? { version: policy.pinnedVersion } : await readUpdateJSON<UpdatePointer>(path.join(cache, "current.json"), 4096);
+  if (!pointer || !stableVersion(pointer.version) || (!newerVersion(pointer.version, bundledVersion) && pointer.version !== policy.pinnedVersion) || (policy.pinnedVersion && pointer.version !== policy.pinnedVersion)) return undefined;
+  try { await lstat(path.join(cache, "quarantine", `${pointer.version}.json`)); return undefined; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") return undefined; }
+  const root = path.join(cache, "versions", pointer.version, "package");
+  for (const directory of [cache, path.join(cache, "versions"), path.dirname(root), root]) {
+    const stat = await lstat(directory);
+    if (!stat.isDirectory() || stat.isSymbolicLink() || (typeof process.getuid === "function" && stat.uid !== process.getuid()) || (process.platform !== "win32" && (stat.mode & 0o022))) return undefined;
+  }
+  if (await realpath(root) !== root) return undefined;
+  const pkg = await readUpdateJSON<{ name?: string; version?: string; engines?: { node?: string }; bin?: Record<string, string> }>(path.join(root, "package.json"));
+  const lock = await readUpdateJSON<{ bootstrap?: number; packageVersion?: string }>(path.join(root, "dist/update-lock.json"), 1024 * 1024);
+  const receipt = await readUpdateJSON<{ version?: string; rootIntegrity?: string }>(path.join(path.dirname(root), "verified.json"), 4096);
+  if (pkg?.name !== packageName || pkg.version !== pointer.version || pkg.bin?.heyditto !== "dist/entry.js" || !supportsNode(pkg.engines?.node, nodeVersion) || lock?.bootstrap !== 1 || lock.packageVersion !== pointer.version || receipt?.version !== pointer.version || !/^sha512-[A-Za-z0-9+/]{86}==$/.test(receipt?.rootIntegrity ?? "")) return undefined;
+  for (const file of ["dist/cli.js", "dist/entry.js", "dist/update-worker.js"]) {
+    const absolute = path.join(root, file), stat = await lstat(absolute);
+    if (!stat.isFile() || stat.isSymbolicLink() || await realpath(absolute) !== absolute) return undefined;
+  }
+  return { root, version: pointer.version };
+}
+
+export async function quarantineCachedRelease(root: string, cache = updateRoot()): Promise<void> {
+  const relative = path.relative(cache, root).split(path.sep);
+  if (relative.length !== 3 || relative[0] !== "versions" || !stableVersion(relative[1]) || relative[2] !== "package") return;
+  await writeUpdateJSON(path.join(cache, "quarantine", `${relative[1]}.json`), { failedAt: Date.now(), reason: "CLI execution failed; this invocation was not retried" });
+}
+
+export async function startupUpdate(bundledRoot: string): Promise<string> {
+  const root = await realpath(bundledRoot);
+  // Explicit pins, manager ownership and ephemeral launches also suppress cache
+  // delegation, so an npx/package-manager version remains the version invoked.
+  const eligibility = updateEligibility(root);
+  if (eligibility && eligibility !== "disabled for this invocation") return root;
+  const cache = updateRoot();
+  let policy: UpdatePolicy, health: UpdateHealth;
+  try {
+    policy = await readUpdateJSON<UpdatePolicy>(path.join(cache, "settings.json"), 4096) ?? {};
+    health = await readUpdateJSON<UpdateHealth>(path.join(cache, "health.json"), 4096) ?? {};
+  } catch { return root; }
+  let selected: { root: string; version: string } | undefined;
+  try { selected = await selectCachedRelease(cache, packageVersion, policy); } catch { /* invalid pointer falls back */ }
+  const active = selected ?? { root, version: packageVersion };
+  const args = process.argv.slice(2);
+  if (eligibility || policy.enabled === false || policy.pinnedVersion || !stableVersion(active.version) || args[0] === "self-update" || args.some(a => ["--preview", "--offline", "--help", "-h", "--version", "-v"].includes(a))) return active.root;
+  const last = health.lastAttemptAt;
+  if (typeof last === "number" && Number.isFinite(last) && Date.now() - last < UPDATE_INTERVAL_MS) return active.root;
+  try {
+    await privateDirectory(cache);
+    // Each time window has one immutable lease. Crashes cannot permanently
+    // block later windows, and active leases are never deleted or stolen.
+    try { await lstat(path.join(cache, "leases", updateLeaseSlot())); return active.root; } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") return active.root; }
+    const child = spawn(process.execPath, [path.join(active.root, "dist/update-worker.js"), cache, active.version], { cwd: cache, detached: true, stdio: "ignore", env: cleanUpdateEnvironment() });
+    child.on("error", () => undefined);
+    child.unref();
+  } catch { /* optional background update cannot affect command output */ }
+  return active.root;
+}
+
+async function manualUpdate(cache: string): Promise<number> {
+  await privateDirectory(cache);
+  return new Promise<number>((resolve, reject) => {
+    const child = spawn(process.execPath, [fileURLToPath(new URL("./update-worker.js", import.meta.url)), cache, packageVersion, "--manual"], { cwd: cache, stdio: "ignore", env: cleanUpdateEnvironment() });
+    const stop = () => { process.exitCode = 130; child.kill("SIGTERM"); };
+    const terminate = () => { process.exitCode = 143; child.kill("SIGTERM"); };
+    process.on("SIGINT", stop); process.on("SIGTERM", terminate);
+    const timer = setTimeout(() => child.kill("SIGKILL"), 70000);
+    const cleanup = () => { clearTimeout(timer); process.removeListener("SIGINT", stop); process.removeListener("SIGTERM", terminate); };
+    child.once("error", error => { cleanup(); reject(error); });
+    child.once("close", code => { cleanup(); resolve(code ?? 1); });
+  });
+}
+
+export function registerSelfUpdateCommands(program: Command, outputOption: () => Option): void {
+  const group = program.command("self-update").description("inspect, disable or pin occasional background CLI updates");
+  const action = (kind: "status" | "enable" | "disable" | "pin" | "unpin" | "check") => async (options: { output?: string }) => {
+    const cache = updateRoot();
+    const invalidMetadata: string[] = [];
+    const safeRead = async <T>(file: string, limit = 4096): Promise<T | undefined> => {
+      try { return await readUpdateJSON<T>(path.join(cache, file), limit); }
+      catch { invalidMetadata.push(file); return undefined; }
+    };
+    const settings = await safeRead<UpdatePolicy>("settings.json") ?? {};
+    if (kind === "enable") settings.enabled = true;
+    if (kind === "disable") settings.enabled = false;
+    if (kind === "pin") settings.pinnedVersion = packageVersion;
+    if (kind === "unpin") delete settings.pinnedVersion;
+    if (!["status", "check"].includes(kind)) await writeUpdateJSON(path.join(cache, "settings.json"), settings);
+    let invokedRoot = fileURLToPath(new URL("../", import.meta.url));
+    if (process.argv[1]) invokedRoot = await realpath(process.argv[1]).then(file => path.dirname(path.dirname(file))).catch(() => invokedRoot);
+    const eligibilityReason = updateEligibility(invokedRoot, process.env, []);
+    let manualExitCode: number | undefined;
+    if (kind === "check" && (!eligibilityReason || eligibilityReason === "disabled for this invocation")) {
+      manualExitCode = await manualUpdate(cache);
+    }
+    const health = await safeRead<UpdateHealth>("health.json") ?? {};
+    if (manualExitCode) { health.status = "failed"; health.detail ||= "manual updater exited before completion"; }
+    const leaseName = typeof health.lease === "string" && /^\d+(?:-manual-[0-9a-f-]{36})?\.json$/.test(health.lease) ? health.lease : updateLeaseSlot();
+    const lease = await safeRead<UpdateLease>(path.join("leases", leaseName));
+    let worker: "active" | "interrupted" | "finished" | "unknown" | undefined;
+    if (lease) {
+      worker = health.lease === leaseName && health.status && health.status !== "checking" ? "finished" : "unknown";
+      if (worker !== "finished" && Number.isSafeInteger(lease.pid) && lease.pid! > 0) {
+        try { process.kill(lease.pid!, 0); worker = "active"; }
+        catch (error) { if ((error as NodeJS.ErrnoException).code === "ESRCH") worker = "interrupted"; }
+      }
+    }
+    const bundled = await readUpdateJSON<{ version?: string }>(path.join(invokedRoot, "package.json"), 65536).catch(() => undefined);
+    const pointer = await safeRead<UpdatePointer>("current.json");
+    const checkAllowed = !eligibilityReason || eligibilityReason === "disabled for this invocation";
+    const state = { version: packageVersion, bundledVersion: bundled?.version ?? packageVersion, selectedVersion: packageVersion, cachedVersion: stableVersion(pointer?.version) ? pointer.version : null, eligible: !eligibilityReason, eligibilityReason: eligibilityReason ?? null, checkRequested: kind === "check", checkAllowed: kind === "check" ? checkAllowed : null, manualExitCode: manualExitCode ?? null, enabled: settings.enabled !== false, pinnedVersion: settings.pinnedVersion ?? null, checkIntervalHours: 6, health, worker: worker ?? null, cache, historicalNpmPinDetectable: false, invalidMetadata };
+    if (options.output === "json") process.stdout.write(JSON.stringify(state) + "\n");
+    else process.stdout.write(`CLI ${state.selectedVersion} (bundled ${state.bundledVersion}, cached ${state.cachedVersion ?? "none"}): background updates ${state.enabled ? "enabled" : "disabled"}${state.pinnedVersion ? `, pinned to ${state.pinnedVersion}` : ""}${eligibilityReason ? `\nLaunch: ${eligibilityReason}` : ""}\nLast attempt: ${health.status ?? "none"}${health.detail ? ` (${health.detail})` : ""}${worker ? `\nWorker lease: ${worker} (leases are never stolen)` : ""}\n`);
+    if (kind === "check" && (!checkAllowed || health.status === "failed")) process.exitCode ||= 1;
+  };
+  for (const [kind, description] of [["status", "show update policy, installation eligibility and last attempt"], ["check", "check now and stage a verified update for the next invocation"], ["enable", "enable occasional updates for eligible global installations"], ["disable", "disable background downloads; retain the selected version"], ["pin", "keep the currently selected CLI version"], ["unpin", "resume updates after a version pin"]] as const) group.command(kind).description(description).addOption(outputOption()).action(action(kind));
+}

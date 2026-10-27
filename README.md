@@ -43,10 +43,67 @@ heyditto subjects "memory architecture" --top-k 5
 ```bash
 npm install -g @heyditto/cli
 # or one-shot via npx
-npx -y @heyditto/cli search "what did I say about X"
+npx -y --package @heyditto/cli heyditto search "what did I say about X"
 ```
 
 The package installs two equivalent binaries: `ditto` and `heyditto`. They run the same CLI — use whichever you prefer. We recommend **`heyditto`** on macOS because Apple ships `/usr/bin/ditto` (a file-copy utility) that can shadow the npm CLI.
+
+The published npm package is **`@heyditto/cli`**. Use the installed `heyditto`
+binary or the scoped `npx --package` form above; the unscoped `heyditto` npm name
+is not our published package.
+
+### Occasional background updates
+
+Eligible global npm installations check for a newer CLI about every six hours
+when invoked. The check and download run quietly in a finite background worker;
+your current command keeps running its selected version. A fully verified update
+takes effect on a later invocation. Help, version, offline and review `--preview`
+commands do not start a network check. JSON stdout is unchanged.
+
+```sh
+heyditto self-update status --output json
+heyditto self-update check             # check now; stage for the next invocation
+heyditto self-update disable
+heyditto self-update enable
+heyditto self-update pin               # retain the currently selected version
+heyditto self-update unpin
+DITTO_CLI_AUTO_UPDATE=0 heyditto search "a memory"  # suppress this background check
+DITTO_CLI_PINNED=1 heyditto --version   # run the installed package, bypassing cached updates
+```
+
+`self-update check` uses the same bounded verification path even when automatic
+checks are disabled. A persistent pin still prevents it from installing another
+version. `heyditto --no-auto-update <command>` also suppresses a background check;
+`DISABLE_AUTOUPDATER=1` is supported. Disabling checks retains an already selected
+cached version. A pin selects its retained version even if a newer update has
+been downloaded concurrently.
+
+Homebrew, Nix and operating-system package locations, project installs, npm
+scripts, CI and ephemeral `npx` executions keep their package-manager version;
+the updater does not replace their files or override their ownership. Historical
+`npm install -g @heyditto/cli@<version>` intent is not recoverable reliably from
+installed npm metadata. Use the persistent pin or `DITTO_CLI_PINNED=1` when that
+global installation must remain exact. Older CLI versions need one normal npm
+upgrade before they have this updater.
+
+Updates are stored under the CLI config directory's `updates/` folder, with
+separate immutable version directories and an atomic selection pointer. Every
+root and locked dependency archive is restricted to the public npm registry and
+checked against SHA512 integrity; archive links, unsafe paths and special files
+are rejected. No npm configuration, credentials, project files, install scripts,
+daemon, sudo or command restart is used. Compatible prebuilt PTY packages and
+ordinary executable bits are retained for coding-agent commands.
+
+Each attempt is bounded to 60 seconds plus five seconds of worker cleanup,
+128 MiB downloaded, 512 MiB unpacked and
+50,000 files. Cached versions are retained so active commands can still read
+them; at 2 GiB, the updater pauses for manual cleanup instead of deleting a
+potentially active version. Immutable attempt leases also have a metadata cap.
+A crashed attempt blocks at most its six-hour window and never steals another
+worker's live lease. `self-update status` reports the bundled, selected and
+cached versions, eligibility, policy and last result. Invalid selection metadata
+falls back before execution; a cached CLI execution failure is quarantined for
+the next invocation and **never retries the command**.
 
 ### macOS: name collision with Apple's `/usr/bin/ditto`
 
