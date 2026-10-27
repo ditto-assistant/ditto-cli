@@ -22,12 +22,21 @@ export const updateRoot = (target = updateTarget()): string => {
   if (!/^[a-z0-9]+-[a-z0-9]+-(none|glibc|musl)$/.test(target)) throw new Error("invalid update target");
   return path.resolve(configDir(), "updates", target);
 };
-export function updatePolicyFile(cache: string, target = updateTarget()): string {
-  return path.join(path.basename(cache) === target && path.basename(path.dirname(cache)) === "updates" ? path.dirname(cache) : cache, "settings.json");
+export function updatePreferenceFiles(cache: string, target = updateTarget()): { enabled: string; pin: string; legacy: string } {
+  const base = path.basename(cache) === target && path.basename(path.dirname(cache)) === "updates" ? path.dirname(cache) : cache;
+  return { enabled: path.join(base, "enabled.json"), pin: path.join(base, "pins", `${target}.json`), legacy: path.join(base, "settings.json") };
 }
 export async function effectiveUpdatePolicy(cache: string, target = updateTarget()): Promise<UpdatePolicy> {
-  const raw = await readUpdateJSON<UpdatePolicy>(updatePolicyFile(cache, target), 4096) ?? {};
-  return { ...raw, pinnedVersion: raw.pins?.[target] ?? raw.pinnedVersion };
+  const files = updatePreferenceFiles(cache, target);
+  let enabled = await readUpdateJSON<{ enabled: boolean }>(files.enabled, 4096);
+  let pin = await readUpdateJSON<{ version: string | null }>(files.pin, 4096);
+  const legacy = enabled === undefined || pin === undefined ? await readUpdateJSON<UpdatePolicy>(files.legacy, 4096) ?? {} : {};
+  // A current control may appear while the legacy fallback is being read.
+  enabled ??= await readUpdateJSON<{ enabled: boolean }>(files.enabled, 4096);
+  pin ??= await readUpdateJSON<{ version: string | null }>(files.pin, 4096);
+  if (enabled !== undefined && typeof enabled?.enabled !== "boolean") throw new Error("invalid updater enable preference");
+  if (pin !== undefined && pin?.version !== null && !stableVersion(pin?.version)) throw new Error("invalid updater pin preference");
+  return { enabled: enabled?.enabled ?? legacy.enabled, pinnedVersion: pin !== undefined ? pin.version ?? undefined : legacy.pins?.[target] ?? legacy.pinnedVersion };
 }
 export const stableVersion = (value: unknown): value is string => typeof value === "string" && /^\d{1,6}\.\d{1,6}\.\d{1,6}$/.test(value);
 export function newerVersion(a: string, b: string): boolean {
@@ -169,20 +178,16 @@ export function registerSelfUpdateCommands(program: Command, outputOption: () =>
   const group = program.command("self-update").description("inspect, disable or pin occasional background CLI updates");
   const action = (kind: "status" | "enable" | "disable" | "pin" | "unpin" | "check") => async (options: { output?: string }) => {
     const cache = updateRoot();
-    const target = updateTarget(), policyFile = updatePolicyFile(cache, target);
+    const target = updateTarget(), preferences = updatePreferenceFiles(cache, target);
     const invalidMetadata: string[] = [];
     const safeRead = async <T>(file: string, limit = 4096): Promise<T | undefined> => {
       try { return await readUpdateJSON<T>(path.join(cache, file), limit); }
       catch { invalidMetadata.push(file); return undefined; }
     };
-    let settings: UpdatePolicy;
-    try { settings = await readUpdateJSON<UpdatePolicy>(policyFile, 4096) ?? {}; }
-    catch { invalidMetadata.push("settings.json"); settings = {}; }
-    if (kind === "enable") settings.enabled = true;
-    if (kind === "disable") settings.enabled = false;
-    if (kind === "pin") settings.pins = { ...settings.pins, [target]: packageVersion };
-    if (kind === "unpin") { if (settings.pins) delete settings.pins[target]; delete settings.pinnedVersion; }
-    if (!["status", "check"].includes(kind)) await writeUpdateJSON(policyFile, settings);
+    // Each command writes only its own intent. A stale reader cannot clobber
+    // another target's pin or an acknowledged global enable/disable.
+    if (kind === "enable" || kind === "disable") await writeUpdateJSON(preferences.enabled, { enabled: kind === "enable" });
+    if (kind === "pin" || kind === "unpin") await writeUpdateJSON(preferences.pin, { version: kind === "pin" ? packageVersion : null });
     let invokedRoot = fileURLToPath(new URL("../", import.meta.url));
     if (process.argv[1]) invokedRoot = await realpath(process.argv[1]).then(file => path.dirname(path.dirname(file))).catch(() => invokedRoot);
     const eligibilityReason = updateEligibility(invokedRoot, process.env, []);
@@ -190,6 +195,9 @@ export function registerSelfUpdateCommands(program: Command, outputOption: () =>
     if (kind === "check" && (!eligibilityReason || eligibilityReason === "disabled for this invocation")) {
       manualExitCode = await manualUpdate(cache);
     }
+    let settings: UpdatePolicy;
+    try { settings = await effectiveUpdatePolicy(cache, target); }
+    catch { invalidMetadata.push("preferences"); settings = { enabled: false }; }
     const health = await safeRead<UpdateHealth>("health.json") ?? {};
     if (manualExitCode) { health.status = "failed"; health.detail ||= "manual updater exited before completion"; }
     const leaseName = typeof health.lease === "string" && /^\d+(?:-manual-[0-9a-f-]{36})?\.json$/.test(health.lease) ? health.lease : updateLeaseSlot();
@@ -205,7 +213,7 @@ export function registerSelfUpdateCommands(program: Command, outputOption: () =>
     const bundled = await readUpdateJSON<{ version?: string }>(path.join(invokedRoot, "package.json"), 65536).catch(() => undefined);
     const pointer = await safeRead<UpdatePointer>("current.json");
     const checkAllowed = !eligibilityReason || eligibilityReason === "disabled for this invocation";
-    const state = { version: packageVersion, bundledVersion: bundled?.version ?? packageVersion, selectedVersion: packageVersion, cachedVersion: stableVersion(pointer?.version) ? pointer.version : null, target, policyFile, policyScope: "user", pinScope: "runtime_target", eligible: !eligibilityReason, eligibilityReason: eligibilityReason ?? null, checkRequested: kind === "check", checkAllowed: kind === "check" ? checkAllowed : null, manualExitCode: manualExitCode ?? null, enabled: settings.enabled !== false, pinnedVersion: settings.pins?.[target] ?? settings.pinnedVersion ?? null, checkIntervalHours: 6, health, worker: worker ?? null, cache, historicalNpmPinDetectable: false, invalidMetadata };
+    const state = { version: packageVersion, bundledVersion: bundled?.version ?? packageVersion, selectedVersion: packageVersion, cachedVersion: stableVersion(pointer?.version) ? pointer.version : null, target, policyFile: preferences.enabled, pinFile: preferences.pin, policyScope: "user", pinScope: "runtime_target", eligible: !eligibilityReason, eligibilityReason: eligibilityReason ?? null, checkRequested: kind === "check", checkAllowed: kind === "check" ? checkAllowed : null, manualExitCode: manualExitCode ?? null, enabled: settings.enabled !== false, pinnedVersion: settings.pinnedVersion ?? null, checkIntervalHours: 6, health, worker: worker ?? null, cache, historicalNpmPinDetectable: false, invalidMetadata };
     if (options.output === "json") process.stdout.write(JSON.stringify(state) + "\n");
     else process.stdout.write(`CLI ${state.selectedVersion} (bundled ${state.bundledVersion}, cached ${state.cachedVersion ?? "none"}): background updates ${state.enabled ? "enabled" : "disabled"}${state.pinnedVersion ? `, pinned to ${state.pinnedVersion}` : ""}${eligibilityReason ? `\nLaunch: ${eligibilityReason}` : ""}\nLast attempt: ${health.status ?? "none"}${health.detail ? ` (${health.detail})` : ""}${worker ? `\nWorker lease: ${worker} (leases are never stolen)` : ""}\n`);
     if (kind === "check" && (!checkAllowed || health.status === "failed")) process.exitCode ||= 1;

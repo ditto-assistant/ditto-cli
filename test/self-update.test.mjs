@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -451,4 +451,36 @@ test("relative cache selection resolves once against the caller directory", asyn
   const cache = path.join(await temporary(t), "updates"); await update(cache, fixture());
   const selected = await selectCachedRelease(path.relative(process.cwd(), cache), "2.33.0", {});
   assert.equal(selected.root, path.join(cache, "versions", version, "package")); assert.ok(path.isAbsolute(selected.root));
+});
+
+test("concurrent controls retain an acknowledged disable and both targets' pins", async t => {
+  const directory = await temporary(t), cli = path.join(project, "dist/entry.js"), preloader = path.join(directory, "pause-policy.mjs");
+  await writeFile(preloader, `import fs from 'node:fs/promises'; import {syncBuiltinESMExports} from 'node:module';
+if(process.env.TEST_ARCH)Object.defineProperty(process,'arch',{value:process.env.TEST_ARCH});
+const read=fs.readFile;let paused=false;
+fs.readFile=async function(file,...args){const result=await read.call(this,file,...args);if(!paused&&process.env.TEST_PAUSE&&String(file)===process.env.TEST_POLICY){paused=true;await fs.writeFile(process.env.TEST_READY,'ready');const end=Date.now()+8000;for(;;){try{await fs.access(process.env.TEST_RELEASE);break;}catch{}if(Date.now()>end)throw new Error('policy barrier timed out');await new Promise(r=>setTimeout(r,10));}}return result;};syncBuiltinESMExports();`);
+  for (const scenario of ["disable", "other-pin"]) {
+    const config = path.join(directory, scenario), policy = path.join(config, "updates/settings.json"), ready = path.join(directory, scenario + "-ready"), release = path.join(directory, scenario + "-release");
+    await writeUpdateJSON(policy, { enabled: true, pins: {} });
+    const env = { DITTO_CONFIG_DIR: config, TEST_POLICY: policy, TEST_READY: ready, TEST_RELEASE: release, TEST_ARCH: process.arch, TEST_PAUSE: "1" };
+    const child = spawn(process.execPath, ["--import", preloader, cli, "self-update", "pin", "--output", "json"], { cwd: directory, env, stdio: ["ignore", "pipe", "pipe"] });
+    const completed = new Promise((resolve, reject) => {
+      let stdout = "", stderr = ""; child.stdout.on("data", c => stdout += c); child.stderr.on("data", c => stderr += c);
+      child.on("error", reject); child.on("close", code => resolve({ code, stdout, stderr }));
+    });
+    let first;
+    try {
+      for (let n = 0; ; n++) { try { await readFile(ready); break; } catch { if (n === 400) throw new Error("control did not reach its policy read"); await delay(10); } }
+      const arch = process.arch === "arm64" ? "x64" : "arm64";
+      const second = spawnSync(process.execPath, ["--import", preloader, cli, "self-update", scenario === "disable" ? "disable" : "pin", "--output", "json"], { cwd: directory, env: { ...env, TEST_ARCH: arch, TEST_PAUSE: "" }, encoding: "utf8", timeout: 8000 });
+      assert.equal(second.status, 0, second.stderr);
+      if (scenario === "disable") assert.equal(JSON.parse(second.stdout).enabled, false, "disable must be acknowledged before the stale reader resumes");
+    } finally { await writeFile(release, "release"); first = await completed; }
+    assert.equal(first.code, 0, first.stderr);
+    const firstTarget = updateTarget(), otherTarget = updateTarget(process.platform, process.arch === "arm64" ? "x64" : "arm64");
+    const firstPolicy = await effectiveUpdatePolicy(path.join(config, "updates", firstTarget), firstTarget);
+    const otherPolicy = await effectiveUpdatePolicy(path.join(config, "updates", otherTarget), otherTarget);
+    if (scenario === "disable") { assert.equal(firstPolicy.enabled, false); assert.equal(otherPolicy.enabled, false); }
+    else { assert.equal(firstPolicy.pinnedVersion, currentPackageVersion); assert.equal(otherPolicy.pinnedVersion, currentPackageVersion); }
+  }
 });

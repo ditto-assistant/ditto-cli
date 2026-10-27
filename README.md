@@ -89,7 +89,9 @@ upgrade before they have this updater.
 Updates are stored under the CLI config directory's `updates/` folder, with
 separate immutable version directories and an atomic selection pointer for each
 OS, CPU architecture and libc target. Enable/disable is one shared user
-preference; pins and cached bundles are target-specific. Relative
+preference; pins and cached bundles are target-specific. Each control writes its
+own atomic preference file, so concurrent pin and disable commands cannot
+overwrite each other's intent. Relative
 `DITTO_CONFIG_DIR` values are resolved before starting a worker. Every
 root and locked dependency archive is restricted to the public npm registry and
 checked against SHA512 integrity; archive links, unsafe paths and special files
