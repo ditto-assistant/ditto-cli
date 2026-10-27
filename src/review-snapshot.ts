@@ -41,8 +41,11 @@ export async function reviewGit(cwd: string, args: string[], input?: string, sig
     // the ASCII filter framing before UTF-8 decoding, ignoring unrelated keys.
     // A matching driver's bytes must round-trip exactly for safe -c overrides.
     for (const key of keys.toString("latin1").split("\0")) {
-      const driver = /^filter\.([\s\S]+)\.(?:clean|smudge|process|required)$/i.exec(key)?.[1];
+      const driver = /^filter\.([\s\S]*)\.(?:clean|smudge|process|required)$/i.exec(key)?.[1];
       if (driver === undefined) continue;
+      // Git splits each -c argument at its first '='; such a subsection
+      // cannot be overridden exactly, so never proceed to a diff with it.
+      if (driver.includes("=")) throw new Error("local review cannot safely disable a Git filter driver whose name contains '='; fix that filter configuration before retrying");
       try { drivers.add(utf8.decode(Buffer.from(driver, "latin1"))); }
       catch { throw new Error("local review cannot safely disable a non-UTF-8 Git filter driver; fix that filter configuration before retrying"); }
     }

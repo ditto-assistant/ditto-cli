@@ -190,6 +190,45 @@ test("undecodable active filter names fail closed before a filter can execute", 
   assert.deepEqual(await readFile(config), bytes);
 });
 
+test("filter names containing equals fail closed before Git can execute the configured filter", async t => {
+  const root = await repository(t);
+  const marker = path.join(root, ".git", "filter-ran"), key = "filter.a=b.clean";
+  const clean = "touch .git/filter-ran; cat";
+  git(root, "config", key, clean);
+  git(root, "config", "filter.a=b.required", "true");
+  await writeFile(path.join(root, ".gitattributes"), "*.ts filter=a=b\n");
+  await writeFile(path.join(root, "app.ts"), "changed\n");
+  assert.equal(git(root, "-c", `${key}=`, "config", "--get", key).trim(), clean, "Git's first-equals framing must actually leave this filter enabled");
+  git(root, "diff", "--name-only");
+  assert.equal(await readFile(marker, "utf8"), "", "ordinary Git must execute the equals-named driver in this control");
+  await rm(marker);
+  const config = await readFile(path.join(root, ".git", "config")), index = await readFile(path.join(root, ".git", "index"));
+  let failure;
+  try { await captureReviewSnapshot({ cwd: root }); } catch (error) { failure = error; }
+  await assert.rejects(readFile(marker), { code: "ENOENT" }, "capture must reject the driver before executing it");
+  assert.match(failure?.message ?? "", /cannot safely disable a Git filter driver whose name contains '='/);
+  assert.deepEqual(await readFile(path.join(root, ".git", "config")), config);
+  assert.deepEqual(await readFile(path.join(root, ".git", "index")), index);
+});
+
+test("an active empty-name filter is disabled without changing native snapshot bytes or Git state", async t => {
+  const root = await repository(t);
+  const marker = path.join(root, ".git", "filter-ran"), clean = "touch .git/filter-ran; cat";
+  git(root, "config", "filter..clean", clean);
+  git(root, "config", "filter..required", "true");
+  await writeFile(path.join(root, ".gitattributes"), "*.ts filter=\n");
+  await writeFile(path.join(root, "app.ts"), "native changed bytes\n");
+  git(root, "diff", "--name-only");
+  assert.equal(await readFile(marker, "utf8"), "", "ordinary Git must execute the empty-name filter in this control");
+  await rm(marker);
+  const config = await readFile(path.join(root, ".git", "config")), index = await readFile(path.join(root, ".git", "index"));
+  const { snapshot } = await captureReviewSnapshot({ cwd: root });
+  await assert.rejects(readFile(marker), { code: "ENOENT" }, "capture must suppress the empty-name filter");
+  assert.equal(contents(snapshot.headFiles, "app.ts"), "native changed bytes\n");
+  assert.deepEqual(await readFile(path.join(root, ".git", "config")), config);
+  assert.deepEqual(await readFile(path.join(root, ".git", "index")), index);
+});
+
 async function stub(t, { partial = false, forever = false, loseAdmission = false, transientPoll = false, invalidRun = false, terminalStatus, noResult = false } = {}) {
   const calls = []; let digest, profile, lost = false, pollFailed = false;
   const server = http.createServer((req, res) => {
