@@ -229,7 +229,7 @@ test("an active empty-name filter is disabled without changing native snapshot b
   assert.deepEqual(await readFile(path.join(root, ".git", "index")), index);
 });
 
-async function stub(t, { partial = false, forever = false, loseAdmission = false, transientPoll = false, invalidRun = false, terminalStatus, noResult = false } = {}) {
+async function stub(t, { partial = false, forever = false, loseAdmission = false, transientPoll = false, invalidRun = false, terminalStatus, noResult = false, versions, receipt = {} } = {}) {
   const calls = []; let digest, profile, lost = false, pollFailed = false;
   const server = http.createServer((req, res) => {
     let body = ""; req.on("data", c => body += c);
@@ -237,7 +237,7 @@ async function stub(t, { partial = false, forever = false, loseAdmission = false
       const parsed = body ? JSON.parse(body) : undefined;
       calls.push({ method: req.method, url: req.url, body: parsed });
       const json = (status, data) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(data)); };
-      if (req.url === "/api/v5/review") return json(200, { repositories: [REPO] });
+      if (req.url === "/api/v5/review") return json(200, { repositories: [REPO], ...(versions ? { localSnapshotVersions: versions } : {}) });
       if (req.url === `/api/v5/review/repositories/${REPO.id}/local`) {
         digest = parsed.snapshot.digest; profile = parsed.profile;
         assert.match(parsed.requestId, /^[0-9a-f-]{36}$/);
@@ -248,7 +248,7 @@ async function stub(t, { partial = false, forever = false, loseAdmission = false
       if (req.url === `/api/v5/review/local/runs/${RUN}/cancel`) return json(200, { runId: RUN, status: "cancelled" });
       if (req.url === `/api/v5/review/local/runs/${RUN}`) {
         if (transientPoll && !pollFailed) { pollFailed = true; return json(503, { message: "temporary read outage" }); }
-        return json(200, { runId: RUN, status: terminalStatus ?? (forever ? "running" : partial ? "partial" : "completed"), profile, snapshotDigest: digest, budgetCents: 25, maxSeconds: 90, chargedCredits: 3, ...(noResult ? {} : { result: { complete: !partial, findings: [{ status: "posted", path: "app.ts", line: 1, severity: "high", title: "Fixture defect", body: "Real fixture finding" }], local: { contextComplete: !partial, changedCoverageComplete: true } } }) });
+        return json(200, { runId: RUN, status: terminalStatus ?? (forever ? "running" : partial ? "partial" : "completed"), profile, snapshotDigest: digest, budgetCents: 25, maxSeconds: 90, chargedCredits: 3, ...(noResult ? {} : { result: { complete: !partial, findings: [{ status: "posted", path: "app.ts", line: 1, severity: "high", title: "Fixture defect", body: "Real fixture finding" }], local: { contextComplete: !partial, changedCoverageComplete: true } } }), ...receipt });
       }
       json(404, { message: "unexpected route" });
     });
@@ -280,6 +280,35 @@ test("preview is offline and authenticated local review polls the shared service
   assert.ok(service.calls.some(c => c.url === `/api/v5/review/local/runs/${RUN}`));
   assert.ok(service.calls.every(c => !/pulls|\/fix|github/.test(c.url)));
   assert.match(out.stderr, /Uploading 1 changed paths/);
+});
+
+test("anchor transport is capability gated and full-review preserves receipt provenance with pure JSON", async t => {
+  const root = await repository(t); git(root, "update-ref", "refs/remotes/origin/main", "HEAD"); await writeFile(path.join(root, "app.ts"), "bug\n");
+  const reuse = { version: 1, sourceRunId: "prior-receipt", analysisScope: "anchored_selected_files", reused: [{ path: "app.ts", lens: 0, model: "server-model" }], reviewed: [], unfinished: [], retained: [{ path: "old.ts", lens: 0, model: "server-model" }], historicalCostUsd: 0.012, currentCostUsd: 0, round: 2, roundLimit: 5, publicationScope: "linked_author_code" };
+  const scope = { workspaceKind: "personal", scopeKey: "user:fixture", repositoryId: REPO.id, repository: REPO.fullName, requesterId: "fixture", policyFingerprint: "policy-hash", engineIdentity: "engine-image" };
+  const modern = await stub(t, { versions: [1, 2], receipt: { chargedCredits: 0, reuse, scope } });
+  const out = await command(root, modern.base, ["local", "--full-review", "--output", "json"]).result;
+  assert.equal(out.code, 0, out.stderr); const data = JSON.parse(out.stdout);
+  assert.deepEqual(data.reuse, reuse); assert.deepEqual(data.scope, scope); assert.equal(data.chargedCredits, 0); assert.equal(data.workspaceCurrent, true);
+  const post = modern.calls.find(call => call.method === "POST"); assert.equal(post.body.fullReview, true); assert.equal(post.body.snapshot.version, 2); assert.equal(post.body.snapshot.headFiles.length, 1); assert.equal(post.body.snapshot.baseFiles.length, 0);
+  const legacy = await stub(t);
+  const fallback = await command(root, legacy.base, ["local", "--output", "json"]).result;
+  assert.equal(fallback.code, 0, fallback.stderr); assert.match(fallback.stderr, /not enabled for this server/);
+  assert.equal(legacy.calls.find(call => call.method === "POST").body.snapshot.version, 1);
+  assert.equal(legacy.calls.find(call => call.method === "POST").body.fullReview, undefined);
+  const offline = await command(root, modern.base, ["local", "--preview", "--output", "json"], { authenticated: false }).result;
+  assert.equal(JSON.parse(offline.stdout).snapshotVersion, 2); assert.equal(JSON.parse(offline.stdout).contextSource, "cloud_anchor_pending_verification");
+});
+
+test("reuse output separates current cost and selected coverage from historical evidence and never auto-escalates", async t => {
+  const root = await repository(t); await writeFile(path.join(root, "app.ts"), "bug\n");
+  const reuse = { version: 1, sourceRunId: "prior", reused: [], reviewed: [{ path: "caller.ts", lens: 0, model: "actual", scope: "affected_historical" }], unfinished: [{ path: "app.ts", lens: 1, model: "actual", reason: "budget exhausted" }], retained: [{ path: "old.ts", lens: 0, model: "actual" }], findings: [{ id: "finding", path: "old.ts", state: "still_present", scope: "historical" }], historicalCostUsd: 0.012, currentCostUsd: 0, round: 5, roundLimit: 5, escalationSuggested: true, suggestedProfile: "standard", publicationScope: "local_only_private_context" };
+  const service = await stub(t, { receipt: { reuse, chargedCredits: 0 } });
+  const out = await command(root, service.base, ["local"]).result;
+  assert.equal(out.code, 1, out.stderr); assert.match(out.stdout, /Review incomplete/); assert.match(out.stdout, /Reviewed: 0 selected work units; 1 affected historical/);
+  assert.match(out.stdout, /outside current coverage/); assert.match(out.stdout, /Historical inference cost: \$0.012000 \(not a new charge\)/);
+  assert.match(out.stdout, /Current inference cost: \$0.000000/); assert.match(out.stdout, /run it explicitly/); assert.match(out.stdout, /cannot be inherited by a PR review/);
+  assert.equal(service.calls.filter(call => call.method === "POST").length, 1, "suggestion never triggers another admission");
 });
 
 test("partial coverage exits nonzero and says reviewed scope; timeout cancels the admitted run", async t => {

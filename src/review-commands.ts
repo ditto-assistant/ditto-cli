@@ -7,6 +7,7 @@ import { ApiError, apiFetch, type Company, resolveCompany } from "./api.js";
 import { registerReviewFindingCommands } from "./review-findings.js";
 import { readStoredAuth } from "./store.js";
 import { captureReviewSnapshot, reviewGit } from "./review-snapshot.js";
+import { formatReviewReuse, type ReviewReuse, type LocalReviewScope } from "./review-reuse.js";
 
 /**
  * Ditto Review repository settings: the developer console's Review →
@@ -142,6 +143,7 @@ interface LocalOptions extends ScopeOptions {
   preview?: boolean;
   timeout?: string;
   requestId?: string;
+  fullReview?: boolean;
 }
 
 interface LocalRun {
@@ -156,12 +158,16 @@ interface LocalRun {
   error?: string;
   workspaceCurrent?: boolean | null;
   workspaceCurrentReason?: string;
+  scope?: LocalReviewScope;
+  reuse?: ReviewReuse;
   result?: {
     complete?: boolean;
     error?: string;
     costUsd?: number;
     findings?: { status?: string; severity?: string; path?: string; line?: number; startLine?: number; title?: string; body?: string; explanation?: string }[];
     local?: { changedCoverageComplete?: boolean; contextComplete?: boolean; [key: string]: unknown };
+    reuse?: ReviewReuse;
+    models?: unknown;
     [key: string]: unknown;
   };
 }
@@ -175,14 +181,22 @@ function repositoryFromRemote(remote: string): string {
 function printLocalRun(run: LocalRun, options: LocalOptions): void {
   if (isJSON(options)) return writeJSON(run);
   const result = run.result;
+  const reuse = run.reuse ?? result?.reuse;
   process.stdout.write(`Local review ${run.status} · ${run.profile}\nRun: ${run.runId}\nSnapshot: ${run.snapshotDigest}\n`);
+  if (run.scope) {
+    process.stdout.write(`Workspace: ${run.scope.workspaceKind} · ${run.scope.scopeKey}\nRepository: ${run.scope.repository} (${run.scope.repositoryId})\nRequester: ${run.scope.requesterId}\n`);
+    if (run.scope.policyFingerprint) process.stdout.write(`Policy: ${run.scope.policyFingerprint}\n`);
+    if (run.scope.engineIdentity) process.stdout.write(`Engine: ${run.scope.engineIdentity}\n`);
+  }
+  if (result?.models) process.stdout.write(`Models: ${JSON.stringify(result.models)}\n`);
   const findings = result?.findings?.filter(f => !f.status || f.status === "posted") ?? [];
   const reportable = result && (Array.isArray(result.findings) || result.complete === true) && ["completed", "partial"].includes(run.status);
   if (reportable) {
     process.stdout.write(`${findings.length ? `${findings.length} finding${findings.length === 1 ? "" : "s"} in reviewed scope` : "No findings in reviewed scope"}\n`);
     for (const f of findings) process.stdout.write(`\n${f.severity ?? "finding"} · ${f.path ?? ""}:${f.line ?? f.startLine ?? ""} · ${f.title ?? ""}\n${f.body ?? f.explanation ?? ""}\n`);
   } else process.stdout.write("No review result is available for this run.\n");
-  if (!result?.complete || run.status !== "completed") process.stdout.write("Review incomplete; check coverage and errors before relying on this result.\n");
+  if (!result?.complete || run.status !== "completed" || reuse?.unfinished?.length) process.stdout.write("Review incomplete; check coverage and errors before relying on this result.\n");
+  process.stdout.write(formatReviewReuse(reuse));
   if (result?.local?.contextComplete === false) process.stdout.write("Surrounding context was bounded; omitted files were not reviewed.\n");
   if (run.workspaceCurrent === false) process.stdout.write("The working tree changed after capture; these findings describe the saved snapshot.\n");
   if (run.workspaceCurrent === null) process.stdout.write("Current working-tree identity could not be checked; these findings describe the saved snapshot.\n");
@@ -213,7 +227,9 @@ export async function cmdReviewLocal(options: LocalOptions): Promise<void> {
   if (context && (Buffer.byteLength(context) > 16000 || context.includes("\0"))) throw new Error("--context-file must contain at most 16000 UTF-8 bytes without NUL characters");
   // Preview deliberately has no auth or network dependency.
   const company = options.preview ? undefined : await resolveScope(options);
-  const repos = options.preview ? [] : await listReviewRepositories(company);
+  const capabilities = options.preview ? undefined : await apiFetch<{ repositories?: ReviewRepository[]; localSnapshotVersions?: number[] }>(`/api/v5/review${scopeQuery(company)}`);
+  const repos = capabilities?.repositories ?? [];
+  const allowAnchor = options.preview || capabilities?.localSnapshotVersions?.includes(2) === true;
   const controller = new AbortController();
   let interrupted = 0, timedOut = false, runId: string | undefined, posted = false, capturedRoot: string | undefined;
   const interrupt = (signal: NodeJS.Signals) => { interrupted = signal === "SIGTERM" ? 143 : 130; controller.abort(); };
@@ -226,24 +242,32 @@ export async function cmdReviewLocal(options: LocalOptions): Promise<void> {
     if (capturedRoot) args.push("--directory", capturedRoot);
     if (options.staged) args.push("--staged");
     if (options.base) args.push("--base", options.base);
+    if (options.fullReview) args.push("--full-review");
     if (options.contextFile) args.push("--context-file", path.resolve(options.contextFile));
     if (options.repository) args.push("--repository", options.repository);
     if (company) args.push("--org", company.id);
     return args.map(arg => /^[a-zA-Z0-9_./:=@-]+$/.test(arg) ? arg : "'" + arg.replaceAll("'", "'\\''") + "'").join(" ");
   };
   try {
-    const captured = await captureReviewSnapshot({ staged: options.staged, base: options.base, cwd: options.directory, signal: controller.signal });
+    const captured = await captureReviewSnapshot({ staged: options.staged, base: options.base, cwd: options.directory, signal: controller.signal, allowAnchor });
     capturedRoot = captured.root;
     const { snapshot } = captured;
     const preview = {
-      requestId, profile, snapshotDigest: snapshot.digest, mode: snapshot.mode, baseSha: snapshot.baseSha,
+      requestId, profile, fullReview: options.fullReview === true, snapshotDigest: snapshot.digest, snapshotVersion: snapshot.version, mode: snapshot.mode, baseSha: snapshot.baseSha,
+      anchorSha: snapshot.anchorSha, anchorRef: snapshot.anchorRef, baseTreeSha: snapshot.baseTreeSha, headTreeSha: snapshot.headTreeSha,
+      baseDeletedPaths: snapshot.baseDeletedPaths, headDeletedPaths: snapshot.headDeletedPaths,
+      captureMs: Math.round(captured.captureMs), fallbackReason: captured.fallbackReason,
+      contextSource: snapshot.version === 2 ? "cloud_anchor_pending_verification" : "bounded_snapshot",
       changedPaths: snapshot.changedPaths, baseFileCount: snapshot.baseFiles.length, headFileCount: snapshot.headFiles.length,
-      contentBytes: captured.bytes, payloadBytes: Buffer.byteLength(JSON.stringify({ requestId, snapshot, profile, context })),
+      contentBytes: captured.bytes, payloadBytes: Buffer.byteLength(JSON.stringify({ requestId, snapshot, profile, context, ...(options.fullReview ? { fullReview: true } : {}) })),
       contextComplete: snapshot.contextComplete, omittedContext: snapshot.omittedContext, skipped: snapshot.skipped,
     };
     if (options.preview) {
       if (isJSON(options)) return writeJSON(preview);
       process.stdout.write(`Local review preview · ${profile}\nSnapshot: ${snapshot.digest}\nSelected changes: ${snapshot.changedPaths.length}\nContext files: ${snapshot.headFiles.length} (${captured.bytes} decoded bytes; ${preview.payloadBytes} payload bytes)\n`);
+      if (snapshot.version === 2) process.stdout.write(`Cloud context: anchor ${snapshot.anchorSha}; ${snapshot.baseFiles.length} base and ${snapshot.headFiles.length} head overlay files, ${snapshot.baseDeletedPaths!.length + snapshot.headDeletedPaths!.length} deletion records. The server must verify the anchor and both trees before review.\n`);
+      else process.stdout.write(`Bounded context: ${captured.fallbackReason}\n`);
+      process.stdout.write(`Capture: ${preview.captureMs}ms; transfer limits: 16 MiB decoded source, 4096 files per tree, 24 MiB snapshot JSON.\n`);
       for (const file of snapshot.changedPaths) process.stdout.write(`  ${file}\n`);
       process.stdout.write(`Omitted context: ${snapshot.omittedContext.length}; skipped files: ${snapshot.skipped.length}\nNo source uploaded; no review started.\n`);
       return;
@@ -256,13 +280,13 @@ export async function cmdReviewLocal(options: LocalOptions): Promise<void> {
     const fullName = options.repository ?? repositoryFromRemote((await reviewGit(captured.root, ["remote", "get-url", "origin"], undefined, controller.signal)).toString("utf8"));
     const repo = repos.find(r => r.fullName.toLowerCase() === fullName.toLowerCase());
     if (!repo) throw new Error(`${fullName} is not set up in this workspace; see heyditto review repos${options.org ? ` --org ${options.org}` : ""}`);
-    process.stderr.write(`Uploading ${snapshot.changedPaths.length} changed paths with ${snapshot.headFiles.length} context files (${preview.payloadBytes} bytes) for ${profile} review; omitted context: ${snapshot.omittedContext.length}.\nRequest: ${requestId}\n`);
+    process.stderr.write(`Uploading ${snapshot.changedPaths.length} changed paths with ${snapshot.headFiles.length} ${snapshot.version === 2 ? "head overlay" : "context"} files (${preview.payloadBytes} bytes) for ${profile} review; omitted context: ${snapshot.omittedContext.length}.\n${snapshot.version === 2 ? `Cloud anchor: ${snapshot.anchorSha}; full context is reconstructed and verified on the server.` : `Bounded context: ${captured.fallbackReason}`}\nRequest: ${requestId}\n`);
     if (controller.signal.aborted) throw controller.signal.reason;
     posted = true;
     // Complete the admission response even on Ctrl-C so a returned run can be
     // cancelled. An uncertain POST is never retried automatically.
     let run = await apiFetch<LocalRun>(`/api/v5/review/repositories/${encodeURIComponent(repo.id)}/local${scopeQuery(company)}`, {
-      method: "POST", body: { requestId, snapshot, profile, ...(context ? { context } : {}) }, signal: AbortSignal.timeout(30000),
+      method: "POST", body: { requestId, snapshot, profile, ...(context ? { context } : {}), ...(options.fullReview ? { fullReview: true } : {}) }, signal: AbortSignal.timeout(30000),
     });
     try { runPath(run.runId); } catch { throw new Error("Review API returned no valid run ID"); }
     runId = run.runId;
@@ -276,12 +300,12 @@ export async function cmdReviewLocal(options: LocalOptions): Promise<void> {
         if (run.snapshotDigest !== snapshot.digest) throw new Error("Review API returned a result for a different snapshot");
         clearTimeout(timer);
         try {
-          const current = await captureReviewSnapshot({ staged: options.staged, base: options.base, cwd: captured.root, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(10000)]) });
+          const current = await captureReviewSnapshot({ staged: options.staged, base: options.base, cwd: captured.root, allowAnchor, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(10000)]) });
           run.workspaceCurrent = current.snapshot.digest === snapshot.digest;
         } catch { run.workspaceCurrent = null; run.workspaceCurrentReason = "Snapshot could not be recaptured"; }
         printLocalRun(run, options);
         if (interrupted) process.exitCode = interrupted;
-        else if (["failed", "cancelled", "partial"].includes(run.status) || (run.status === "completed" && run.result?.complete !== true)) process.exitCode = 1;
+        else if (["failed", "cancelled", "partial"].includes(run.status) || (run.status === "completed" && (run.result?.complete !== true || (run.reuse ?? run.result?.reuse)?.unfinished?.length))) process.exitCode = 1;
         return;
       }
       if (!ACTIVE_REVIEW_STATUSES.has(run.status)) throw new Error(`unknown local review status: ${run.status}`);
@@ -708,11 +732,12 @@ export function registerReviewCommands(
   );
   const scoped = (command: Command): Command => command.addOption(orgOption()).addOption(outputOption());
   addExamples(scoped(review.command("local")
-    .description("review a working diff before a PR; uploads selected changes and bounded tracked source context to Ditto Review")
+    .description("review a working diff before a PR; upload bounded source overlays for cloud review, reusing eligible prior work")
     .option("--staged", "review index bytes only, excluding unstaged and untracked changes")
     .option("--base <ref>", "review branch and working changes since merge-base(ref, HEAD); conflicts with --staged")
     .option("--profile <profile>", "quick, standard or deep (default quick)", "quick")
     .option("--context-file <file>", "read task context from a UTF-8 file (maximum 16000 bytes)")
+    .option("--full-review", "run a fresh cloud review without selecting prior receipts or review work")
     .option("--repository <owner/name>", "Review repository (default: current checkout's GitHub origin)")
     .option("--directory <directory>", "checkout to review (default: current directory)")
     .option("--preview", "inspect selected paths and upload size locally; no auth, upload or inference")
