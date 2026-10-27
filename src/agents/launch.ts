@@ -109,9 +109,13 @@ function mcpChosen(options: Pick<LaunchOptions, "mcp">, endpoint: Pick<Inference
   return options.mcp === true || endpoint.providerOptions?.claude_tool_surface === "mcp";
 }
 
-function mcpBanner(mcp: ClaudeMcpAttachment | undefined, dryRun?: boolean, noTools?: boolean): string {
-  if (noTools) return c("dim", "none (the endpoint has no tools)");
-  if (!mcp) return dryRun ? "mcp (catalog read at launch)" : c("yellow", "router (MCP not attached)");
+/**
+ * The banner's tools field. A fallback to the router is yellow only when MCP
+ * was asked for; by default it is as quiet as the log line that explains it.
+ */
+function mcpBanner(mcp: ClaudeMcpAttachment | undefined, opts: { dryRun?: boolean; noTools?: boolean; chosen?: boolean }): string {
+  if (opts.noTools) return c("dim", "none (the endpoint has no tools)");
+  if (!mcp) return opts.dryRun ? "mcp (catalog read at launch)" : c(opts.chosen ? "yellow" : "dim", "router (MCP not attached)");
   return `mcp ${c("dim", `(${mcp.servers} servers, ${mcp.tools} tools; ${mcpApprovalNote(mcp)})`)}`;
 }
 
@@ -558,6 +562,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   // fallback is only flagged when someone asked for MCP; an endpoint the
   // surface refuses (an app's) would otherwise warn on every launch.
   const wantMcp = harness === "claude" && wantsMcp(options, endpoint);
+  const chosen = mcpChosen(options, endpoint);
   let mcp: ClaudeMcpAttachment | undefined;
   let noTools = false;
   if (wantMcp && key?.key) {
@@ -566,7 +571,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
       if (attachment.tools > 0) mcp = attachment;
       else noTools = true;
     } catch (err) {
-      const note = mcpChosen(options, endpoint) ? c("yellow", "native MCP unavailable") : c("dim", "native MCP unavailable");
+      const note = c(chosen ? "yellow" : "dim", "native MCP unavailable");
       log(`${note} (${(err as Error).message}); the router keeps this endpoint's tools`);
     }
   }
@@ -597,7 +602,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     field("expires", `${expiresIn}${options.keepKey ? "" : c("dim", " (revoked on exit)")}`),
     budget !== undefined ? field("budget", `${budget.toLocaleString()} tokens`) : undefined,
     field("session", c("bold", sessionId)),
-    wantMcp ? field("tools", mcpBanner(mcp, options.dryRun, noTools)) : undefined,
+    wantMcp ? field("tools", mcpBanner(mcp, { dryRun: options.dryRun, noTools, chosen })) : undefined,
   ]
     .filter(Boolean)
     .join("  ");
