@@ -675,7 +675,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   const remote: RemoteMode = remoteMode(options);
   let exitCode: number | null = null;
   try {
-    const registration = remote !== "off" ? await apiFetch<{ threadId: string; kgID: string }>("/api/v5/sessions/register", { method: "POST", body: { sessionId, endpointId: endpoint.id, harness: harness === "claude" ? "claude-code" : harness, inference: options.mcpOnly ? "native" : "router", transport: options.remoteTransport ?? "cli" } }).catch((err) => {
+    const registration = remote !== "off" ? await apiFetch<{ threadId: string; kgID: string }>("/api/v5/sessions/register", { method: "POST", body: { sessionId, endpointId: endpoint.id, harness: harness === "claude" ? "claude-code" : harness, inference: options.mcpOnly ? "native" : "router", transport: options.remoteTransport ?? "cli", title: options.name?.trim() || `${path.basename(cwd)} · ${sessionId.slice(0,8)}` } }).catch((err) => {
       if (options.mcpOnly) throw err;
       log("session link unavailable; the CLI bridge will still announce this launch");
       return undefined;
