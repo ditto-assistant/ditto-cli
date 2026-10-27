@@ -80,6 +80,10 @@ already selected by an earlier launch (or an explicit manual check). It ignores
 new background candidates, including a worker that finishes publishing after
 disable has acknowledged. Running commands keep their selected version. A pin
 selects its retained version even if a newer update has downloaded concurrently.
+All `self-update` controls run the pinned, previously activated or bundled
+version; they never adopt a staged candidate before executing the control.
+`status` only inspects. `enable` and `unpin` allow a later ordinary launch to
+activate a candidate; `check` can activate only after its explicit manual action.
 
 Homebrew, Nix and operating-system package locations, project installs, npm
 scripts, CI and ephemeral `npx` executions keep their package-manager version;

@@ -536,3 +536,41 @@ test("activation markers are immutable, target-bound and cannot turn an invalid 
   assert.equal(await selectActivatedRelease(cache, "2.33.0", process.versions.node, fixtureTarget), undefined);
   await assert.rejects(recordCachedActivation(cache, version, fixtureTarget), /invalid cached activation/);
 });
+
+for (const control of ["disable", "pin", "status"]) test(`self-update ${control} does not activate staged code before its control action`, async t => {
+  for (const previouslyActivated of [false, true]) {
+    const directory = await temporary(t), config = path.join(directory, "config"), cache = runtimeCache(config);
+    const globalRoot = path.join(directory, "prefix/lib/node_modules/@heyditto/cli");
+    const installFixture = async (root, release) => {
+      await mkdir(root, { recursive: true, mode: 0o700 }); await cp(path.join(project, "dist"), path.join(root, "dist"), { recursive: true });
+      const pkg = JSON.parse(await readFile(path.join(project, "package.json"), "utf8")); pkg.version = release;
+      await writeFile(path.join(root, "package.json"), JSON.stringify(pkg));
+      const lock = JSON.parse(await readFile(path.join(root, "dist/update-lock.json"), "utf8")); lock.packageVersion = release;
+      await writeFile(path.join(root, "dist/update-lock.json"), JSON.stringify(lock));
+      await symlink(path.join(project, "node_modules"), path.join(root, "node_modules"), "dir");
+    };
+    await installFixture(globalRoot, currentPackageVersion);
+    const staged = `${version.split(".")[0]}.${Number(version.split(".")[1]) + 1}.0`;
+    await privateDirectory(cache);
+    for (const release of [...(previouslyActivated ? [version] : []), staged]) {
+      const root = path.join(cache, "versions", release, "package");
+      // Compile-owned runtime fixtures execute the actual entry/CLI/control
+      // implementation. No registry request or global installation is used.
+      await installFixture(root, release);
+      await writeUpdateJSON(path.join(path.dirname(root), "verified.json"), { version: release, target: runtimeTarget, rootIntegrity: sri(Buffer.from("owned compiled runtime fixture")), nodeRanges: [">=22"] });
+    }
+    if (previouslyActivated) await recordCachedActivation(cache, version);
+    await writeUpdateJSON(path.join(cache, "current.json"), { version: staged, target: runtimeTarget });
+    const execute = args => spawnSync(process.execPath, [path.join(globalRoot, "dist/entry.js"), ...args], { cwd: directory, env: { DITTO_CONFIG_DIR: config }, encoding: "utf8", timeout: 8000 });
+    const result = execute(["self-update", control, "--output", "json"]);
+    assert.equal(result.status, 0, result.stderr); assert.equal(result.stderr, "");
+    const expected = previouslyActivated ? version : currentPackageVersion, data = JSON.parse(result.stdout);
+    assert.equal(data.selectedVersion, expected, "a control must run the prior version, never the new candidate");
+    assert.equal(data.stagedVersion, staged);
+    await assert.rejects(readFile(path.join(cache, "activated", `${staged}.json`)), { code: "ENOENT" }, "control invocation must not create an activation marker");
+    if (control === "disable") assert.equal(data.enabled, false);
+    if (control === "pin") assert.equal(data.pinnedVersion, expected);
+    const next = execute(["--version"]); assert.equal(next.status, 0, next.stderr);
+    assert.equal(next.stdout.trim(), control === "status" ? staged : expected, "an ordinary enabled launch can activate a candidate; freeze controls preserve the prior version");
+  }
+});

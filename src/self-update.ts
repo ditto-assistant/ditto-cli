@@ -179,8 +179,12 @@ export async function startupUpdate(bundledRoot: string): Promise<string> {
   const eligibility = updateEligibility(root);
   if (eligibility && eligibility !== "disabled for this invocation") return root;
   const cache = updateRoot();
+  const args = process.argv.slice(2);
+  // Controls operate on the already active version. In particular status must
+  // inspect, and disable/pin must freeze, without first adopting staged code.
+  const control = args.find(arg => !arg.startsWith("-")) === "self-update";
   const [candidate, activated, health] = await Promise.all([
-    selectCachedRelease(cache, packageVersion, {}).catch(() => undefined),
+    control ? undefined : selectCachedRelease(cache, packageVersion, {}).catch(() => undefined),
     selectActivatedRelease(cache, packageVersion).catch(() => undefined),
     readUpdateJSON<UpdateHealth>(path.join(cache, "health.json"), 4096).catch(() => undefined),
   ]);
@@ -193,7 +197,7 @@ export async function startupUpdate(bundledRoot: string): Promise<string> {
   let selected: { root: string; version: string } | undefined;
   if (policy.pinnedVersion) {
     try { selected = await selectCachedRelease(cache, packageVersion, policy); } catch { /* invalid pin falls back */ }
-  } else if (eligibility || policy.enabled === false) selected = activated;
+  } else if (control || eligibility || policy.enabled === false) selected = activated;
   else {
     selected = candidate && (!activated || newerVersion(candidate.version, activated.version)) ? candidate : activated;
     if (selected) {
@@ -202,8 +206,7 @@ export async function startupUpdate(bundledRoot: string): Promise<string> {
     }
   }
   const active = selected ?? { root, version: packageVersion };
-  const args = process.argv.slice(2);
-  if (eligibility || policy.enabled === false || policy.pinnedVersion || !stableVersion(active.version) || !args.length || ["self-update", "help"].includes(args[0]) || args.some(a => ["--preview", "--offline", "--help", "-h", "--version", "-v"].includes(a))) return active.root;
+  if (control || eligibility || policy.enabled === false || policy.pinnedVersion || !stableVersion(active.version) || !args.length || args[0] === "help" || args.some(a => ["--preview", "--offline", "--help", "-h", "--version", "-v"].includes(a))) return active.root;
   const last = health?.lastAttemptAt;
   if (typeof last === "number" && Number.isFinite(last) && Date.now() - last < UPDATE_INTERVAL_MS) return active.root;
   try {
