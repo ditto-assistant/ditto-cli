@@ -676,33 +676,47 @@ How the wiring works:
 
 ### `codex-app`
 
-`heyditto codex-app` wires the **Codex desktop app** (ChatGPT.app) to one of
-your inference endpoints, so its models — GLM Flash and friends — work in the
-app behind its own **"Sign in with an API key"** screen. Unlike the CLI, the
-app cannot be handed environment variables (a Dock-launched app inherits
-none), so the wiring is file-based in the `~/.codex` directory the app shares
-with the CLI:
-
-- `openai_base_url` in `~/.codex/config.toml` repoints the built-in `openai`
-  provider (the Responses wire the gateway speaks) at your endpoint;
-- the minted endpoint key lands in `~/.codex/auth.json` as the API-key login,
-  the same place the app's sign-in screen writes.
+Use Codex Desktop (ChatGPT.app) with your Ditto Router key and choose models
+in the app, including Claude, OpenAI and open models from Ditto's catalog.
+Quit Desktop, then run:
 
 ```bash
-heyditto codex-app                          # sign in, pick an endpoint, wire the app
-heyditto codex-app --endpoint my-endpoint   # route through a specific endpoint
-heyditto codex-app --model glm-5.3-flash    # pin the app's model
-heyditto codex-app --dry-run                # show what would be written
-heyditto codex-app --unset                  # restore the previous wiring, revoke the key
+heyditto codex-app
+# Or connect directly to your team's router:
+heyditto codex-app --endpoint ditto-dev
 ```
 
-The command also enables the endpoint's model picker (`--codex-models on`),
-so the app's model picker lists the endpoint's models. A previous login
-(especially a ChatGPT-plan one) is backed up to `auth.json.pre-ditto` and
-confirmed before it is replaced; `--unset` restores it. The key is long-lived
-(unlike `heyditto codex`'s per-session keys) and is revoked by `--unset` or
-rotated on the next run. Both files are shared with the Codex CLI, so a bare
-`codex` run routes through Ditto too; `heyditto codex` is unaffected.
+Sign in and choose a router if prompted. Setup saves the API key and loads
+the complete model picker automatically; no model flag, pasted key or config
+edit is needed. Reopen Desktop and start a new chat, then choose your model
+in the app. The initial selection uses the endpoint's routing; selecting a
+provider model still follows that endpoint's routing and billing policy.
+
+Setup works for company members without changing the shared endpoint's
+settings. It also replaces a previously selected custom provider locally.
+The picker is a local snapshot: rerun the command to refresh it or switch
+routers. Catalog reads are paginated so the full list is loaded without
+making an unbounded gateway response.
+
+```bash
+heyditto codex-app --dry-run                # preview without creating a key or writing files
+heyditto codex-app --unset                  # restore the previous login and settings
+```
+
+A previous login is backed up and confirmed before replacement. Setup uses
+`~/.codex/config.toml` and `~/.codex/auth.json`, shared by Desktop and the
+Codex CLI, so a bare `codex` run uses the same router. `heyditto codex` keeps
+its own per-session connection. The app key is rotated on setup and revoked
+by `--unset`; `--budget` and `--expires` remain available for explicit limits.
+
+`--model` sets an optional initial selection; it does not lock the picker.
+`--no-models` skips downloading the local catalog. Setup never prints the key
+unless explicitly asked with `--show-key`.
+
+`codex app` can open Desktop after setup. It opens the app rather than
+forwarding a CLI session's provider overrides, so the saved configuration is
+what makes a Dock launch work too. Desktop also shares the CLI's MCP settings;
+connecting the model router preserves those existing tool connections.
 
 ### `endpoints`
 

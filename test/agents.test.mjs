@@ -371,7 +371,7 @@ test("endpoints lists and sets a default", async () => {
     assert.equal(stored.agentMode, true, "merge must keep existing fields");
 
     // The default is honored when --endpoint is omitted.
-    const plan = await runAsync(["codex", "--dry-run"], env);
+    const plan = await runAsync(["codex", "--dry-run"], env, configDir);
     assert.equal(plan.status, 0, plan.stderr);
     assert.equal(JSON.parse(plan.stdout).endpoint.slug, "beta");
   } finally {

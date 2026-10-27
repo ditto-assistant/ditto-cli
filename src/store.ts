@@ -39,6 +39,10 @@ export interface StoredAuth {
     key?: string;
     baseUrl: string;
     forcedLogin?: "api";
+    modelProvider?: string;
+    previousModelProvider?: string | null;
+    modelCatalog?: string;
+    previousModelCatalog?: string | null;
     model?: string;
     previousBaseUrl?: string | null;
     previousForcedLogin?: string | null;
