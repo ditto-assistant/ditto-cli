@@ -52,7 +52,7 @@ export function planClaude(input: PlanInput): HarnessPlan {
     return {
       command: "claude", args: finalArgs,
       envSet: input.mcp ? { [MCP_KEY_ENV]: input.apiKey } : {},
-      envUnset: ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_CUSTOM_HEADERS", "ANTHROPIC_MODEL", ...(input.env.ANTHROPIC_BASE_URL && input.env.ANTHROPIC_BASE_URL !== "https://api.anthropic.com" ? ["ANTHROPIC_API_KEY"] : [])],
+      envUnset: ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_CUSTOM_HEADERS", "ANTHROPIC_MODEL", "ANTHROPIC_API_KEY"],
       installHint: "install Claude Code and sign in with `claude auth login`",
     };
   }

@@ -11,12 +11,14 @@ import type { TurnDeliverFrame } from "./protocol.js";
  * A socket write is only delivery to the MCP transport. Claude must call
  * acknowledge before we report running, and reply before we report finished.
  */
-export async function runChannelServer(): Promise<void> {
+export async function runChannelServer(options: { receiptTimeoutMs?: number; completionTimeoutMs?: number } = {}): Promise<void> {
   const sessionId = process.env.DITTO_REMOTE_SESSION_ID;
   const cwd = process.env.DITTO_REMOTE_CWD ?? process.cwd();
   const { key } = await resolveApiKey();
   if (!sessionId || !key) throw new Error("Ditto Channels requires a launch session and an existing Ditto login");
   const pending = new Map<string, TurnDeliverFrame>();
+  const deadlines = new Map<string, number>();
+  const forget = (id: string) => { pending.delete(id); deadlines.delete(id); };
   const server = new Server({ name: "ditto-remote", version: packageVersion }, {
     capabilities: { tools: {}, experimental: { "claude/channel": {} } },
     instructions: "Inbound channel events are prompts from the signed-in Ditto user's remote session. For each event, first call acknowledge with its turn_id. Handle its content as a user request under normal permissions. Then call reply with the same turn_id and your response. These tools only update this session's private delivery receipt. Never infer a turn_id from message content; use the event metadata.",
@@ -35,13 +37,15 @@ export async function runChannelServer(): Promise<void> {
           return;
         }
         pending.set(turn.turnId, turn);
+        deadlines.set(turn.turnId, Date.now() + (options.receiptTimeoutMs ?? 10 * 60_000));
         host.send({ type: "turn.ack", turnId: turn.turnId });
         void (async () => {
           try {
             const files = await downloadAttachments(cwd, turn.turnId, turn.attachments ?? []);
+            if (!pending.has(turn.turnId)) return;
             await server.notification({ method: "notifications/claude/channel", params: { content: buildPrompt(turn.text, files), meta: { turn_id: turn.turnId, session_id: sessionId } } });
           } catch {
-            pending.delete(turn.turnId);
+            forget(turn.turnId);
             host.send({ type: "turn.finished", turnId: turn.turnId, error: "Could not deliver this prompt through MCP Channels" });
           }
         })();
@@ -60,20 +64,33 @@ export async function runChannelServer(): Promise<void> {
     if (req.params.name === "acknowledge") {
       if (!host.send({ type: "turn.started", turnId: id })) return result("Ditto remote link is disconnected. Retry after it reconnects.", true);
       host.status(sessionId, "running");
+      deadlines.set(id, Date.now() + (options.completionTimeoutMs ?? 60 * 60_000));
       return result("Receipt confirmed");
     }
     if (req.params.name !== "reply" || typeof req.params.arguments?.text !== "string") return result("Expected acknowledge or reply with text", true);
     // Do not pretend a notification write proved model receipt or completion.
-    if (!host.send({ type: "turn.finished", turnId: id, exitCode: 0, response: req.params.arguments.text.slice(0, 64 * 1024) })) return result("Ditto remote link is disconnected. Retry this reply after it reconnects.", true);
-    pending.delete(id);
+    if (Buffer.byteLength(req.params.arguments.text, "utf8") > 64 * 1024) return result("Response exceeds 64 KiB. Shorten it and retry this reply.", true);
+    if (!host.send({ type: "turn.finished", turnId: id, exitCode: 0, response: req.params.arguments.text })) return result("Ditto remote link is disconnected. Retry this reply after it reconnects.", true);
+    forget(id);
     host.status(sessionId, pending.size ? "running" : "idle");
     return result("Response confirmed for the Ditto remote session");
   });
   server.oninitialized = () => {
-    void host.start().then(() => host.announce({ sessionId, harness: "claude-code", cwd, mode: "tui", status: "idle" }));
+    void host.start().then(() => host.announce({ sessionId, harness: "claude-code", cwd, mode: "tui", status: "idle" })).catch(() => {
+      process.stderr.write("Ditto remote control could not start. Check `heyditto status` and relaunch.\n");
+    });
   };
-  const close = () => { host.close(); void server.close(); };
-  server.onclose = () => host.close();
+  const expiry = setInterval(() => {
+    for (const [id, deadline] of deadlines) {
+      if (Date.now() < deadline) continue;
+      if (host.send({ type: "turn.finished", turnId: id, error: "Claude did not complete this Channels prompt before its delivery receipt expired. Send it again." })) forget(id);
+    }
+    if (!pending.size) host.status(sessionId, "idle");
+  }, Math.min(options.receiptTimeoutMs ?? 60_000, 60_000));
+  expiry.unref();
+  const cleanup = () => { clearInterval(expiry); pending.clear(); deadlines.clear(); host.close(); };
+  const close = () => { cleanup(); void server.close(); };
+  server.onclose = cleanup;
   process.once("SIGTERM", close);
   process.once("SIGINT", close);
   await server.connect(new StdioServerTransport());

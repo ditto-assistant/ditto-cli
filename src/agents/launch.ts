@@ -573,7 +573,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   let noTools = false;
   if (wantMcp && key?.key) {
     try {
-      const attachment = claudeMcpAttachment(await fetchMcpCatalog(catalog.baseUrl, key.key, sessionId), sessionId, { yolo: options.yolo });
+      const attachment = claudeMcpAttachment(await fetchMcpCatalog(catalog.baseUrl, key.key, sessionId), sessionId, { yolo: options.yolo, toolDeny: claudeDittoDenyRules(cwd, process.env) });
       if (attachment.tools > 0) mcp = attachment;
       else noTools = true;
     } catch (err) {
