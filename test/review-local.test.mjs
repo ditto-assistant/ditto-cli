@@ -380,6 +380,7 @@ test("failed or cancelled runs with attached findings do not render unavailable 
     assert.match(out.stdout, /No review result is available/);
     assert.doesNotMatch(out.stdout, /Fixture defect|Real fixture finding|in reviewed scope/);
     const json = await command(root, service.base, ["local-status", RUN, "--output", "json"]).result;
+    assert.equal(json.code, 0, "status inspection does not use the action's review-success exit contract");
     assert.equal(JSON.parse(json.stdout).result.findings[0].title, "Fixture defect", "JSON receipts retain the server evidence");
   }
   const completed = await stub(t);
@@ -387,4 +388,41 @@ test("failed or cancelled runs with attached findings do not render unavailable 
   assert.equal(out.code, 0, out.stderr);
   assert.match(out.stdout, /1 finding in reviewed scope/);
   assert.match(out.stdout, /Fixture defect/);
+});
+
+const unfinishedUnit = { path: "app.ts", lens: 0, model: "fixture", reason: "stopped" };
+for (const scenario of [
+  { name: "skipped without a result", status: "skipped" },
+  { name: "superseded without a result", status: "superseded" },
+  { name: "skipped with an incomplete result", status: "skipped", result: { complete: false, findings: [] }, reuse: { version: 1, unfinished: [unfinishedUnit] } },
+  { name: "superseded with unfinished work", status: "superseded", result: { complete: false, findings: [], reuse: { version: 1, unfinished: [unfinishedUnit] } } },
+  { name: "superseded despite a complete-looking result", status: "superseded", result: { complete: true, findings: [] }, reuse: { version: 1, unfinished: [] } },
+  { name: "completed with complete false", status: "completed", result: { complete: false, findings: [] } },
+  { name: "completed with unfinished work hidden by a clear top alias", status: "completed", result: { complete: true, findings: [], reuse: { version: 1, unfinished: [unfinishedUnit] } }, reuse: { version: 1, unfinished: [] } },
+]) test(`admitted terminal receipt fails shell automation: ${scenario.name}`, async t => {
+  const root = await repository(t); await writeFile(path.join(root, "app.ts"), "selected change\n");
+  const service = await stub(t, { terminalStatus: scenario.status, receipt: { result: scenario.result, reuse: scenario.reuse } });
+  const out = await command(root, service.base, ["local"]).result;
+  assert.equal(out.code, 1, out.stderr); assert.match(out.stdout, /Review incomplete/);
+  assert.equal(service.calls.filter(call => call.method === "POST").length, 1, "stopped receipts must not cause a retry or cancellation");
+});
+
+test("legacy completed receipts and completed reuse aliases with clear work remain successful", async t => {
+  const root = await repository(t); await writeFile(path.join(root, "app.ts"), "selected change\n");
+  const reuse = { version: 1, sourceRunId: "prior-receipt", reused: [{ path: "app.ts", lens: 0, model: "fixture" }], reviewed: [], unfinished: [], retained: [], currentCostUsd: 0, historicalCostUsd: 0.01 };
+  for (const placement of ["legacy", "top", "result", "both"]) {
+    const receipt = { chargedCredits: 0, result: { complete: true, findings: [], ...(["result", "both"].includes(placement) ? { reuse } : {}) }, ...(["top", "both"].includes(placement) ? { reuse } : {}) };
+    const service = await stub(t, { receipt });
+    const out = await command(root, service.base, ["local", "--output", "json"]).result;
+    assert.equal(out.code, 0, `${placement}: ${out.stderr}`);
+    const data = JSON.parse(out.stdout); assert.equal(data.result.complete, true); assert.equal(data.chargedCredits, 0);
+    assert.equal(service.calls.filter(call => call.method === "POST").length, 1);
+  }
+});
+
+test("a local no-changes skip succeeds without admitting a review", async t => {
+  const root = await repository(t), service = await stub(t);
+  const out = await command(root, service.base, ["local", "--output", "json"]).result;
+  assert.equal(out.code, 0, out.stderr); assert.equal(JSON.parse(out.stdout).reason, "no_changes");
+  assert.equal(service.calls.filter(call => call.method === "POST").length, 0);
 });

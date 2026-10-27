@@ -172,6 +172,10 @@ interface LocalRun {
   };
 }
 
+function localReviewComplete(run: LocalRun): boolean {
+  return run.status === "completed" && run.result?.complete === true && !run.reuse?.unfinished?.length && !run.result?.reuse?.unfinished?.length;
+}
+
 function repositoryFromRemote(remote: string): string {
   const match = /^(?:git@github\.com:|https?:\/\/github\.com\/|ssh:\/\/git@github\.com\/)([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/.exec(remote.trim());
   if (!match) throw new Error("cannot identify a GitHub repository from origin; pass --repository <owner/name>");
@@ -195,7 +199,7 @@ function printLocalRun(run: LocalRun, options: LocalOptions): void {
     process.stdout.write(`${findings.length ? `${findings.length} finding${findings.length === 1 ? "" : "s"} in reviewed scope` : "No findings in reviewed scope"}\n`);
     for (const f of findings) process.stdout.write(`\n${f.severity ?? "finding"} · ${f.path ?? ""}:${f.line ?? f.startLine ?? ""} · ${f.title ?? ""}\n${f.body ?? f.explanation ?? ""}\n`);
   } else process.stdout.write("No review result is available for this run.\n");
-  if (!result?.complete || run.status !== "completed" || reuse?.unfinished?.length) process.stdout.write("Review incomplete; check coverage and errors before relying on this result.\n");
+  if (!localReviewComplete(run)) process.stdout.write("Review incomplete; check coverage and errors before relying on this result.\n");
   process.stdout.write(formatReviewReuse(reuse));
   if (result?.local?.contextComplete === false) process.stdout.write("Surrounding context was bounded; omitted files were not reviewed.\n");
   if (run.workspaceCurrent === false) process.stdout.write("The working tree changed after capture; these findings describe the saved snapshot.\n");
@@ -305,7 +309,7 @@ export async function cmdReviewLocal(options: LocalOptions): Promise<void> {
         } catch { run.workspaceCurrent = null; run.workspaceCurrentReason = "Snapshot could not be recaptured"; }
         printLocalRun(run, options);
         if (interrupted) process.exitCode = interrupted;
-        else if (["failed", "cancelled", "partial"].includes(run.status) || (run.status === "completed" && (run.result?.complete !== true || (run.reuse ?? run.result?.reuse)?.unfinished?.length))) process.exitCode = 1;
+        else if (!localReviewComplete(run)) process.exitCode = 1;
         return;
       }
       if (!ACTIVE_REVIEW_STATUSES.has(run.status)) throw new Error(`unknown local review status: ${run.status}`);

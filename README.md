@@ -373,8 +373,12 @@ to the server's current authorship, policy and dependency checks. This command
 does not publish findings or modify GitHub threads.
 
 Readable and JSON results identify the reviewed snapshot, findings, coverage,
-cost receipts and whether the current working tree still matches. Partial
-reviews return a nonzero exit code. Bounded surrounding context is stated
+cost receipts and whether the current working tree still matches. An admitted
+`review local` action exits zero only for a completed, complete receipt without
+unfinished work; stopped, skipped, superseded and partial admissions exit nonzero.
+A local no-changes skip succeeds before admission. `local-status` remains an
+inspection command and does not use the action's review-success exit contract.
+Bounded surrounding context is stated
 explicitly; "no findings in reviewed scope" is not an assertion that the
 checkout is bug-free. Results are unpublished local reviews and post nothing
 to GitHub. Organization learning-memory and complete hosted repository-policy
