@@ -84,6 +84,15 @@ All `self-update` controls run the pinned, previously activated or bundled
 version; they never adopt a staged candidate before executing the control.
 `status` only inspects. `enable` and `unpin` allow a later ordinary launch to
 activate a candidate; `check` can activate only after its explicit manual action.
+An ordinary launch that already selected a version under an enabled policy may
+finish and record that selection after a concurrent disable returns. Disable
+does not restart or undo commands already in progress.
+
+Manual checks return their own worker result in `manualResult`, separately from
+shared last-attempt health. If another worker is active, `check` reports `busy`
+and exits 75; retry it after that worker finishes. A missing or incomplete worker
+result exits nonzero. A concurrent change to shared health cannot turn a blocked
+manual request into a successful check.
 
 Homebrew, Nix and operating-system package locations, project installs, npm
 scripts, CI and ephemeral `npx` executions keep their package-manager version;

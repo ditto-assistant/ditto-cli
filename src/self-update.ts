@@ -12,6 +12,8 @@ export interface UpdatePolicy { enabled?: boolean; pinnedVersion?: string; pins?
 export interface UpdateHealth { lastAttemptAt?: number; lastSuccessAt?: number; status?: string; detail?: string; lease?: string }
 export interface UpdatePointer { version: string; installedAt: string; target?: string }
 export interface UpdateLease { pid: number; nonce: string; createdAt: number; deadlineAt: number }
+export interface UpdateResult { status: "current" | "staged" | "activated" | "pinned" | "busy" | "incomplete" | "failed"; detail?: string }
+export const updateResultExitCode = (result: UpdateResult): number => ["current", "activated", "pinned"].includes(result.status) ? 0 : result.status === "busy" ? 75 : 1;
 export const updateLeaseSlot = (now = Date.now()): string => `${Math.floor(now / UPDATE_INTERVAL_MS)}.json`;
 export function updateTarget(platform: string = process.platform, arch: string = process.arch, libc?: string): string {
   const family = platform === "linux" ? libc ?? ((process.report.getReport() as { header?: { glibcVersionRuntime?: string } }).header?.glibcVersionRuntime ? "glibc" : "musl") : "none";
@@ -221,17 +223,27 @@ export async function startupUpdate(bundledRoot: string): Promise<string> {
   return active.root;
 }
 
-async function manualUpdate(cache: string): Promise<number> {
+async function manualUpdate(cache: string): Promise<{ exitCode: number; result: UpdateResult }> {
   await privateDirectory(cache);
-  return new Promise<number>((resolve, reject) => {
-    const child = spawn(process.execPath, [fileURLToPath(new URL("./update-worker.js", import.meta.url)), cache, packageVersion, "--manual"], { cwd: cache, stdio: "ignore", env: cleanUpdateEnvironment() });
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [fileURLToPath(new URL("./update-worker.js", import.meta.url)), cache, packageVersion, "--manual"], { cwd: cache, stdio: ["ignore", "ignore", "ignore", "ipc"], env: cleanUpdateEnvironment() });
+    let result: UpdateResult | undefined;
+    child.on("message", message => {
+      const data = message as { type?: unknown; result?: { status?: unknown; detail?: unknown } } | null;
+      const value = data?.result;
+      if (!result && data?.type === "manual-update-result" && value && typeof value.status === "string" && ["current", "staged", "activated", "pinned", "busy", "incomplete", "failed"].includes(value.status) && (value.detail === undefined || typeof value.detail === "string" && value.detail.length <= 180)) result = { status: value.status as UpdateResult["status"], ...(value.detail === undefined ? {} : { detail: value.detail as string }) };
+    });
     const stop = () => { process.exitCode = 130; child.kill("SIGTERM"); };
     const terminate = () => { process.exitCode = 143; child.kill("SIGTERM"); };
     process.on("SIGINT", stop); process.on("SIGTERM", terminate);
     const timer = setTimeout(() => child.kill("SIGKILL"), 70000);
     const cleanup = () => { clearTimeout(timer); process.removeListener("SIGINT", stop); process.removeListener("SIGTERM", terminate); };
     child.once("error", error => { cleanup(); reject(error); });
-    child.once("close", code => { cleanup(); resolve(code ?? 1); });
+    child.once("close", code => {
+      cleanup();
+      const ownResult: UpdateResult = result ?? { status: "incomplete", detail: "manual worker ended without reporting its result" };
+      resolve({ exitCode: code === null ? 1 : code || updateResultExitCode(ownResult), result: ownResult });
+    });
   });
 }
 
@@ -252,15 +264,14 @@ export function registerSelfUpdateCommands(program: Command, outputOption: () =>
     let invokedRoot = fileURLToPath(new URL("../", import.meta.url));
     if (process.argv[1]) invokedRoot = await realpath(process.argv[1]).then(file => path.dirname(path.dirname(file))).catch(() => invokedRoot);
     const eligibilityReason = updateEligibility(invokedRoot, process.env, []);
-    let manualExitCode: number | undefined;
+    let manual: { exitCode: number; result: UpdateResult } | undefined;
     if (kind === "check" && (!eligibilityReason || eligibilityReason === "disabled for this invocation")) {
-      manualExitCode = await manualUpdate(cache);
+      manual = await manualUpdate(cache);
     }
     let settings: UpdatePolicy;
     try { settings = await effectiveUpdatePolicy(cache, target); }
     catch { invalidMetadata.push("preferences"); settings = { enabled: false }; }
     const health = await safeRead<UpdateHealth>("health.json") ?? {};
-    if (manualExitCode) { health.status = "failed"; health.detail ||= "manual updater exited before completion"; }
     const leaseName = typeof health.lease === "string" && /^\d+(?:-manual-[0-9a-f-]{36})?\.json$/.test(health.lease) ? health.lease : updateLeaseSlot();
     const lease = await safeRead<UpdateLease>(path.join("leases", leaseName));
     let worker: "active" | "interrupted" | "finished" | "unknown" | undefined;
@@ -275,10 +286,10 @@ export function registerSelfUpdateCommands(program: Command, outputOption: () =>
     const pointer = await safeRead<UpdatePointer>("current.json");
     const activated = await selectActivatedRelease(cache, bundled?.version ?? packageVersion).catch(() => undefined);
     const checkAllowed = !eligibilityReason || eligibilityReason === "disabled for this invocation";
-    const state = { version: packageVersion, bundledVersion: bundled?.version ?? packageVersion, selectedVersion: packageVersion, cachedVersion: stableVersion(pointer?.version) ? pointer.version : null, stagedVersion: stableVersion(pointer?.version) ? pointer.version : null, activatedVersion: activated?.version ?? null, target, policyFile: preferences.enabled, pinFile: preferences.pin, policyScope: "user", pinScope: "runtime_target", eligible: !eligibilityReason, eligibilityReason: eligibilityReason ?? null, checkRequested: kind === "check", checkAllowed: kind === "check" ? checkAllowed : null, manualExitCode: manualExitCode ?? null, enabled: settings.enabled !== false, pinnedVersion: settings.pinnedVersion ?? null, checkIntervalHours: 6, health, worker: worker ?? null, cache, historicalNpmPinDetectable: false, invalidMetadata };
+    const state = { version: packageVersion, bundledVersion: bundled?.version ?? packageVersion, selectedVersion: packageVersion, cachedVersion: stableVersion(pointer?.version) ? pointer.version : null, stagedVersion: stableVersion(pointer?.version) ? pointer.version : null, activatedVersion: activated?.version ?? null, target, policyFile: preferences.enabled, pinFile: preferences.pin, policyScope: "user", pinScope: "runtime_target", eligible: !eligibilityReason, eligibilityReason: eligibilityReason ?? null, checkRequested: kind === "check", checkAllowed: kind === "check" ? checkAllowed : null, manualExitCode: manual?.exitCode ?? null, manualResult: manual?.result ?? null, enabled: settings.enabled !== false, pinnedVersion: settings.pinnedVersion ?? null, checkIntervalHours: 6, health, worker: worker ?? null, cache, historicalNpmPinDetectable: false, invalidMetadata };
     if (options.output === "json") process.stdout.write(JSON.stringify(state) + "\n");
-    else process.stdout.write(`CLI ${state.selectedVersion} (bundled ${state.bundledVersion}, staged ${state.stagedVersion ?? "none"}, activated ${state.activatedVersion ?? "none"}): background updates ${state.enabled ? "enabled" : "disabled"}${state.pinnedVersion ? `, pinned to ${state.pinnedVersion}` : ""}${eligibilityReason ? `\nLaunch: ${eligibilityReason}` : ""}\nLast attempt: ${health.status ?? "none"}${health.detail ? ` (${health.detail})` : ""}${worker ? `\nWorker lease: ${worker} (leases are never stolen)` : ""}\n`);
-    if (kind === "check" && (!checkAllowed || health.status === "failed")) process.exitCode ||= 1;
+    else process.stdout.write(`CLI ${state.selectedVersion} (bundled ${state.bundledVersion}, staged ${state.stagedVersion ?? "none"}, activated ${state.activatedVersion ?? "none"}): background updates ${state.enabled ? "enabled" : "disabled"}${state.pinnedVersion ? `, pinned to ${state.pinnedVersion}` : ""}${eligibilityReason ? `\nLaunch: ${eligibilityReason}` : ""}${manual ? `\nManual check: ${manual.result.status}${manual.result.detail ? ` (${manual.result.detail})` : ""}` : ""}\nLast shared attempt: ${health.status ?? "none"}${health.detail ? ` (${health.detail})` : ""}${worker ? `\nWorker lease: ${worker} (leases are never stolen)` : ""}\n`);
+    if (kind === "check" && (!checkAllowed || manual?.exitCode)) process.exitCode ||= manual?.exitCode || 1;
   };
   for (const [kind, description] of [["status", "show update policy, installation eligibility and last attempt"], ["check", "check now and activate a verified update for the next invocation"], ["enable", "enable occasional updates for eligible global installations"], ["disable", "disable background downloads and new automatic activations"], ["pin", "keep the currently selected CLI version"], ["unpin", "resume updates after a version pin"]] as const) group.command(kind).description(description).addOption(outputOption()).action(action(kind));
 }

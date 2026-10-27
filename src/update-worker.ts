@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
 import { Parser } from "tar";
 import { satisfies } from "semver";
-import { effectiveUpdatePolicy, newerVersion, privateDirectory, readUpdateJSON, recordCachedActivation, selectCachedRelease, stableVersion, supportsNode, updateLeaseSlot, updateTarget, writeUpdateJSON, type UpdateHealth, type UpdateLease } from "./self-update.js";
+import { effectiveUpdatePolicy, newerVersion, privateDirectory, readUpdateJSON, recordCachedActivation, selectCachedRelease, stableVersion, supportsNode, updateLeaseSlot, updateTarget, updateResultExitCode, writeUpdateJSON, type UpdateHealth, type UpdateLease, type UpdateResult } from "./self-update.js";
 
 const NAME = "@heyditto/cli";
 const REGISTRY = "https://registry.npmjs.org";
@@ -161,7 +161,12 @@ function validateDependencies(root: string, packages: Map<string, PackageJSON>, 
   }
 }
 
-export async function runUpdate(options: WorkerOptions): Promise<void> {
+function workerResult(health: UpdateHealth): UpdateResult {
+  const status = health.status === "current" ? "current" : health.status === "pinned" ? "pinned" : health.status?.startsWith("activated ") ? "activated" : health.status?.startsWith("staged ") ? "staged" : health.status === "adjacent worker active" ? "busy" : health.status === "failed" ? "failed" : "incomplete";
+  return { status, detail: (health.detail ?? health.status ?? "worker did not complete").slice(0, 180) };
+}
+
+export async function runUpdate(options: WorkerOptions): Promise<UpdateResult> {
   const limits = { ...UPDATE_LIMITS, ...options.limits }, cache = path.resolve(options.cache);
   const fetcher = options.fetch ?? fetch, platform = options.platform ?? process.platform, arch = options.arch ?? process.arch;
   const target = updateTarget(platform, arch, options.libc), libc = target.split("-")[2];
@@ -172,7 +177,7 @@ export async function runUpdate(options: WorkerOptions): Promise<void> {
   const leases = path.join(cache, "leases"); await privateDirectory(leases);
   if ((await readdir(leases)).length >= 4096) {
     await writeUpdateJSON(path.join(cache, "health.json"), { lastAttemptAt: now, status: "paused", detail: "update lease metadata requires manual cleanup" });
-    return;
+    return { status: "incomplete", detail: "update lease metadata requires manual cleanup" };
   }
   const lease = path.join(leases, slot);
   const pending = path.join(leases, `.pending-${nonce}`);
@@ -181,7 +186,7 @@ export async function runUpdate(options: WorkerOptions): Promise<void> {
   // window, and a later time slot never steals or deletes an earlier lease.
   await writeFile(pending, JSON.stringify(owner), { flag: "wx", mode: 0o600 });
   try { await link(pending, lease); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === "EEXIST") return; throw error; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "EEXIST") return { status: "busy", detail: "an update worker already claimed this time window" }; throw error; }
   finally { await rm(pending, { force: true }); }
   const identity = await lstat(lease);
   const controller = new AbortController();
@@ -200,17 +205,17 @@ export async function runUpdate(options: WorkerOptions): Promise<void> {
   };
   try {
     await assertLease();
-    if (window !== updateLeaseSlot(clock()).slice(0, -5)) { health.status = "lease window passed"; return; }
+    if (window !== updateLeaseSlot(clock()).slice(0, -5)) { health.status = "lease window passed"; return workerResult(health); }
     for (const name of await readdir(leases)) {
       if (name === slot || !/^\d+(?:-manual-[0-9a-f-]{36})?\.json$/.test(name) || Math.abs(Number(name.split(/[.-]/)[0]) - Number(window)) > 1) continue;
       const other = await readUpdateJSON<UpdateLease>(path.join(leases, name), 4096);
       if (!other || !Number.isSafeInteger(other.pid) || other.pid <= 0 || other.deadlineAt <= now) continue;
       let alive = true;
       try { process.kill(other.pid, 0); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ESRCH") alive = false; }
-      if (alive) { health.status = "adjacent worker active"; return; }
+      if (alive) { health.status = "adjacent worker active"; return workerResult(health); }
     }
     const policy = await effectiveUpdatePolicy(cache, target);
-    if (policy.enabled === false && !options.manual || policy.pinnedVersion) { health.status = policy.pinnedVersion ? "pinned" : "disabled"; return; }
+    if (policy.enabled === false && !options.manual || policy.pinnedVersion) { health.status = policy.pinnedVersion ? "pinned" : "disabled"; return workerResult(health); }
     await writeUpdateJSON(path.join(cache, "health.json"), health);
     let downloaded = 0;
     const download = async (url: unknown, cap: number): Promise<Buffer> => {
@@ -232,7 +237,7 @@ export async function runUpdate(options: WorkerOptions): Promise<void> {
     };
     const metadata = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(await download(LATEST, limits.metadataBytes))) as PackageJSON & { dist?: { tarball?: string; integrity?: string }; repository?: { url?: string } };
     if (metadata.name !== NAME || !stableVersion(metadata.version) || metadata.repository?.url !== "git+https://github.com/ditto-assistant/ditto-cli.git") throw new Error("unexpected public CLI package identity");
-    if (!newerVersion(metadata.version, options.currentVersion)) { health.status = "current"; return; }
+    if (!newerVersion(metadata.version, options.currentVersion)) { health.status = "current"; return workerResult(health); }
     if (!supportsNode(metadata.engines?.node, options.nodeVersion)) throw new Error("new CLI version does not support this Node runtime");
     const completed = await selectCachedRelease(cache, options.currentVersion, { pinnedVersion: metadata.version }, options.nodeVersion, target).catch(() => undefined);
     if (completed) {
@@ -241,7 +246,7 @@ export async function runUpdate(options: WorkerOptions): Promise<void> {
       await writeUpdateJSON(path.join(cache, "current.json"), { version: metadata.version, installedAt: new Date().toISOString(), target }, assertPublishable);
       if (options.manual) await recordCachedActivation(cache, metadata.version, target);
       health = { ...health, status: options.manual ? "activated verified cached version" : "staged verified cached version", lastSuccessAt: Date.now() };
-      return;
+      return workerResult(health);
     }
     const rootArchive = await download(metadata.dist?.tarball, limits.archiveBytes);
     verifyIntegrity(rootArchive, metadata.dist?.integrity);
@@ -284,7 +289,7 @@ export async function runUpdate(options: WorkerOptions): Promise<void> {
     // binaries/helper executables keep only ordinary execute bits, no scripts.
     check();
     const latestPolicy = await effectiveUpdatePolicy(cache, target);
-    if (latestPolicy.enabled === false && !options.manual || latestPolicy.pinnedVersion) { health.status = "disabled during download"; return; }
+    if (latestPolicy.enabled === false && !options.manual || latestPolicy.pinnedVersion) { health.status = "disabled during download"; return workerResult(health); }
     await privateDirectory(path.join(cache, "versions"));
     const destination = path.join(cache, "versions", pkg.version);
     try { await lstat(destination); throw new Error("candidate version already exists; retaining the current version"); }
@@ -303,6 +308,7 @@ export async function runUpdate(options: WorkerOptions): Promise<void> {
     // Immutable lease slots remain as bounded metadata. No active bundle or
     // other worker's lease is ever removed, including after SIGKILL recovery.
   }
+  return workerResult(health);
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
@@ -313,6 +319,15 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     // from becoming the selected version. No caller command is restarted.
     const hardDeadline = setTimeout(() => process.exit(1), UPDATE_LIMITS.timeoutMs + 5000);
     hardDeadline.unref();
-    void runUpdate({ cache, currentVersion, manual: manual === "--manual" }).finally(() => clearTimeout(hardDeadline)).catch(() => { process.exitCode = 1; });
+    const isManual = manual === "--manual";
+    const finish = (result: UpdateResult) => {
+      if (isManual) process.exitCode = updateResultExitCode(result);
+      if (isManual && process.send && process.connected) process.send({ type: "manual-update-result", result }, () => { clearTimeout(hardDeadline); if (process.connected) process.disconnect?.(); });
+      else clearTimeout(hardDeadline);
+    };
+    void runUpdate({ cache, currentVersion, manual: isManual }).then(finish).catch(error => {
+      if (!isManual) process.exitCode = 1;
+      finish({ status: "failed", detail: (error instanceof Error ? error.message : "update failed before completion").slice(0, 180) });
+    });
   }
 }

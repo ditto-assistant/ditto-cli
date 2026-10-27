@@ -574,3 +574,48 @@ for (const control of ["disable", "pin", "status"]) test(`self-update ${control}
     assert.equal(next.stdout.trim(), control === "status" ? staged : expected, "an ordinary enabled launch can activate a candidate; freeze controls preserve the prior version");
   }
 });
+
+test("manual check reports its own busy outcome when an automatic check is active and then disabled", async t => {
+  const directory = await temporary(t), config = path.join(directory, "config"), cache = runtimeCache(config);
+  const globalRoot = path.join(directory, "prefix/lib/node_modules/@heyditto/cli"), entry = path.join(globalRoot, "dist/entry.js");
+  await mkdir(globalRoot, { recursive: true }); await cp(path.join(project, "dist"), path.join(globalRoot, "dist"), { recursive: true });
+  await cp(path.join(project, "package.json"), path.join(globalRoot, "package.json")); await symlink(path.join(project, "node_modules"), path.join(globalRoot, "node_modules"), "dir");
+  const workerFile = path.join(globalRoot, "dist/update-worker.js");
+  await writeFile(workerFile, "globalThis.fetch=()=>{throw new Error('busy fixture must not contact the registry');};\n" + await readFile(workerFile, "utf8"));
+  const healthFile = path.join(cache, "health.json"), preloader = path.join(directory, "overwrite-shared-health.mjs");
+  await writeFile(preloader, `import fs from 'node:fs/promises';import{syncBuiltinESMExports}from'node:module';const read=fs.readFile;let reads=0;fs.readFile=async function(file,...args){if(String(file)===${JSON.stringify(healthFile)}&&++reads===2)await fs.writeFile(file,JSON.stringify({status:'current'}));return read.call(this,file,...args);};syncBuiltinESMExports();`);
+  const execute = (args, overwrite = false) => spawnSync(process.execPath, [...(overwrite ? ["--import", preloader] : []), entry, ...args], { cwd: directory, env: { DITTO_CONFIG_DIR: config }, encoding: "utf8", timeout: 8000 });
+  const service = fixture(); let reached, release;
+  const fetching = new Promise(resolve => reached = resolve), proceed = new Promise(resolve => release = resolve);
+  const automatic = runUpdate({ cache, currentVersion: currentPackageVersion, platform: process.platform, arch: process.arch, libc: runtimeTarget.split("-")[2], fetch: async (url, init) => { if (url === latest) { reached(); await proceed; } return service.fetch(url, init); } });
+  let manual;
+  try {
+    await Promise.race([fetching, delay(8000, undefined, { ref: false }).then(() => { throw new Error("automatic worker did not reach its fetch"); })]);
+    const disabled = execute(["self-update", "disable", "--output", "json"]); assert.equal(disabled.status, 0, disabled.stderr); assert.equal(JSON.parse(disabled.stdout).enabled, false);
+    manual = execute(["self-update", "check", "--output", "json"], true);
+  } finally { release(); await automatic; }
+  await assert.rejects(pointer(cache), { code: "ENOENT" }, "disabled automatic worker must not publish an update");
+  assert.equal(manual.status, 75, "a blocked manual request must report busy, never successful completion");
+  const data = JSON.parse(manual.stdout);
+  assert.equal(data.manualExitCode, 75); assert.equal(data.manualResult.status, "busy");
+  assert.equal(data.health.status, "current", "concurrent shared health must not determine the manual result");
+});
+
+test("manual completion is independent of shared failure and a missing child result cannot claim success", async t => {
+  for (const missing of [false, true]) {
+    const directory = await temporary(t), config = path.join(directory, "config"), cache = runtimeCache(config);
+    const globalRoot = path.join(directory, "prefix/lib/node_modules/@heyditto/cli");
+    await mkdir(globalRoot, { recursive: true }); await cp(path.join(project, "dist"), path.join(globalRoot, "dist"), { recursive: true });
+    await cp(path.join(project, "package.json"), path.join(globalRoot, "package.json")); await symlink(path.join(project, "node_modules"), path.join(globalRoot, "node_modules"), "dir");
+    const workerFile = path.join(globalRoot, "dist/update-worker.js"), healthFile = path.join(cache, "health.json"), preloader = path.join(directory, "shared-failure.mjs");
+    const metadata = { name: "@heyditto/cli", version: currentPackageVersion, repository: { url: "git+https://github.com/ditto-assistant/ditto-cli.git" }, engines: { node: ">=22" } };
+    await writeFile(workerFile, missing ? "process.exit(0);" : `globalThis.fetch=async()=>new Response(${JSON.stringify(JSON.stringify(metadata))});\n` + await readFile(workerFile, "utf8"));
+    await writeUpdateJSON(healthFile, { status: "current" });
+    await writeFile(preloader, `import fs from 'node:fs/promises';import{syncBuiltinESMExports}from'node:module';const read=fs.readFile;let reads=0;fs.readFile=async function(file,...args){if(String(file)===${JSON.stringify(healthFile)}&&++reads===2)await fs.writeFile(file,JSON.stringify({status:'failed',detail:'another worker failed'}));return read.call(this,file,...args);};syncBuiltinESMExports();`);
+    const result = spawnSync(process.execPath, [...(missing ? [] : ["--import", preloader]), path.join(globalRoot, "dist/entry.js"), "self-update", "check", "--output", "json"], { cwd: directory, env: { DITTO_CONFIG_DIR: config }, encoding: "utf8", timeout: 8000 });
+    assert.equal(result.status, missing ? 1 : 0, result.stderr);
+    const data = JSON.parse(result.stdout);
+    assert.equal(data.manualResult.status, missing ? "incomplete" : "current");
+    assert.equal(data.health.status, missing ? "current" : "failed");
+  }
+});
