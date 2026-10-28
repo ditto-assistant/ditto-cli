@@ -145,33 +145,53 @@ async function captureGCloud(args: string[], env: NodeJS.ProcessEnv): Promise<Bu
     });
     const chunks: Buffer[] = [];
     let bytes = 0;
-    let overflow = false;
-    let timedOut = false;
+    let settled = false;
     let forceKill: ReturnType<typeof setTimeout> | undefined;
-    const stop = (): void => { child.kill(); forceKill ??= setTimeout(() => child.kill("SIGKILL"), 2000); };
-    const timer = setTimeout(() => { timedOut = true; stop(); }, 30_000);
+    const wipe = (): void => { for (const chunk of chunks) chunk.fill(0); chunks.length = 0; };
+    // Only terminate the child we created. A wrapper's descendants may retain
+    // inherited pipes, so pipe closure cannot be our settlement/cleanup signal.
+    const stop = (): void => {
+      if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
+      try { child.kill(); } catch { /* retain the bounded SIGKILL fallback */ }
+      forceKill ??= setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) {
+          try { child.kill("SIGKILL"); } catch { /* fixed failure is already settled */ }
+        }
+      }, 2000);
+    };
+    const fail = (message: string): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      wipe();
+      child.stdout.destroy();
+      child.stderr.destroy();
+      stop();
+      reject(new Error(message));
+    };
+    const timer = setTimeout(() => fail("gcloud import timed out; no key was printed"), 30_000);
     child.stdout.on("data", (chunk: Buffer) => {
+      if (settled) { chunk.fill(0); return; }
       bytes += chunk.length;
-      if (bytes > MAX_CHILD_BYTES) { overflow = true; stop(); chunk.fill(0); }
-      else chunks.push(chunk);
+      if (bytes > MAX_CHILD_BYTES) {
+        chunk.fill(0);
+        fail("gcloud import failed; output exceeded the capture limit. No key or diagnostics were printed");
+      } else chunks.push(chunk);
     });
     child.stderr.on("data", (chunk: Buffer) => { chunk.fill(0); });
-    child.on("error", () => {
-      clearTimeout(timer);
-      clearTimeout(forceKill);
-      for (const chunk of chunks) chunk.fill(0);
-      reject(new Error("could not run gcloud; install the Google Cloud CLI and run gcloud auth login"));
-    });
+    child.once("exit", () => { clearTimeout(forceKill); });
+    child.on("error", () => fail("could not run gcloud; install the Google Cloud CLI and run gcloud auth login"));
     child.on("close", (code) => {
-      clearTimeout(timer);
-      clearTimeout(forceKill);
-      if (code !== 0 || overflow || timedOut) {
-        for (const chunk of chunks) chunk.fill(0);
-        reject(new Error(timedOut ? "gcloud import timed out; no key was printed" : "gcloud import failed; check the selected account, project and Secret Manager access. Diagnostic output was suppressed"));
+      if (settled) return;
+      if (code !== 0) {
+        fail("gcloud import failed; check the selected account, project and Secret Manager access. Diagnostic output was suppressed");
         return;
       }
+      settled = true;
+      clearTimeout(timer);
+      clearTimeout(forceKill);
       const result = Buffer.concat(chunks);
-      for (const chunk of chunks) chunk.fill(0);
+      wipe();
       resolve(result);
     });
   });

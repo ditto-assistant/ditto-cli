@@ -204,7 +204,7 @@ export function inspectionMetadata(raw: unknown): Record<string, unknown> {
   const status = (raw: unknown, allowed: string[]) => typeof raw === "string" && allowed.includes(raw) ? raw : "unknown";
   const balanceAmount = (raw: unknown) => typeof raw === "number" && Number.isFinite(raw) ? raw : undefined;
   return {
-    keyId: typeof data.keyId === "string" && UUID.test(data.keyId) ? data.keyId : undefined,
+    keyId: typeof data.keyId === "string" && UUID.test(data.keyId) ? data.keyId.toLowerCase() : undefined,
     checkedAt: timestamp(data.checkedAt),
     validation: { status: status(validation.status, ["valid", "rejected", "unknown", "unsupported"]), ...(httpStatus(validation.httpStatus) === undefined ? {} : { httpStatus: httpStatus(validation.httpStatus) }) },
     models: { status: status(models.status, ["advertised", "unsupported", "unknown"]), models: Array.isArray(models.models) ? models.models.slice(0, 1000).map(raw => ({ id: safeText(object(raw).id) })).filter(row => row.id) : [], truncated: models.truncated === true },
@@ -247,7 +247,7 @@ function probeQuoteMetadata(raw: unknown): Record<string, unknown> {
     status: data.status === "ready" || data.status === "blocked" ? data.status : "blocked",
     blockedReason: typeof data.blockedReason === "string" && reasons.includes(data.blockedReason) ? data.blockedReason : undefined,
     sourceKind: data.sourceKind === "operator_estimate" ? "operator_estimate" : "unknown",
-    keyId: typeof data.keyId === "string" && UUID.test(data.keyId) ? data.keyId : undefined,
+    keyId: typeof data.keyId === "string" && UUID.test(data.keyId) ? data.keyId.toLowerCase() : undefined,
     destinationUrl,
     protocol: data.protocol === "openai_chat" || data.protocol === "anthropic_messages" ? data.protocol : undefined,
     serviceTier: data.serviceTier === "account_default" ? "account_default" : undefined,

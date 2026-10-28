@@ -521,3 +521,16 @@ test("Secret Manager binary bytes stop before credential upload", async t => {
   const result = await f.run(["provider-keys", "import", "--from", "gcloud", "--provider", "openai", "--secret", "provider-key", "--project", "my-project", "--account", "person@example.com", "--no-inspect"], "", env);
   assert.equal(result.code, 1); assert.match(result.stderr, /valid UTF-8/); assert.ok(f.calls.every(call => call.method === "GET"));
 });
+
+
+test("known provider keys in custom URL metadata stop before upload", async t => {
+  const f = await fixture(t);
+  for (const secret of [SECRET, "opaque/secret+value"] ) {
+    for (const encoded of [secret, encodeURIComponent(secret), encodeURIComponent(secret).replace(/%[A-F0-9]{2}/g, value => value.toLowerCase())]) {
+      const result = await f.run(["provider-keys", "add", "--stdin", "--provider", "custom", "--base-url", `https://api.example.com/${encoded}/v1/chat/completions`, "--no-inspect"], secret);
+      assert.equal(result.code, 1); assert.match(result.stderr, /must not contain the API key/);
+      assert.ok(!result.stdout.includes(secret)); assert.ok(!result.stderr.includes(secret));
+    }
+  }
+  assert.equal(f.calls.filter(call => call.method === "POST").length, 0);
+});

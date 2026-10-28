@@ -1,4 +1,5 @@
 import type { Command, Option } from "commander";
+import { redactKnownSecrets } from "./secret-redaction.js";
 import { printProviderMetadata } from "./provider-output.js";
 import { resolveCompany } from "./api.js";
 import { readStoredAuth } from "./store.js";
@@ -60,6 +61,7 @@ async function cmdAdd(options: AddOptions, importing: boolean): Promise<void> {
     if (options.balanceProvider === "impala" && !["custom", "custom_openai", "custom_anthropic"].includes(provider)) throw new Error("the Impala balance adapter requires a custom API key");
     if (options.balanceProvider && options.balanceProvider !== "impala" && options.balanceProvider !== provider) throw new Error("the balance adapter must match the selected named provider");
     if (options.label && options.label.includes(key)) throw new Error("the key label must not contain the API key");
+    if (url && redactKnownSecrets(url.baseUrl, [key]) !== url.baseUrl) throw new Error("--base-url must not contain the API key; no credential was submitted");
     const input: ProviderKeyInput = { companyId, provider, key, enabled: options.enable === true, label: options.label, baseUrl: url?.baseUrl, protocol, priority, modelAllow: options.modelAllow, modelDeny: options.modelDeny, templateParams, balanceProvider: options.balanceProvider as BalanceProvider | undefined };
     const saved = await addProviderKey(input);
     key = "";

@@ -145,3 +145,12 @@ test("HTTP status metadata is bounded while signed reported wallet balances rema
   for (const value of [100, 200, 429, 599]) assert.equal(inspectionMetadata({ validation: { httpStatus: value } }).validation.httpStatus, value);
   assert.equal(inspectionMetadata({ balance: { status: "reported", amountUsd: -.25, unit: "USD" } }).balance.amountUsd, -.25);
 });
+
+
+test("inspection and quote key IDs canonicalize UUID casing without changing model IDs", () => {
+  const upper = "ABCDEFAB-ABCD-ABCD-ABCD-ABCDEFABCDEF", lower = upper.toLowerCase();
+  const inspected = inspectionMetadata({ keyId: upper, models: { models: [{ id: "Provider/MixedCase" }] } });
+  assert.equal(inspected.keyId, lower); assert.equal(inspected.models.models[0].id, "Provider/MixedCase");
+  const probed = probeMetadata({ quote: { keyId: upper, models: [{ model: "Provider/MixedCase" }] } });
+  assert.equal(probed.quote.keyId, lower); assert.equal(probed.quote.models[0].model, "Provider/MixedCase");
+});
