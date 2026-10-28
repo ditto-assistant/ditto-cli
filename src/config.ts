@@ -1,6 +1,7 @@
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
+import { readFile } from "node:fs/promises";
 import { readStoredKey } from "./store.js";
 
 const requirePkg = createRequire(import.meta.url);
@@ -65,7 +66,14 @@ export interface ResolvedKey {
 
 export async function resolveApiKey(): Promise<ResolvedKey> {
   const envKey = process.env.DITTO_API_KEY?.trim();
+  const serviceFile = process.env.DITTO_SERVICE_CREDENTIAL_FILE?.trim();
+  if (envKey && serviceFile) throw new Error("set only one of DITTO_API_KEY and DITTO_SERVICE_CREDENTIAL_FILE");
   if (envKey) return { key: envKey, source: "env" };
+  if (serviceFile) {
+    const key = (await readFile(serviceFile, "utf8")).trim();
+    if (!/^ditto_svc_[A-Za-z0-9_-]{43}$/.test(key)) throw new Error("invalid service credential file");
+    return { key, source: "env" };
+  }
   const stored = await readStoredKey();
   if (stored) return { key: stored, source: "config" };
   return { source: "none" };

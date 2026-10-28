@@ -1,3 +1,4 @@
+import { iamLaunchExpiry } from "./iam.js";
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { stat } from "node:fs/promises";
@@ -56,6 +57,7 @@ export interface LaunchOptions {
   endpoint?: string;
   budget?: string;
   expires?: string;
+  expiresExplicit?: boolean;
   keepKey?: boolean;
   session?: string;
   resume?: string | boolean;
@@ -386,7 +388,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     if (lifted.continue) options = { ...options, continue: true };
   }
   const budget = parseBudget(options.budget);
-  const expiresIn = parseExpiry(options.expires);
+  let expiresIn = parseExpiry(options.expires);
   if (options.plan && harness !== "claude") throw new Error("--plan is only supported for claude");
   if ([options.yolo, options.yellow, options.plan].filter(Boolean).length > 1) {
     throw new Error("choose only one of --yolo, --yellow, --plan");
@@ -516,6 +518,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     }
   }
   endpoint ??= await resolveEndpoint(requestedEndpoint, catalog.endpoints, selected);
+  expiresIn = iamLaunchExpiry(endpoint, expiresIn, options.expiresExplicit ?? options.expires !== undefined);
   if (harness === "claude") {
     endpoint = { ...endpoint, providerOptions: { ...endpoint.providerOptions, ...repoLaunchDefaults } };
     options = resolveClaudeLaunchDefaults(options, endpoint.providerOptions);

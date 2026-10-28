@@ -7,6 +7,8 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { parse as parseToml } from "smol-toml";
+
 import { classifyAuthJson, codexHome, removeTopLevelString, upsertTopLevelString } from "../dist/agents/codexapp.js";
 import { listEndpointsStubHandler } from "./helpers/stub-api.mjs";
 
@@ -27,8 +29,9 @@ const ALPHA = {
 const MINTED_PLAINTEXT = "ditto_inf_PLAINTEXT_MUST_NEVER_PRINT_zz99";
 
 /** Stub covering the routes codex-app touches: catalog, key mint/revoke, endpoint patch. */
-function startStub() {
+function startStub({ endpoint = ALPHA, catalogStatus = 200, models, pages } = {}) {
   const calls = [];
+  let minted = 1;
   const server = http.createServer((req, res) => {
     let body = "";
     req.on("data", (c) => (body += c));
@@ -40,13 +43,23 @@ function startStub() {
         res.end(payload === undefined ? "" : JSON.stringify(payload));
       };
       if (req.url === "/api/v5/inference/endpoints" && req.method === "GET") {
-        return json(200, { baseUrl: "https://api.example.test/v1", endpoints: [ALPHA], limit: 5, used: 1 });
+        return json(200, { baseUrl: `http://127.0.0.1:${server.address().port}/v1`, endpoints: [endpoint], limit: 5, used: 1 });
+      }
+      if (req.url.startsWith("/v1/models") && req.method === "GET") {
+        assert.equal(req.headers.authorization, `Bearer ${MINTED_PLAINTEXT}`);
+        assert.equal(req.headers["x-ditto-codex-models"], "true");
+        if (pages) {
+          const cursor = new URL(req.url, "http://stub").searchParams.get("codex_cursor") ?? "first";
+          return json(200, pages[cursor]);
+        }
+        return json(catalogStatus, { models: models ?? [{ slug: endpoint.slug }, { slug: "openai/gpt-5.6-luna" }, { slug: "glm-5.3-flash" }] });
       }
       if (listEndpointsStubHandler(req, json)) return;
       const m = req.url.match(/^\/api\/v5\/inference\/endpoints\/([^/]+)(\/keys(?:\/([^/]+))?)?$/);
       if (m && m[2] === "/keys" && req.method === "POST") {
         const input = JSON.parse(body);
-        return json(201, { id: "key-2", endpointId: m[1], name: input.name, keyHint: "zz99", key: MINTED_PLAINTEXT, expiresAt: "2027-09-05T00:00:00Z", spendLimitTokens: input.spendLimitTokens ?? null, spendPeriod: input.spendPeriod ?? "never" });
+        if (endpoint.access?.iamEnforced && !endpoint.access.createKey && !["1h","4h","8h","12h"].includes(input.expiresIn)) return json(403,{message:"this role permits temporary session keys only"});
+        return json(201, { id: `key-${++minted}`, endpointId: m[1], name: input.name, keyHint: "zz99", key: MINTED_PLAINTEXT, expiresAt: "2027-09-05T00:00:00Z", spendLimitTokens: input.spendLimitTokens ?? null, spendPeriod: input.spendPeriod ?? "never" });
       }
       if (m && m[3] && req.method === "DELETE") return json(204);
       if (m && req.method === "PATCH") return json(200, { ...ALPHA, ...JSON.parse(body) });
@@ -153,8 +166,11 @@ test("codex-app --dry-run prints the plan and writes nothing", async () => {
     assert.equal(result.status, 0, result.stderr);
     const plan = JSON.parse(result.stdout);
     assert.equal(plan.endpoint.slug, "alpha");
-    assert.equal(plan.baseUrl, "https://api.example.test/v1");
-    assert.equal(plan.write[path.join(codexDir, "config.toml")].openai_base_url, "https://api.example.test/v1");
+    assert.equal(plan.baseUrl, `${stub.base}/v1`);
+    assert.equal(plan.write[path.join(codexDir, "config.toml")].openai_base_url, `${stub.base}/v1`);
+    assert.equal(plan.changesEndpointSettings, false);
+    assert.equal(plan.write[path.join(codexDir, "config.toml")].model_provider, "openai");
+    assert.equal(plan.write[path.join(codexDir, "config.toml")].model, "alpha");
     assert.equal(plan.enableModelPicker, true);
     assert.equal(existsSync(path.join(codexDir, "config.toml")), false, "config.toml untouched");
     assert.equal(existsSync(path.join(codexDir, "auth.json")), false, "auth.json untouched");
@@ -164,7 +180,7 @@ test("codex-app --dry-run prints the plan and writes nothing", async () => {
   }
 });
 
-test("codex-app wires config.toml + auth.json, enables the picker, and --unset restores", async () => {
+test("codex-app wires config.toml + auth.json and a local picker without changing the endpoint, and --unset restores", async () => {
   const stub = await startStub();
   STUB_BASE = stub.base;
   const codexDir = mkdtempSync(path.join(os.tmpdir(), "heyditto-codexapp-home-"));
@@ -177,16 +193,18 @@ test("codex-app wires config.toml + auth.json, enables the picker, and --unset r
     assert.equal(first.status, 0, first.stderr);
     assert.ok(first.stderr.includes(MINTED_PLAINTEXT), "--show-key prints the key");
     const config = readFileSync(configPath, "utf8");
-    assert.match(config, /openai_base_url = "https:\/\/api\.example\.test\/v1"/);
+    assert.equal(parseToml(config).openai_base_url, `${stub.base}/v1`);
     assert.match(config, /forced_login_method = "api"/);
     assert.match(config, /# added by `heyditto codex-app`/);
-    assert.ok(config.includes('model = "gpt-5.6-terra"'), "existing model untouched without --model");
+    assert.equal(parseToml(config).model, "alpha", "unavailable model replaced by endpoint default");
+    assert.equal(parseToml(config).model_provider, "openai");
+    const catalog = JSON.parse(readFileSync(parseToml(config).model_catalog_json, "utf8"));
+    assert.equal(catalog.models.length, 3);
     assert.ok(config.includes("[projects."), "existing tables preserved");
     const auth = JSON.parse(readFileSync(authPath, "utf8"));
     assert.equal(auth.OPENAI_API_KEY, MINTED_PLAINTEXT);
-    const patch = stub.patches().find((p) => p.body.providerOptions);
-    assert.ok(patch, "codex_models enabled on the endpoint");
-    assert.equal(patch.body.providerOptions.codex_models, true);
+    assert.equal(stub.patches().length, 0, "setup never modifies endpoint settings");
+    assert.ok(!first.stderr.includes("Sign in with an API key"), "no second login step");
     assert.equal(stub.mints().length, 1);
     assert.equal(existsSync(`${authPath}.pre-ditto`), false, "no auth backup when there was no prior login");
 
@@ -206,6 +224,7 @@ test("codex-app wires config.toml + auth.json, enables the picker, and --unset r
     assert.ok(restored.includes("[projects."), "tables preserved");
     assert.equal(existsSync(authPath), false, "codex-app's auth.json removed");
     assert.equal(stub.revocations().length, 2, "key revoked on unset");
+    assert.deepEqual(stub.revocations().map((call) => call.url.split("/").at(-1)), ["key-2", "key-3"], "rotation revokes old ID and unset revokes new ID");
   } finally {
     stub.close();
   }
@@ -303,4 +322,131 @@ test("codex-app --unset leaves a changed auth.json alone", async () => {
   } finally {
     stub.close();
   }
+});
+
+test("company setup replaces an old provider and restores provider, picker and model on unset", async () => {
+  const stub = await startStub({ endpoint: { ...ALPHA, companyId: "company-1" } });
+  STUB_BASE = stub.base;
+  const codexDir = mkdtempSync(path.join(os.tmpdir(), "heyditto-codexapp-home-"));
+  const configDir = mkdtempSync(path.join(os.tmpdir(), "heyditto-codexapp-cfg-"));
+  const configPath = path.join(codexDir, "config.toml");
+  const original = 'model_provider = "old-router"\nmodel = "old-model"\nmodel_catalog_json = "/original/catalog.json"\n[model_providers.old-router]\nname = "Old router"\nbase_url = "https://old.test/v1"\n';
+  writeFileSync(configPath, original);
+  try {
+    const wired = await run(["codex-app", "--endpoint", "alpha", "--yes"], codexDir, configDir);
+    assert.equal(wired.status, 0, wired.stderr);
+    const config = parseToml(readFileSync(configPath, "utf8"));
+    assert.equal(config.model_provider, "openai");
+    assert.equal(config.model, "alpha");
+    assert.equal(config.model_providers["old-router"].base_url, "https://old.test/v1");
+    assert.equal(stub.patches().length, 0, "member never needs manager access");
+    assert.match(wired.stderr, /company router/);
+    assert.ok(!wired.stderr.includes(MINTED_PLAINTEXT), "no credential printed by default");
+    assert.match(wired.stderr, /models ready/);
+    const second = await run(["codex-app", "--endpoint", "alpha", "--yes"], codexDir, configDir);
+    assert.equal(second.status, 0, second.stderr);
+    assert.equal((await run(["codex-app", "--unset"], codexDir, configDir)).status, 0);
+    assert.equal(readFileSync(configPath, "utf8"), original, "re-running does not overwrite the original settings to restore");
+  } finally { stub.close(); }
+});
+
+test("setup keeps a model chosen in the app when the new catalog includes it", async () => {
+  const stub = await startStub();
+  STUB_BASE = stub.base;
+  const codexDir = mkdtempSync(path.join(os.tmpdir(), "heyditto-codexapp-home-"));
+  const configDir = mkdtempSync(path.join(os.tmpdir(), "heyditto-codexapp-cfg-"));
+  const configPath = path.join(codexDir, "config.toml");
+  writeFileSync(configPath, 'model = "glm-5.3-flash"\n');
+  try {
+    const wired = await run(["codex-app", "--endpoint", "alpha", "--yes"], codexDir, configDir);
+    assert.equal(wired.status, 0, wired.stderr);
+    assert.equal(parseToml(readFileSync(configPath, "utf8")).model, "glm-5.3-flash");
+  } finally { stub.close(); }
+});
+
+for (const fixture of [{ catalogStatus: 503 }, { models: [] }]) {
+  test(`catalog failure ${JSON.stringify(fixture)} preserves the previous login and revokes the unused key`, async () => {
+    const stub = await startStub(fixture);
+    STUB_BASE = stub.base;
+    const codexDir = mkdtempSync(path.join(os.tmpdir(), "heyditto-codexapp-home-"));
+    const configDir = mkdtempSync(path.join(os.tmpdir(), "heyditto-codexapp-cfg-"));
+    const configPath = path.join(codexDir, "config.toml");
+    const authPath = path.join(codexDir, "auth.json");
+    const original = 'model_provider = "old"\nmodel = "original"\n';
+    const auth = '{"tokens":{"id_token":"previous-login"}}';
+    writeFileSync(configPath, original);
+    writeFileSync(authPath, auth);
+    try {
+      const result = await run(["codex-app", "--endpoint", "alpha", "--yes"], codexDir, configDir);
+      assert.equal(result.status, 1);
+      assert.equal(readFileSync(configPath, "utf8"), original);
+      assert.equal(readFileSync(authPath, "utf8"), auth);
+      assert.equal(stub.mints().length, 1);
+      assert.equal(stub.revocations().length, 1);
+      assert.equal(stub.patches().length, 0);
+      assert.ok(!result.stderr.includes(MINTED_PLAINTEXT));
+    } finally { stub.close(); }
+  });
+}
+
+test("adding a top-level provider does not rewrite a nested provider setting", () => {
+  const original = '[profiles.other]\nmodel_provider = "other"\n';
+  const config = parseToml(upsertTopLevelString(original, "model_provider", "openai"));
+  assert.equal(config.model_provider, "openai");
+  assert.equal(config.profiles.other.model_provider, "other");
+});
+
+test("Desktop downloads every catalog page, including Claude and open models", async () => {
+  const stub = await startStub({ pages: {
+    first: { models: [{ slug: "alpha" }, { slug: "openai/gpt-6.1-sol" }], next_cursor: "2" },
+    "2": { models: [{ slug: "anthropic/claude-fable-5.1" }], next_cursor: "3" },
+    "3": { models: [{ slug: "z-ai/glm-5.3-flash" }] },
+  } });
+  STUB_BASE = stub.base;
+  const codexDir = mkdtempSync(path.join(os.tmpdir(), "heyditto-codexapp-home-"));
+  const configDir = mkdtempSync(path.join(os.tmpdir(), "heyditto-codexapp-cfg-"));
+  try {
+    const result = await run(["codex-app", "--endpoint", "alpha"], codexDir, configDir);
+    assert.equal(result.status, 0, result.stderr);
+    const config = parseToml(readFileSync(path.join(codexDir, "config.toml"), "utf8"));
+    assert.deepEqual(JSON.parse(readFileSync(config.model_catalog_json, "utf8")).models.map(m => m.slug), ["alpha", "openai/gpt-6.1-sol", "anthropic/claude-fable-5.1", "z-ai/glm-5.3-flash"]);
+    assert.equal(stub.calls.filter(c => c.url.startsWith("/v1/models")).length, 3);
+    assert.equal(stub.patches().length, 0);
+  } finally { stub.close(); }
+});
+
+test("repeated catalog cursors fail without saving a partial model picker", async () => {
+  const stub = await startStub({ pages: {
+    first: { models: [{ slug: "alpha" }], next_cursor: "0" },
+    "0": { models: [{ slug: "alpha" }], next_cursor: "0" },
+  } });
+  STUB_BASE = stub.base;
+  const codexDir = mkdtempSync(path.join(os.tmpdir(), "heyditto-codexapp-home-"));
+  const configDir = mkdtempSync(path.join(os.tmpdir(), "heyditto-codexapp-cfg-"));
+  try {
+    const result = await run(["codex-app", "--endpoint", "alpha"], codexDir, configDir);
+    assert.equal(result.status, 1);
+    assert.equal(existsSync(path.join(codexDir, "config.toml")), false);
+    assert.equal(stub.revocations().length, 1);
+  } finally { stub.close(); }
+});
+
+
+test("IAM use-only Desktop setup defaults to a bounded key and never patches shared settings", async () => {
+  const stub=await startStub({endpoint:{...ALPHA,companyId:"company-1",access:{iamEnforced:true,createSession:true,createKey:false,maxSessionSeconds:43200}}});STUB_BASE=stub.base;
+  const home=mkdtempSync(path.join(os.tmpdir(),"iam-codex-home-"));const cfg=mkdtempSync(path.join(os.tmpdir(),"iam-codex-cfg-"));
+  try{
+    const result=await run(["codex-app","--endpoint","alpha"],home,cfg);
+    assert.equal(result.status,0,result.stderr);assert.equal(stub.mints()[0].body.expiresIn,"12h");assert.equal(stub.patches().length,0);
+    assert(existsSync(path.join(home,"ditto-models.json")));
+  }finally{stub.close();}
+});
+
+test("an explicit overlong use-only Desktop expiry is refused once without replacing local login", async () => {
+  const stub=await startStub({endpoint:{...ALPHA,companyId:"company-1",access:{iamEnforced:true,createSession:true,createKey:false,maxSessionSeconds:43200}}});STUB_BASE=stub.base;
+  const home=mkdtempSync(path.join(os.tmpdir(),"iam-codex-home-"));const cfg=mkdtempSync(path.join(os.tmpdir(),"iam-codex-cfg-"));const before='model = "old"\n';writeFileSync(path.join(home,"config.toml"),before);
+  try{
+    const result=await run(["codex-app","--endpoint","alpha","--expires","1mo"],home,cfg);
+    assert.equal(result.status,1);assert.match(result.stderr,/temporary session keys/);assert.equal(stub.mints().length,1);assert.equal(stub.mints()[0].body.expiresIn,"1mo");assert.equal(stub.patches().length,0);assert.equal(readFileSync(path.join(home,"config.toml"),"utf8"),before);assert(!existsSync(path.join(home,"auth.json")));
+  }finally{stub.close();}
 });
