@@ -60,6 +60,9 @@ export interface PlanInput {
   toolDeny?: string[];
   /** The endpoint's tools attached as Claude Code MCP servers (claude-mcp.ts); Claude only. */
   mcp?: ClaudeMcpAttachment;
+  /** Keep model inference on the user's native Claude Code account. */
+  mcpOnly?: boolean;
+  remoteTransport?: "cli" | "channels";
   /** Where the harness runs; relative paths in its passthrough argv mean files there. */
   cwd?: string;
   /** Parent environment to derive the child environment from. */

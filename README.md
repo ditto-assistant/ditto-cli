@@ -1233,3 +1233,69 @@ project and path: a directory named `build` is only excluded under a project who
 says so. Tracked artifact directories are flagged rather than claimed excluded.
 `heyditto offload` refuses to delete a folder when unrelated files, unknown projects or
 escaping symlinks beneath it would be lost.
+
+### Native Claude inference and remote delivery
+
+`heyditto claude` keeps using Ditto Router for inference. `--mcp` changes
+how tools are attached; it does not change the inference provider.
+
+Use your native Claude Code account while attaching only the endpoint's selected
+MCP tools:
+
+```sh
+claude auth login
+heyditto claude --mcp-only --endpoint my-tools
+```
+
+The CLI terminal bridge remains the default remote transport. The launch prints
+a direct Ditto chat link, and live launches are listed by harness in the app's
+Apps view, with Router or MCP-only labels and device presence. MCP-only launches
+are saved under Claude Code in Main Memory; the endpoint supplies tools with its
+existing deny rules and approvals. The endpoint credential is never used for
+native model inference. Missing MCP configuration fails without switching to
+Router inference.
+
+For Claude Code's Channels research preview:
+
+```sh
+heyditto claude --mcp-only --endpoint my-tools --remote-transport channels
+```
+
+This attaches a launch-scoped local stdio MCP server declaring `claude/channel`
+and explicitly selects it using Claude's development-channel flag. Claude shows
+its own opt-in prompt; organization policy must also permit Channels. A regular
+MCP tools connection alone does not enable inbound prompts. Keep a supported,
+current Claude Code version and native account signed in.
+
+The adapter pushes `notifications/claude/channel` with a turn ID. A transport
+write is not a model receipt: the session stays awaiting receipt until Claude
+calls `acknowledge`, and finishes only after `reply`. The reply is shown in the
+remote composer. Native local conversation history remains in Claude Code;
+this mode does not proxy model requests or mirror its entire transcript.
+
+Channels supports prompt text and attachments. Use the CLI transport for slash
+commands, remote permission answers, interruption and Teleport checkpoints;
+Channels cannot perform those terminal operations. Senders authenticate through
+the same owned-session host bridge as CLI remote control. Redelivery of a turn
+ID does not inject a second prompt.
+
+Claude Code launch defaults can be saved on an endpoint in the developer console
+or in a repository endpoint profile:
+
+```toml
+[settings]
+claude_inference = "native" # native Claude account; "router" uses Ditto Router
+claude_remote_transport = "channels" # "cli" uses the terminal bridge
+```
+
+`heyditto claude` reads the repository's default endpoint profile; `--endpoint`
+selects the cloud profile directly. Repository launch settings override cloud
+settings without requiring `repo apply`; `repo apply` also saves them to the
+cloud. Explicit `--mcp-only`, `--no-mcp-only`, and `--remote-transport` flags
+win for one launch. Resuming retains the previous session's choices. Channels
+requires interactive native Claude Code, an eligible signed-in account and an
+organization that allows Channels. The CLI attaches `ditto-remote` and adds the
+development channel flag in one launch; Claude's experimental-channel
+confirmation still appears. Router inference defaults to the CLI bridge.
+
+Channel distribution and approval: [Claude Code channel approval plan](docs/claude-channel-approval.md).

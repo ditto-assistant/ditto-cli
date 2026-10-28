@@ -141,6 +141,7 @@ export interface TurnStartedFrame {
   turnId: string;
 }
 export interface TurnFinishedFrame {
+  response?: string;
   type: "turn.finished";
   turnId: string;
   exitCode?: number | null;
