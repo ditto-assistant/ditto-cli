@@ -8,6 +8,10 @@ Receive a prompt from your own Ditto session in native Claude Code, explicitly
 acknowledge receipt, and return an explicit reply to the Ditto app. Claude uses
 its existing subscription/authentication for inference. This plugin does not
 set Anthropic credentials, inference URLs or native tool permissions.
+It supplies the remote Channel and its `acknowledge`/`reply` tools only. Selecting
+an endpoint registers the session; it does not automatically attach that
+endpoint's full MCP tool catalog. Use `heyditto claude --mcp-only` or your other
+Ditto MCP configuration for those tools.
 
 ## Build and review
 
@@ -18,6 +22,10 @@ npm ci
 npm run plugin:build
 claude plugin validate .tmp/ditto-remote-<version>
 ```
+
+The checked-in `plugins/ditto-remote` folder is a source template. It is not an
+installable GitHub-source plugin until the generated runtime is included. Do
+not submit that template unchanged to a directory that ingests GitHub content.
 
 The output is the installable plugin root, including a manifest, MCP config,
 compiled CLI runtime, exact-lock production dependencies, their licenses, and
@@ -70,7 +78,12 @@ Do not use `-p` or the SDK for this test: development Channels are interactive.
 An ordinary community marketplace does not put the plugin on Anthropic's default
 channel allowlist. The approval packet documents the two proposed routes:
 an organization administrator's exact allowlist, or coordination with Anthropic
-for the official plugin marketplace/default channel list.
+for the official plugin marketplace/default channel list. The official
+marketplace does not take submissions through the generic directory portal.
+Generic plugin and remote-MCP-connector directory listings remain separate
+records and do not establish Channel admission. A public distribution artifact
+or runnable GitHub package is an owner-reviewed publication step; the generated
+review marketplace remains local.
 
 Do not install both the launcher's `server:ditto-remote` adapter and this plugin
 in one Claude process; two local adapters create conflicting control paths.

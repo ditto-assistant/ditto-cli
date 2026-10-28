@@ -1,6 +1,7 @@
 # Ditto Remote channel approval — owner review draft
 
-Prepared October 28, 2026. Owner: Peyton Spencer. Tracker: DITTO-1585.
+Prepared October 28, 2026. Submitting organization: **OmniAura LLC**.
+Account owner/contact: **Peyton Spencer (`peyton@omniaura.ai`)**. Tracker: DITTO-1585.
 **State: engineering review candidate; not submitted, published or approved.**
 
 This is copy ready for owner review. Fields marked **owner decision** and
@@ -10,14 +11,16 @@ No submission terms have been accepted and no Anthropic message has been sent.
 ## Proposed listing
 
 - Plugin slug: `ditto-remote` (**owner decision**, retain after publication).
-- Publisher: Ditto / ditto-assistant (**owner decision**: choose the permanent
-  Anthropic submitting account and owning organization).
+- Publisher: Ditto, submitted by **OmniAura LLC** from **`peyton@omniaura.ai`**.
+  Confirm this organization is the permanent listing owner before final submission.
 - Local review identity: `ditto-remote@ditto-remote-review`; generated local
   marketplace only, separate from a public publisher identity.
 - Proposed Ditto-controlled marketplace name: `ditto-official` (**owner decision**;
   proposed namespace only, not a published or verified marketplace).
 - Source: https://github.com/ditto-assistant/ditto-cli, `plugins/ditto-remote`
   template plus `src/remote/plugin-server.ts` and `channel-server.ts` runtime.
+  **This GitHub template is not runnable until built**; use the distribution
+  checklist below before a directory ingestion or public installation.
 - Icon: unchanged canonical Ditto app icon, brand-kit `v2026.09.10` revision
   `8e79ff354ccf08130b1e00ea095599a78a6254fe`; **owner review** before the first
   portal save because the initial listing icon cannot be casually replaced.
@@ -50,8 +53,9 @@ for default Channel admission, and a generic directory/MCP listing does not
 prove Channel approval. Please confirm the appropriate channel-specific review
 route, the exact plugin/marketplace identity to use, update/version policy,
 security evidence required and whether an official-marketplace listing is
-necessary for the default allowlist. If directory submission is a separate
-step, please distinguish that review from channel admission.
+necessary for the default allowlist. We understand that the official
+marketplace does not take submissions through the directory portal; this
+request is specifically for the relationship/support-led Channel route.
 
 We can provide a sanitized native-subscription demonstration, source revision,
 exact-lock runtime bundle, test evidence, data-flow and threat model. We do not
@@ -60,30 +64,68 @@ for harnesses and accounts without admitted Channels.
 
 ## Route and questions for Peyton
 
-Current Channels reference says to coordinate with an Anthropic partner contact
-for an official-marketplace listing; it does not promise that submitting a
-plugin through the generic directory admits its Channel. If Ditto has an
-existing relationship, Peyton should use that contact with the request above.
-Otherwise, use the official submission/directory workflow to ask for the
-channel-specific route and preserve the response. **No contact is invented.**
+### Channel admission: two independent paths
 
-The documented directory portal is https://claude.ai/directory/manage. Recheck
-its current account eligibility and submission terms with Peyton at submission
-time. The review packet can be shared after owner review; submission, public
-marketplace publication and legal acceptance are separate actions.
+1. **Default allowlist / Anthropic official marketplace.** The current
+   [publish guide](https://code.claude.com/docs/en/plugins/publish) explicitly
+   says `claude-plugins-official` does **not** accept directory-portal
+   submissions. The Channels reference directs an official-marketplace
+   listing through an Anthropic partner contact. Peyton should use an existing
+   relationship, or ask the account's legitimate support route where this
+   request belongs. No contact or separate public Channel application is
+   invented. Share the request only after owner review.
+2. **An explicitly consenting organization's managed allowlist.** Its
+   owner/admin may enable `channelsEnabled` and admit the exact
+   `allowedChannelPlugins` identity. This replaces the default allowlist, so
+   preserve existing allowed entries. Do not change managed settings silently.
+   This route applies to that organization and does not establish default
+   admission for personal Pro/Max accounts. Test ordinary `--channels` with no
+   development override before claiming that pilot works.
 
-An organization pilot is a distinct route. Its consenting owner/admin can
-propose an `allowedChannelPlugins` entry for the exact installed identity and
-`channelsEnabled: true`. This setting replaces the default allowlist, so the
-admin must preserve the organization's existing allowed entries. Do not
-silently modify managed settings. An organization pilot does not establish
-default-list admission for personal Pro/Max customers.
+### Generic directory plugin / remote connector: separate listings
+
+The portal at https://claude.ai/directory/manage handles generic plugins and
+remote MCP connectors. Neither listing is the Channel approval route above.
+Keep the existing Ditto memory plugin draft separate from the new
+`ditto-remote` package and from any remote MCP connector submission. The owner
+identity is OmniAura LLC / `peyton@omniaura.ai`; authenticating that account
+alone does not approve any listing or channel. The remote connector needs its
+own limited-catalog review and demonstration before submission. No form has
+been submitted and no submission terms accepted as part of this packet.
+
+The standalone `ditto-remote` package provides the inbound Channel and
+`acknowledge`/`reply` only. Selecting a repository/default endpoint registers
+and places its session; it does **not** attach that endpoint's full MCP tool
+catalog. `heyditto claude --mcp-only` and other configured Ditto MCP connections
+supply tools separately. A normal remote MCP connection alone does not provide
+inbound Channels.
+
+## Distribution proposal to review before publishing
+
+- Build from the approved immutable CLI revision, preserving `BUILD.json`,
+  dependency-lock SHA256 and licenses; hash the final versioned ZIP.
+- Publish a versioned release artifact only after owner review. Direct
+  `--plugin-url` loading or an extracted `--plugin-dir` can use that bundle;
+  neither option grants Channel admission.
+- Directory ingestion requires a GitHub repository that holds the runnable
+  plugin. The CLI's committed `plugins/ditto-remote` folder is a source template
+  and intentionally lacks generated `runtime/`; do not submit it unchanged.
+- Propose an approved Ditto-controlled distribution repo/folder containing the
+  complete runnable bundle under that repo's rules. Review the existing
+  `ditto-claude-plugins` repo as a possible home, preserving its memory plugin
+  and draft. Do not mutate or publish that distribution as part of this packet.
+- Validate and clean-install from the exact proposed public source/artifact;
+  record its revision/hash and repeat the packaged-plugin live demo.
+- Publishing a Ditto marketplace is publishing its JSON catalog to GitHub,
+  not an Anthropic submission/approval. Keep the generated
+  `ditto-remote-review` catalog local and choose any public identity separately.
 
 ## Artifact and evidence checklist
 
 | Item | Current status / required next step |
 | --- | --- |
 | Installable versioned plugin | `npm run plugin:build` produces a local installable review bundle; `BUILD.json` binds source revision and dependency-lock SHA256 |
+| Runnable public distribution | **Not published**; approve a complete release bundle and a runnable GitHub source location before directory ingestion; the checked-in template alone is insufficient |
 | Source and runtime | Reuses the CLI channel implementation; Node provided by the host, dependencies bundled from committed lock; no startup download |
 | Manifest validation | Record exact Claude version and successful `claude plugin validate` result for the final clean source bundle |
 | Native live demo | Record a unique Browser prompt visibly arriving in the **packaged plugin** and explicit reply returning; prior server-adapter tests do not satisfy this row |
@@ -94,7 +136,8 @@ default-list admission for personal Pro/Max customers.
 | Restart / reconnect / duplicate | Exercise bounded deduplication and expiry; do not promise cross-restart exactly-once behavior |
 | Normal `--channels` | **Outstanding external admission gate**; test with exact org-allowed or official identity and no development override |
 | Privacy / retention / contact | **Owner confirmation required**; public policy coverage and monitored disclosure destination |
-| Submission | **Not submitted**; Peyton reviews identity, evidence and text, then authorizes the external step |
+| Channel request | **Not sent**; Peyton reviews the relationship/support destination, identity, artifact, evidence and request text |
+| Generic plugin / connector directory listings | Separate owner-reviewed records; neither implies official marketplace or Channel admission |
 
 Record evidence in `evidence.md` with exact revisions, dates, account scope and
 redacted request/turn IDs. Do not include customer prompts, account tokens,
