@@ -11,8 +11,8 @@ import { cwdSlug } from "../teleport/types.js";
  * in Claude Desktop live in the same store, so they resume here too.
  *
  * Transcripts can be tens of megabytes; only the head and tail are read. Claude
- * re-appends its title and last-prompt lines as the session goes, so the tail
- * carries the current ones.
+ * re-appends title records in the observed session corpus. Title synchronization
+ * fails closed when a large file has no current title evidence in its tail.
  */
 
 /** Metadata of one Claude Code transcript. */
@@ -124,7 +124,8 @@ async function nativeTitle(file: string, id: string, lines: Array<Record<string,
     const parsed = JSON.parse(data.head) as { customTitle?: unknown };
     customTitle = str(parsed.customTitle) ?? customTitle;
   } catch (error) {
-    // A partially-written sidecar must not briefly downgrade a custom title.
+    // A partial or oversized sidecar may contain a newer custom name. Remote
+    // sync fails closed rather than overwriting it with an older AI title.
     if (strictSidecar && (error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
   if (customTitle) return { title: customTitle, titleSource: "claude-custom-title" };
@@ -135,6 +136,9 @@ async function nativeTitle(file: string, id: string, lines: Array<Record<string,
 /** Reads only a verified native session's title metadata. Head/tail reads are
  * bounded to 320 KiB; a custom-title sidecar is bounded to 64 KiB. No prompt,
  * transcript body or local path is returned to the synchronization caller.
+ * An unread middle plus no valid tail title suppresses head-only titles; a
+ * valid native custom-title sidecar remains authoritative. Invalid/oversized
+ * sidecars suppress sync until readable instead of downgrading custom intent.
  */
 export async function readClaudeSessionTitle(file: string, nativeSessionId: string): Promise<ClaudeSessionTitle | undefined> {
   if (!isUuid(nativeSessionId) || path.basename(file) !== `${nativeSessionId}.jsonl`) return undefined;
@@ -142,8 +146,14 @@ export async function readClaudeSessionTitle(file: string, nativeSessionId: stri
   if (!info.isFile()) return undefined;
   const { head, tail } = await readSlice(file, info.size);
   // Avoid decoding prompt/assistant JSON unless it could be a title record.
-  const titleLines = (head + "\n" + tail).split("\n").filter(line => line.includes('"ai-title"') || line.includes('"custom-title"')).join("\n");
-  const title = await nativeTitle(file, nativeSessionId, jsonLines(titleLines), true);
+  const titleRecords = (text: string) => jsonLines(text.split("\n").filter(line => line.includes('"ai-title"') || line.includes('"custom-title"')).join("\n"));
+  const tailRecords = titleRecords(tail);
+  const tailHasTitle = tailRecords.some(line =>
+    (line.sessionId === undefined || (typeof line.sessionId === "string" && line.sessionId.toLowerCase() === nativeSessionId.toLowerCase())) &&
+    ((line.type === "ai-title" && str(line.aiTitle)) || (line.type === "custom-title" && str(line.customTitle))));
+  const unreadGap = info.size > HEAD_BYTES + TAIL_BYTES;
+  const records = unreadGap && !tailHasTitle ? [] : [...titleRecords(head), ...tailRecords];
+  const title = await nativeTitle(file, nativeSessionId, records, true);
   if (!title || Array.from(title.title).length > 160 || /[\p{Cc}\p{Zl}\p{Zp}]/u.test(title.title)) return undefined;
   return { nativeSessionId, ...title };
 }

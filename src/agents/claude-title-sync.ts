@@ -8,6 +8,10 @@ export interface ClaudeTitleWatcherOptions {
   cwd: string;
   report: (title: ClaudeSessionTitle, signal: AbortSignal) => Promise<void>;
   intervalMs?: number;
+  /** Global UUID discovery is slower than checking the expected launch path. */
+  discoveryIntervalMs?: number;
+  /** Periodic bounded reread also covers filesystems with coarse stat clocks. */
+  refreshIntervalMs?: number;
   retryBaseMs?: number;
   retryMaxMs?: number;
   requestTimeoutMs?: number;
@@ -16,7 +20,7 @@ export interface ClaudeTitleWatcherOptions {
 async function fileStamp(file: string): Promise<string | undefined> {
   try {
     const info = await stat(file);
-    return info.isFile() ? `${info.dev}:${info.ino}:${info.size}:${info.mtimeMs}` : undefined;
+    return info.isFile() ? `${info.dev}:${info.ino}:${info.size}:${info.mtimeMs}:${info.ctimeMs}` : undefined;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     throw error;
@@ -26,9 +30,7 @@ async function fileStamp(file: string): Promise<string | undefined> {
 /** The current launch directory plus exact UUID is preferred. A moved native
  * transcript can be recovered by UUID only when there is exactly one match.
  */
-async function locateTitleFile(nativeSessionId: string, cwd: string): Promise<string | undefined> {
-  const expected = path.join(claudeProjectDir(cwd), `${nativeSessionId}.jsonl`);
-  if (await fileStamp(expected)) return expected;
+async function locateTitleFile(nativeSessionId: string): Promise<string | undefined> {
   const projects = path.join(claudeHome(), "projects");
   let dirs;
   try { dirs = await readdir(projects, { withFileTypes: true }); }
@@ -60,6 +62,9 @@ export function watchClaudeSessionTitle(options: ClaudeTitleWatcherOptions): { s
   let candidate: ClaudeSessionTitle | undefined;
   let reported: string | undefined;
   let failures = 0;
+  let nextDiscovery = 0;
+  let nextRefresh = 0;
+  const expected = path.join(claudeProjectDir(options.cwd), `${options.nativeSessionId}.jsonl`);
   const abort = new AbortController();
   const interval = options.intervalMs ?? 2000;
   const schedule = (delay: number) => {
@@ -70,15 +75,22 @@ export function watchClaudeSessionTitle(options: ClaudeTitleWatcherOptions): { s
   const poll = async () => {
     try {
       if (stopped) return;
-      file ??= await locateTitleFile(options.nativeSessionId, options.cwd);
+      if (!file) {
+        if (await fileStamp(expected)) file = expected;
+        else if (Date.now() >= nextDiscovery) {
+          nextDiscovery = Date.now() + (options.discoveryIntervalMs ?? 30_000);
+          file = await locateTitleFile(options.nativeSessionId);
+        }
+      }
       if (!file) { schedule(interval); return; }
       const transcript = await fileStamp(file);
       if (!transcript) { file = undefined; version = undefined; candidate = undefined; schedule(interval); return; }
       const sidecar = await fileStamp(path.join(path.dirname(file), options.nativeSessionId, "custom-title.json"));
       const nextVersion = `${file}:${transcript}:${sidecar ?? "none"}`;
-      if (nextVersion !== version) {
+      if (nextVersion !== version || Date.now() >= nextRefresh) {
         candidate = await readClaudeSessionTitle(file, options.nativeSessionId);
         version = nextVersion;
+        nextRefresh = Date.now() + (options.refreshIntervalMs ?? 30_000);
       }
       const key = candidate ? `${candidate.titleSource}\0${candidate.title}` : undefined;
       if (candidate && key !== reported && !stopped) {

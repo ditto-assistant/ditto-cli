@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -105,9 +105,66 @@ test("discovery never guesses a neighboring session by cwd or an ambiguous UUID 
   await writeFile(path.join(f.project,`${other}.jsonl`),line(ai("Neighbor",other)));
   const projects=path.dirname(f.project);
   for(const dir of ["mirror-a","mirror-b"]){await mkdir(path.join(projects,dir));await writeFile(path.join(projects,dir,`${native}.jsonl`),line(ai("Mirror title")));}
-  const watcher=watchClaudeSessionTitle({nativeSessionId:native,cwd:f.cwd,intervalMs:10,report:async title=>{reports.push(title);}});
+  const watcher=watchClaudeSessionTitle({nativeSessionId:native,cwd:f.cwd,intervalMs:10,discoveryIntervalMs:30,report:async title=>{reports.push(title);}});
   t.after(()=>watcher.stop());
   await sleep(40);assert.equal(reports.length,0);
   await rm(path.join(projects,"mirror-b"),{recursive:true});
   await eventually(()=>reports.length===1);assert.equal(reports[0].title,"Mirror title");
+});
+
+
+test("a head-only title cannot override an unread newer middle title",async t=>{
+  const f=await fixture(t);
+  const padding=line({type:"user",message:{content:"x".repeat(400000)}});
+  await writeFile(f.file,line(ai("Old head title"))+padding+line(ai("Newer middle title"))+padding);
+  assert.equal(await readClaudeSessionTitle(f.file,native),undefined);
+  // Another session's tail record cannot make this session's stale head safe.
+  await appendFile(f.file,line(ai("Other tail title",other)));
+  assert.equal(await readClaudeSessionTitle(f.file,native),undefined);
+  await mkdir(path.dirname(f.sidecar));await writeFile(f.sidecar,JSON.stringify({customTitle:"Authoritative custom name"}));
+  assert.equal((await readClaudeSessionTitle(f.file,native)).title,"Authoritative custom name");
+  await rm(f.sidecar);
+  await appendFile(f.file,line(ai("Latest tail title")));
+  assert.equal((await readClaudeSessionTitle(f.file,native)).title,"Latest tail title");
+  await writeFile(f.file,line(custom("Persisted custom name"))+padding+line(ai("Current tail AI")));
+  assert.equal((await readClaudeSessionTitle(f.file,native)).title,"Persisted custom name");
+});
+
+test("global UUID discovery is throttled while the expected file stays responsive",async t=>{
+  const f=await fixture(t);const reports=[];
+  const watcher=watchClaudeSessionTitle({nativeSessionId:native,cwd:f.cwd,intervalMs:10,discoveryIntervalMs:1000,report:async value=>{reports.push(value);}});
+  t.after(()=>watcher.stop());
+  // Let the initial global scan finish before a moved transcript appears.
+  await sleep(60);
+  const moved=path.join(path.dirname(f.project),"moved");await mkdir(moved);
+  await writeFile(path.join(moved,`${native}.jsonl`),line(ai("Moved title")));
+  await sleep(70);assert.equal(reports.length,0,"missing transcripts must not rescan every poll");
+  await writeFile(f.file,line(ai("Expected title")));
+  await eventually(()=>reports.length===1);
+  assert.equal(reports[0].title,"Expected title");
+});
+
+test("same-size title rewrites with restored mtime are detected",async t=>{
+  const f=await fixture(t);const reports=[];
+  await writeFile(f.file,line(ai("First name")));
+  const fixedTime=new Date(Math.floor(Date.now()/1000)*1000);await utimes(f.file,fixedTime,fixedTime);
+  const before=await stat(f.file);
+  const watcher=watchClaudeSessionTitle({nativeSessionId:native,cwd:f.cwd,intervalMs:10,refreshIntervalMs:60000,report:async value=>{reports.push(value);}});
+  t.after(()=>watcher.stop());await eventually(()=>reports.length===1);
+  await writeFile(f.file,line(ai("Other name")));await utimes(f.file,fixedTime,fixedTime);
+  const after=await stat(f.file);
+  assert.equal(after.size,before.size);assert.equal(after.mtimeMs,before.mtimeMs);
+  assert.notEqual(after.ctimeMs,before.ctimeMs,"fixture must exercise ctime change");
+  await eventually(()=>reports.length===2);assert.equal(reports[1].title,"Other name");
+});
+
+test("unreadable custom sidecars suppress AI reports until custom metadata is valid",async t=>{
+  const f=await fixture(t);const reports=[];
+  await writeFile(f.file,line(ai("Older AI name")));await mkdir(path.dirname(f.sidecar));
+  await writeFile(f.sidecar,"x".repeat(65537));
+  const watcher=watchClaudeSessionTitle({nativeSessionId:native,cwd:f.cwd,intervalMs:10,retryBaseMs:10,retryMaxMs:10,report:async value=>{reports.push(value);}});
+  t.after(()=>watcher.stop());await sleep(50);assert.equal(reports.length,0);
+  await writeFile(f.sidecar,"{");await sleep(50);assert.equal(reports.length,0);
+  await writeFile(f.sidecar,JSON.stringify({customTitle:"Recovered custom name"}));
+  await eventually(()=>reports.length===1);assert.equal(reports[0].title,"Recovered custom name");
 });
