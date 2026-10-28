@@ -9,6 +9,7 @@ import type { HarnessPlan } from "../agents/types.js";
 export function withChannelServer(plan: HarnessPlan, sessionId: string, cwd: string): HarnessPlan {
   const args = [...plan.args];
   const i = args.indexOf("--mcp-config");
+  if (i >= 0 && (!args[i + 1] || args[i + 1].startsWith("--"))) throw new Error("--mcp-config requires a value");
   const value = i >= 0 ? args[i + 1] : undefined;
   const fromFile = value !== undefined && !value.trimStart().startsWith("{");
   const config = value ? JSON.parse(fromFile ? readFileSync(path.resolve(cwd, value), "utf8") : value) : { mcpServers: {} };

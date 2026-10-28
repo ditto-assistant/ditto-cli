@@ -508,7 +508,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   endpoint ??= await resolveEndpoint(requestedEndpoint, catalog.endpoints, selected);
   if (!options.mcpOnly) await assertEndpointActive(endpoint);
   if (options.mcpOnly && (harness !== "claude" || options.mcp === false)) throw new Error("--mcp-only requires Claude Code with MCP tools enabled");
-  if (options.remoteTransport === "channels" && (!options.mcpOnly || options.headless || options.remoteControl === false || options.prompt !== undefined)) throw new Error("MCP Channels requires an interactive `heyditto claude --mcp-only` session with remote control enabled");
+  if (options.remoteTransport === "channels" && (!options.mcpOnly || options.headless || remoteMode(options) === "off" || options.prompt !== undefined)) throw new Error("MCP Channels requires an interactive `heyditto claude --mcp-only` session with remote control enabled");
 
   // A Claude session first seen here keeps its own id as the Ditto session id,
   // so `--resume <that id>` finds this record next time.
@@ -578,7 +578,8 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
       else noTools = true;
     } catch (err) {
       if (options.mcpOnly) {
-        await revokeKey(endpoint.id, key.id);
+        try { await revokeKey(endpoint.id, key.id); }
+        catch { log(`could not revoke session key …${key.keyHint}; it expires in ${expiresIn}`); }
         throw new Error(`MCP-only setup failed; no inference Router fallback: ${(err as Error).message}`);
       }
       const note = c(chosen ? "yellow" : "dim", "native MCP unavailable");

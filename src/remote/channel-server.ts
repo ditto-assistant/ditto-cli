@@ -43,7 +43,9 @@ export async function runChannelServer(options: { receiptTimeoutMs?: number; com
           try {
             const files = await downloadAttachments(cwd, turn.turnId, turn.attachments ?? []);
             if (!pending.has(turn.turnId)) return;
+            deadlines.delete(turn.turnId);
             await server.notification({ method: "notifications/claude/channel", params: { content: buildPrompt(turn.text, files), meta: { turn_id: turn.turnId, session_id: sessionId } } });
+            if (pending.has(turn.turnId) && !deadlines.has(turn.turnId)) deadlines.set(turn.turnId, Date.now() + (options.receiptTimeoutMs ?? 10 * 60_000));
           } catch {
             forget(turn.turnId);
             host.send({ type: "turn.finished", turnId: turn.turnId, error: "Could not deliver this prompt through MCP Channels" });
@@ -81,11 +83,12 @@ export async function runChannelServer(options: { receiptTimeoutMs?: number; com
     });
   };
   const expiry = setInterval(() => {
+    let expired = false;
     for (const [id, deadline] of deadlines) {
       if (Date.now() < deadline) continue;
-      if (host.send({ type: "turn.finished", turnId: id, error: "Claude did not complete this Channels prompt before its delivery receipt expired. Send it again." })) forget(id);
+      if (host.send({ type: "turn.finished", turnId: id, error: "Claude did not complete this Channels prompt before its delivery receipt expired. Send it again." })) { forget(id); expired = true; }
     }
-    if (!pending.size) host.status(sessionId, "idle");
+    if (expired && !pending.size) host.status(sessionId, "idle");
   }, Math.min(options.receiptTimeoutMs ?? 60_000, 60_000));
   expiry.unref();
   const cleanup = () => { clearInterval(expiry); pending.clear(); deadlines.clear(); host.close(); };
