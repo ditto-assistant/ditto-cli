@@ -41,10 +41,11 @@ in the terminal as an inbound channel message. Claude made the two MCP calls,
 - Session: `b8280237-b7aa-4788-9276-726d454b2c27`.
 - Turn: `5c7969c1-3e34-45b7-b419-0614f51ccb60`.
 
-The coordinator preserved these local owner-review originals:
+The coordinator preserved these local owner-review originals, identified here
+by basename. Their personal absolute paths are not part of the committed packet:
 
-- `/Users/peyton/.codex/visualizations/2026/10/27/01a17f77-71ab-7660-8bb1-45e4f1156912/remote-plugin-reliability/packaged-native-channel-terminal.png`
-- `/Users/peyton/.codex/visualizations/2026/10/27/01a17f77-71ab-7660-8bb1-45e4f1156912/remote-plugin-reliability/packaged-native-channel-browser.png`
+- `packaged-native-channel-terminal.png`
+- `packaged-native-channel-browser.png`
 
 Review and sanitize screenshots before external sharing. This run proves
 visible packaged-plugin delivery, actual model receipt and an explicit reply
@@ -54,9 +55,12 @@ two-account backend isolation or complete submission-security acceptance.
 Those checks remain outstanding in the table and submission draft. A generic
 MCP connector demonstration is a separate result.
 
-No runtime bundle rebuild is needed for the subsequent documentation-only
-updates. Keep the artifact's runtime revision separate from the packet's latest
-documentation revision; do not relabel the tested artifact as a new runtime.
+The subsequent documentation-only updates did not rebuild or relabel that
+artifact. Review follow-up changes to build invocation, Git provenance checks
+and startup diagnostics are tested separately at their own source revision.
+They are outside the `4a2debc` live-demo claim; no new visible native run is
+claimed for those changes. Keep every artifact's runtime revision separate from
+the packet's latest documentation revision.
 
 ## Reported Mac mini hook failure
 

@@ -8,12 +8,21 @@ import { readStoredAuth } from "../store.js";
 import { runChannelServer } from "./channel-server.js";
 import { remoteSessionURL } from "./session-link.js";
 
+/** Only these locally constructed setup errors may be shown verbatim. API,
+ * configuration-parser and transport causes can contain private information.
+ */
+class PluginSetupError extends Error {}
+
+export function pluginStartupMessage(error: unknown): string {
+  return error instanceof PluginSetupError ? error.message : "Ditto Remote could not start. Check `heyditto status` and your endpoint configuration, then restart the MCP server.";
+}
+
 /** A plain `claude` plugin launch has no Ditto wrapper to register its shell.
  * Resolve existing read-only configuration; never create endpoints or keys,
  * change native inference, or open an interactive picker on the MCP stream.
  */
 export async function preparePluginSession(cwd = process.env.DITTO_REMOTE_CWD ?? process.cwd()): Promise<{ sessionId: string; cwd: string }> {
-  if (!(await resolveApiKey()).key) throw new Error("Sign in with `heyditto login`, then restart the Ditto Remote MCP server.");
+  if (!(await resolveApiKey()).key) throw new PluginSetupError("Sign in with `heyditto login`, then restart the Ditto Remote MCP server.");
   // The CLI wrapper already registered this exact launch and chosen its endpoint.
   if (process.env.DITTO_REMOTE_SESSION_ID) return { sessionId: process.env.DITTO_REMOTE_SESSION_ID, cwd };
   const catalog = await listEndpoints();
@@ -23,7 +32,7 @@ export async function preparePluginSession(cwd = process.env.DITTO_REMOTE_CWD ??
   const endpoint = profile
     ? await findProfileEndpoint(profile, catalog.endpoints)
     : selected ? findEndpoint(catalog.endpoints, selected) : catalog.endpoints.length === 1 ? catalog.endpoints[0] : undefined;
-  if (!endpoint) throw new Error("Select an existing endpoint with `heyditto endpoints use <slug>` or apply this repository's .ditto profile, then restart Ditto Remote.");
+  if (!endpoint) throw new PluginSetupError("Select an existing endpoint with `heyditto endpoints use <slug>` or apply this repository's .ditto profile, then restart Ditto Remote.");
   const sessionId = randomUUID();
   const registration = await apiFetch<{ threadId: string; kgID?: string; graphAlias?: string }>("/api/v5/sessions/register", { method: "POST", body: {
     sessionId, endpointId: endpoint.id, harness: "claude-code", inference: "native", transport: "channels",
@@ -38,16 +47,16 @@ export async function runPluginServer(): Promise<void> {
   // in, and does not expose registration in the MCP handshake. Never create
   // an apparently controllable session just because the plugin was installed.
   if (process.env.DITTO_REMOTE_CHANNELS_ENABLED !== "1") {
-    throw new Error("Enable this review plugin explicitly with DITTO_REMOTE_CHANNELS_ENABLED=1 and Claude's matching Channels flag.");
+    throw new PluginSetupError("Enable this review plugin explicitly with DITTO_REMOTE_CHANNELS_ENABLED=1 and Claude's matching Channels flag.");
   }
   const session = await preparePluginSession();
   await runChannelServer(session);
 }
 
 if (process.argv[1]?.endsWith("plugin-server.js")) {
-  runPluginServer().catch(() => {
+  runPluginServer().catch((error: unknown) => {
     // Do not print request bodies, credentials or server cause text onto MCP stderr.
-    process.stderr.write("Ditto Remote is inactive or could not start. For an explicitly opted-in review launch, set DITTO_REMOTE_CHANNELS_ENABLED=1 alongside Claude's matching Channels flag. Also check `heyditto status` and `heyditto endpoints use <slug>`, then restart the MCP server.\n");
+    process.stderr.write(`${pluginStartupMessage(error)}\n`);
     process.exitCode = 1;
   });
 }
