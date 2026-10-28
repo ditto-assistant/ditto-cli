@@ -1306,8 +1306,11 @@ Use explicit organization scope when inspecting or changing access:
 
 ```sh
 heyditto orgs members --org your-team --output json
+heyditto orgs allowance @teammate --org your-team --output json
 heyditto orgs set-role @teammate member --org your-team --expected-role viewer --dry-run
 heyditto orgs set-role @teammate member --org your-team --expected-role viewer
 ```
+
+`allowance` reads your own allowance when the member is omitted. Current org managers can inspect another member by exact id, email or handle. It uses Ditto MCP, exposes no company balance or purchase history, and changes no budget. MCP refusals exit with an error.
 
 `set-role` resolves exactly one member, sends only the role, and reports the previous role. `--expected-role` is a client preflight, not an atomic compare-and-set. Owner/admin authorization and last-owner/last-manager protections are enforced by the backend. Reverting a role uses the same command with the reported previous role and current authorization. Directory listing is capped at 2000 rows and reports possible truncation. Role changes refuse a directory at that cap, since an exact name lookup cannot be guaranteed complete. These commands need a full account CLI key and a backend that admits the member routes; narrowed space/tool/thread keys are refused.

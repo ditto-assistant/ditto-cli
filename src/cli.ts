@@ -286,10 +286,12 @@ async function callAndPrint(
   name: string,
   args: Record<string, unknown>,
   format: OutputFormat,
+  failOnError = false,
 ): Promise<void> {
   const client = await getClient();
   try {
     const result = await client.callTool({ name, arguments: args });
+    if (failOnError && result.isError) throw new Error(formatToolResult(result, "text"));
     process.stdout.write(`${formatToolResult(result, format)}\n`);
   } finally {
     await client.close();
@@ -1245,7 +1247,8 @@ your own workspace or an app workspace.`,
 
   registerEndpointCommands(program, addExamples, outputOption);
   registerAppCommands(program, addExamples, outputOption);
-  registerOrgCommands(program, addExamples, outputOption, orgOption);
+  registerOrgCommands(program, addExamples, outputOption, orgOption,
+    (name, args, output) => callAndPrint(name, args, parseOutputFormat(output), true));
   registerReviewCommands(program, addExamples, outputOption, orgOption);
   registerSelfUpdateCommands(program, outputOption);
   registerHarnessCommands(program, addExamples);
