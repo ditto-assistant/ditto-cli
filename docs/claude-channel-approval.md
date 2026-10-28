@@ -28,6 +28,15 @@ organization decision applies only inside that organization. Directory listing,
 MCP connector verification and channel allowlisting must each be tracked
 separately; obtaining one is not proof of the others.
 
+## Review candidate
+
+The plugin source now lives in `plugins/ditto-remote`; `npm run plugin:build`
+produces an installable bundle with the existing channel server and exact-lock
+production dependencies. See [the owner review draft](submissions/ditto-remote/submission-draft.md),
+[security and data flow](submissions/ditto-remote/security-and-data-flow.md), and
+[evidence checklist](submissions/ditto-remote/evidence.md). Packaging is separate
+from channel admission, a public marketplace listing and final live evidence.
+
 ## 1. Prepare a reviewable plugin and submission packet
 
 Engineering prepares a versioned plugin containing the local `ditto-remote`
@@ -36,8 +45,8 @@ plugin slug and a Ditto-controlled marketplace identity before publishing;
 plugin names cannot be casually renamed after installation. Reuse the current
 adapter rather than forking a second protocol implementation. Installation,
 authentication, pairing, session selection, revocation and upgrade/uninstall
-must work from a clean profile. This packaging is planned, not implemented by
-the current CLI adapter.
+must work from a clean profile. The review bundle implements this packaging; final validation and live evidence
+are tracked in the packet. It has not been published as a marketplace plugin.
 
 The packet should include:
 
@@ -81,7 +90,14 @@ installing a marketplace.
 
 ## 3. Ask Anthropic for default approval
 
-Peyton submits the prepared plugin through the current developer portal at
+The Channels reference specifically says to coordinate with an Anthropic partner
+contact for listing in the official plugin marketplace; an ordinary community
+marketplace is not accepted by the default channel allowlist. Use that contact
+if Ditto has one, and ask for the channel-specific review route. Do not invent
+a contact or infer admission from a generic plugin listing.
+
+For the separate directory workflow, Peyton can submit the reviewed plugin
+through the current developer portal at
 [claude.ai/directory/manage](https://claude.ai/directory/manage), from the account
 or organization that should permanently own its listing. The directory docs
 require an eligible paid account; Team/Enterprise submissions need the relevant
@@ -126,11 +142,11 @@ launch and retain native/MCP-only versus Router labels in the app.
 
 ## Immediate next steps
 
-1. Engineering: finish the current remote-control PR set and preserve sanitized
-   native/Router test evidence; the current runtime tests already show both
-   transports but do not prove plugin approval.
-2. Engineering: build the distributable plugin, complete the checklist and
-   produce a reviewable submission packet with a proposed owning organization.
+1. Engineering: validate the packaged plugin and preserve a sanitized visible
+   native prompt/receipt/reply recording; previous server-adapter tests already
+   show both transports but do not prove this package or channel admission.
+2. Engineering and Peyton: review the submission packet, confirm publisher,
+   icon, monitored contact, policy coverage and proposed owning organization.
 3. Peyton: review that packet and submit the channel-specific request through
    the appropriate account. Track responses and pilot evidence in DITTO-1585.
 

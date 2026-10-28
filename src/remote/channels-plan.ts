@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { writePrivateSettings } from "../agents/claude-mcp.js";
 import type { HarnessPlan } from "../agents/types.js";
+import { hookNodeExecutable } from "./hooks.js";
 
 /** A launch-scoped stdio server. Authentication stays in inherited config,
  * never argv, and the client must explicitly opt this custom channel in. */
@@ -33,7 +34,7 @@ export function withChannelServer(plan: HarnessPlan, sessionId: string, cwd: str
   }
   if (Object.prototype.hasOwnProperty.call(config.mcpServers, "ditto-remote")) throw new Error("--mcp-config already defines a server named ditto-remote");
   config.mcpServers["ditto-remote"] = {
-    command: process.execPath,
+    command: hookNodeExecutable(),
     args: [fileURLToPath(new URL("./channel-server.js", import.meta.url))],
     env: { DITTO_REMOTE_SESSION_ID: sessionId, DITTO_REMOTE_CWD: cwd },
   };

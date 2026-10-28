@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { rm } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -86,8 +87,22 @@ function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
+/** Homebrew resolves process.execPath to a versioned Cellar path, removed on
+ * upgrade. Prefer its stable opt link only when it resolves to this exact Node.
+ * Other installations keep their original executable rather than selecting an
+ * unrelated executable from the shell's PATH.
+ */
+export function hookNodeExecutable(executable = process.execPath): string {
+  const match = executable.match(/^(.*)\/Cellar\/(node(?:@[^/]+)?)\/[^/]+\/bin\/node$/);
+  if (!match) return executable;
+  const stable = path.join(match[1], "opt", match[2], "bin", "node");
+  try { if (realpathSync(stable) === realpathSync(executable)) return stable; }
+  catch { /* Keep the known working executable when no matching stable link exists. */ }
+  return executable;
+}
+
 /** The `--settings <json>` value that makes Claude Code report turn boundaries to `socketPath`. */
-export function claudeHookSettings(socketPath: string, script = hookScriptPath(), node = process.execPath): string {
+export function claudeHookSettings(socketPath: string, script = hookScriptPath(), node = hookNodeExecutable()): string {
   const command = (event: string) => `${shellQuote(node)} ${shellQuote(script)} ${shellQuote(socketPath)} claude ${event}`;
   const settings = {
     hooks: {
@@ -103,7 +118,7 @@ export function claudeHookSettings(socketPath: string, script = hookScriptPath()
 }
 
 /** The `-c notify=[...]` override that makes Codex report `agent-turn-complete` to `socketPath`. */
-export function codexNotifyOverride(socketPath: string, script = hookScriptPath(), node = process.execPath): string {
+export function codexNotifyOverride(socketPath: string, script = hookScriptPath(), node = hookNodeExecutable()): string {
   const toml = (s: string) => JSON.stringify(s);
   return `notify=[${[node, script, socketPath, "codex"].map(toml).join(",")}]`;
 }

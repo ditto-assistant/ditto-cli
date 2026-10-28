@@ -11,9 +11,9 @@ import type { TurnDeliverFrame } from "./protocol.js";
  * A socket write is only delivery to the MCP transport. Claude must call
  * acknowledge before we report running, and reply before we report finished.
  */
-export async function runChannelServer(options: { receiptTimeoutMs?: number; completionTimeoutMs?: number } = {}): Promise<void> {
-  const sessionId = process.env.DITTO_REMOTE_SESSION_ID;
-  const cwd = process.env.DITTO_REMOTE_CWD ?? process.cwd();
+export async function runChannelServer(options: { receiptTimeoutMs?: number; completionTimeoutMs?: number; sessionId?: string; cwd?: string } = {}): Promise<void> {
+  const sessionId = options.sessionId ?? process.env.DITTO_REMOTE_SESSION_ID;
+  const cwd = options.cwd ?? process.env.DITTO_REMOTE_CWD ?? process.cwd();
   const { key } = await resolveApiKey();
   if (!sessionId || !key) throw new Error("Ditto Channels requires a launch session and an existing Ditto login");
   const pending = new Map<string, TurnDeliverFrame>();
