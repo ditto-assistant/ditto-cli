@@ -43,7 +43,7 @@ import {
   updateEndpoint,
 } from "./api.js";
 import { openInBrowser } from "./browser.js";
-import { endpointURL } from "./config.js";
+import { endpointURL, resolveApiKey } from "./config.js";
 import { activationLink, formatActivation } from "./endpoint-format.js";
 import {
   STORE_IDS,
@@ -722,6 +722,14 @@ export async function cmdEndpointSet(ref: string, options: EndpointSetOptions): 
     throw new Error("nothing to change; pass at least one --flag (see `heyditto endpoints set --help`)");
   }
 
+  const credential = (await resolveApiKey()).key;
+  if (credential?.startsWith("ditto_svc_")) {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(ref)) throw new Error("service credentials require the exact endpoint UUID");
+    if (Object.keys(patch).length !== 1 || patch.model === undefined || Object.keys(agent).length || touchesMaps || touchesFailover) throw new Error("service credential endpoint set currently supports only --model without a configuration read");
+    const updated = await updateEndpoint(ref, patch);
+    process.stdout.write(isJSON(options) ? `${JSON.stringify(updated, null, 2)}\n` : `Updated endpoint ${ref}: model.\n`);
+    return;
+  }
   const { endpoint } = await getEndpoint(ref);
   if (touchesFailover) {
     const current = endpoint.failover ?? { enabled: false, model: "", maxCostUsd: 0 };
