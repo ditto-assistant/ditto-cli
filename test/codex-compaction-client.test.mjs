@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, mkdir, symlink, writeFile, rm } from "node:fs/promises";
+import { copyFile, mkdtemp, mkdir, symlink, writeFile, rm } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -23,6 +23,17 @@ function rpc(child) {
   const readers = [];
   let stderr = "";
   let stopped = false;
+  let failure;
+  const fail = error => {
+    if (stopped || failure) return;
+    failure = new Error(`${error.message}: ${stderr}`);
+    for (const p of pending.values()) { clearTimeout(p.timer); p.reject(failure); }
+    pending.clear();
+    for (const wake of readers.splice(0)) wake();
+  };
+  child.on("error", fail);
+  child.stdin.on("error", fail);
+  child.once("exit", (code, signal) => fail(new Error(`CLI exited (${code ?? signal})`)));
   child.stderr.on("data", c => stderr = (stderr + c).slice(-8000));
   readline.createInterface({ input: child.stdout }).on("line", line => {
     let item;
@@ -37,6 +48,7 @@ function rpc(child) {
     }
   });
   const send = (method, params) => new Promise((resolve, reject) => {
+    if (failure) return reject(failure);
     const id = ++seq;
     const timer = setTimeout(() => reject(new Error(`${method} timed out: ${stderr}`)), 15000);
     pending.set(id, { resolve, reject, timer });
@@ -51,6 +63,7 @@ function rpc(child) {
     async completed() {
       const deadline = Date.now() + 15000;
       while (Date.now() < deadline) {
+        if (failure) throw failure;
         const idx = notices.findIndex(n => n.method === "turn/completed");
         if (idx >= 0) {
           const turn = notices.splice(idx, 1)[0].params.turn;
@@ -68,8 +81,16 @@ function rpc(child) {
       if (child.exitCode !== null || child.signalCode !== null) return;
       child.stdin.end();
       const exited = new Promise(resolve => child.once("exit", resolve));
-      const timer = setTimeout(() => child.kill("SIGTERM"), 1000);
-      await exited; clearTimeout(timer);
+      const terminate = signal => {
+        try {
+          // start() creates this process group in the fixture's own cwd.
+          if (process.platform !== "win32") process.kill(-child.pid, signal);
+          else child.kill(signal);
+        } catch (error) { if (error.code !== "ESRCH") throw error; }
+      };
+      const timer = setTimeout(() => terminate("SIGTERM"), 1000);
+      const killTimer = setTimeout(() => terminate("SIGKILL"), 2000);
+      await exited; clearTimeout(timer); clearTimeout(killTimer);
     },
   };
 }
@@ -80,7 +101,10 @@ for (const model of ["gpt-6.1-sol", "anthropic/claude-fable-5.1", "z-ai/glm-5.3"
     await mkdir(path.join(home, "bin"));
     await mkdir(path.join(home, "work"));
     await mkdir(path.join(home, "codex"));
-    await symlink(path.resolve(binary), path.join(home, "bin", "codex"));
+    if (process.platform === "win32") {
+      assert.equal(path.extname(binary).toLowerCase(), ".exe", "On Windows set DITTO_TEST_CODEX_BINARY to the installed native Codex .exe");
+      await copyFile(path.resolve(binary), path.join(home, "bin", "codex.exe"));
+    } else await symlink(path.resolve(binary), path.join(home, "bin", "codex"));
     await writeFile(path.join(home, "codex", "config.toml"), `model = ${JSON.stringify(model)}\n[features]\nplugins = false\nremote_plugin = false\napps = false\n`);
     const requests = [];
     let launches = 0;
@@ -117,7 +141,8 @@ for (const model of ["gpt-6.1-sol", "anthropic/claude-fable-5.1", "z-ai/glm-5.3"
     // An allowlist prevents inherited credentials or parent-agent context
     // from entering the child. Every endpoint and key below is synthetic.
     const env = { PATH: `${path.join(home, "bin")}${path.delimiter}${process.env.PATH}`, HOME: home, TMPDIR: os.tmpdir(), LANG: "en_US.UTF-8", CODEX_HOME: path.join(home, "codex"), DITTO_CONFIG_DIR: path.join(home, "ditto"), DITTO_API_BASE: base, DITTO_API_KEY: "local-management-only", NO_COLOR: "1", HEYDITTO_REMOTE_CONTROL: "0" };
-    const start = () => rpc(spawn(process.execPath, [cli, "codex", "--endpoint", "ditto-dev", "--session", "qa-compaction-session", "--no-remote-control", "--", "--no-daemon", "app-server"], { env, cwd: path.join(home, "work"), stdio: ["pipe", "pipe", "pipe"] }));
+    if (process.env.SystemRoot) env.SystemRoot = process.env.SystemRoot;
+    const start = () => rpc(spawn(process.execPath, [cli, "codex", "--endpoint", "ditto-dev", "--session", "qa-compaction-session", "--no-remote-control", "--", "--no-daemon", "app-server"], { env, cwd: path.join(home, "work"), detached: process.platform !== "win32", stdio: ["pipe", "pipe", "pipe"] }));
     let client;
     try {
       client = start(); await client.initialize();
