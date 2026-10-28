@@ -9,6 +9,10 @@ const maxPayloadBytes = 64 * 1024;
 async function companyID(options: IAMOptions): Promise<string> {
   const org = options.org?.trim() || (await readStoredAuth())?.defaultCompany;
   if (!org) throw new Error("pass --org <slug> or select one with heyditto orgs use");
+  // Service accounts may not appear in the human membership directory. An
+  // exact UUID is only routing; Manage still resolves trusted current identity
+  // and organization scope on the server. Slugs use the supported directory.
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(org)) return org.toLowerCase();
   return (await resolveCompany(org)).id;
 }
 

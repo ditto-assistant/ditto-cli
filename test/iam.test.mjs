@@ -94,3 +94,10 @@ test("server rights bound default session expiry without changing explicit or le
  assert.equal(iamLaunchExpiry({...endpoint,access:{...endpoint.access,maxSessionSeconds:14400}},"1mo",false),"4h");
  assert.throws(()=>iamLaunchExpiry({...endpoint,access:{...endpoint.access,maxSessionSeconds:0}},"1mo",false),/valid temporary/);
 });
+
+
+test("an explicit org UUID skips human directory resolution and leaves service identity to server",async()=>{
+ const s=await stub();try{
+  const r=await run(s.base,["iam","mode","get","--org",org.id,"--output","json"]);assert.equal(r.status,0,r.stderr);assert.equal(s.calls.length,1);assert.equal(s.calls[0].url,`/api/v5/companies/${org.id}/iam/mode.get`);
+ }finally{s.close();}
+});
