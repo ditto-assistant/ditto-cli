@@ -1,9 +1,10 @@
 import { createReadStream } from "node:fs";
+import { open, unlink } from "node:fs/promises";
 import type { Command, Option } from "commander";
 import { apiFetch, resolveCompany } from "./api.js";
 import { readStoredAuth } from "./store.js";
 
-interface IAMOptions { org?: string; output?: string; file?: string; revision?: string; domain?: string; dryRun?: boolean }
+interface IAMOptions { org?: string; output?: string; file?: string; secretFile?: string; revision?: string; domain?: string; dryRun?: boolean }
 const maxPayloadBytes = 64 * 1024;
 
 async function companyID(options: IAMOptions): Promise<string> {
@@ -82,6 +83,32 @@ export function registerIAMCommands(program: Command, outputOption: () => Option
   scoped(bindings.command("delete").description("revoke a binding at its current revision")
     .argument("<binding-id>").requiredOption("--revision <number>", "current binding revision"))
     .action((id: string, o: IAMOptions) => execute("bindings.delete", o, { id, expected_revision: revision(o) }));
+  const credentials = iam.command("service-credentials").description("issue and revoke short-lived endpoint-scoped service credentials");
+  scoped(credentials.command("issue").description("write the one-time secret to a new private file")
+    .requiredOption("--file <file>", "JSON request with service_uid, endpoint_id, actions and lifetime_seconds")
+    .requiredOption("--secret-file <file>", "new secret file, created with mode 0600"))
+    .action(async (o: IAMOptions) => {
+      const company = await companyID(o);
+      const payload = await policyFile(o.file);
+      const filename = o.secretFile!;
+      const file = await open(filename, "wx", 0o600);
+      let issued = false;
+      try {
+        const result = await apiFetch<Record<string, unknown>>(`/api/v5/companies/${encodeURIComponent(company)}/iam/serviceCredentials.issue`, { method: "POST", body: payload });
+        const { secret, ...metadata } = result;
+        if (typeof secret !== "string" || !/^ditto_svc_[A-Za-z0-9_-]{43}$/.test(secret)) throw new Error("server returned an invalid credential");
+        issued = true;
+        try { await file.writeFile(`${secret}\n`); }
+        catch { throw new Error(`credential ${String(metadata.id)} was issued but could not be written; revoke it`); }
+        process.stdout.write(`${JSON.stringify(metadata, null, 2)}\n`);
+      } finally {
+        await file.close();
+        if (!issued) await unlink(filename).catch(() => {});
+      }
+    });
+  scoped(credentials.command("revoke").description("revoke an issued credential")
+    .argument("<credential-id>"))
+    .action((id: string, o: IAMOptions) => execute("serviceCredentials.revoke", o, { id }));
   scoped(iam.command("explain").description("explain access with the same engine that enforces it")
     .requiredOption("--file <file>", "canonical check request; omit principal for yourself; '-' reads stdin"))
     .action(async (o: IAMOptions) => execute("explain", o, await policyFile(o.file)));
