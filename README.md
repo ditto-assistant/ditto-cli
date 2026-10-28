@@ -1366,6 +1366,16 @@ in `provider-keys providers`. Supply them with repeatable `--param name=value`.
 Only declared public settings are accepted; credentials never belong in these
 arguments. Use `--base-url` for URLs.
 
+New keys are stored disabled by default in one atomic operation. Inspection and
+explicitly confirmed bounded probes can use them while dormant. Add/import
+`--enable` only when you want the key eligible for existing normal BYOK endpoints
+that use automatic/all-key selection. Activation is not confined to the private
+pool. You can activate later with `provider-keys set <saved-key-uuid> --enable`.
+
+Add/import create a new entry for the provider and label; they never rotate an
+existing entry. A duplicate returns HTTP 409 without changing the saved key.
+Choose another label or explicitly rotate its saved UUID with `provider-keys set`.
+
 Saving a key performs a no-generation inspection unless `--no-inspect` is set.
 The result distinguishes advertised models, valid/rejected/unknown credentials,
 and reported/unsupported/unknown balance checks. Not every provider offers a
@@ -1411,8 +1421,8 @@ uses placeholders, not vendor prices:
 ```
 
 The quote must be no more than 24 hours old. Do not reuse another provider's
-prices. Prepare a plan without generation, then add `--confirm-spend` to the
-same command to execute it:
+prices. Prepare a plan without generation, then remove `--dry-run` and add `--confirm-spend` to the same command to execute
+it:
 
 ```bash
 heyditto provider-keys probe <saved-key-uuid> --org omniaura \
@@ -1464,10 +1474,43 @@ heyditto endpoints pool disable ditto-review --dry-run
 ```
 
 Pool writes change only `privateUpstreamRouting`. They do not change billing,
-selected key UUIDs, or failover. Enabling requires full BYOK and the server's
+selected key UUIDs, or failover. Enabling requires full BYOK and
 server-controlled feature access, initially enabled only for the pilot owner.
 Platform Impala credentials remain separately restricted. Weights divide new sessions; session affinity preserves caches.
 Rate limits are manual admission caps. Switching to another provider still
-requires explicit failover policy. `disable` disables and clears the pool, but
-leaves provider credentials stored. This custom-key pool is separate from the
+requires explicit failover policy. `disable` atomically changes only the enabled flag, preserving all route sets,
+the policy version and stored provider credentials. This custom-key pool is separate from the
 private Impala source used for Ditto-funded reviews.
+
+
+Version 2 pools configure separate Standard and Fast route sets. For example,
+`modes.json` can contain:
+
+```json
+{
+  "version": 2,
+  "enabled": true,
+  "modes": {
+    "standard": { "routes": [
+      { "keyId": "11111111-1111-1111-1111-111111111111", "weight": 100, "requestsPerMinute": 60 }
+    ] },
+    "fast": { "routes": [
+      { "keyId": "22222222-2222-2222-2222-222222222222", "weight": 100, "requestsPerMinute": 60 }
+    ] }
+  }
+}
+```
+
+Both mode objects and route arrays are required. Each enabled mode needs 1–16
+routes; disabled policies may have empty arrays. V1 files retain their original
+shape. Once a V2 policy exists, V1 files cannot replace it, even to disable it.
+Use `endpoints pool disable` to preserve both mode configurations atomically.
+Whole-file `set` operations deliberately replace the policy and do not promise
+compare-and-swap protection against another editor.
+
+Trusted Review context selects Standard or Fast. This CLI does not offer a
+request header to override that decision. A missing or unavailable Fast route
+does not silently use Standard. The mode belongs to the session affinity scope;
+weight edits do not repin active sessions. Limits on one credential are shared
+across modes. These are routing choices, not supplier service-tier parameters,
+and a route's label does not establish that its infrastructure is faster.

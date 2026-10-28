@@ -128,3 +128,25 @@ test("legacy accounting labels normalize and missing cache creation stays unknow
     assert.equal(call.cacheHitRate, undefined);
   }
 });
+
+
+test("version 2 pools require both explicit route groups and retain per-mode route validation", () => {
+  const route = { keyId: ID, weight: 70, model: "provider/model", requestsPerMinute: 60 };
+  const policy = { version: 2, enabled: true, modes: { standard: { routes: [route] }, fast: { routes: [{ ...route, weight: 30 }] } } };
+  assert.deepEqual(parsePoolPolicy(policy), policy);
+  assert.deepEqual(parsePoolPolicy({ version: 2, enabled: false, modes: { standard: { routes: [] }, fast: { routes: [] } } }).modes.fast.routes, []);
+  const invalid = [
+    { ...policy, routes: [] }, { ...policy, version: 3 },
+    { ...policy, modes: { standard: { routes: [route] } } },
+    { ...policy, modes: { ...policy.modes, turbo: { routes: [route] } } },
+    { ...policy, modes: { standard: null, fast: policy.modes.fast } },
+    { ...policy, modes: { standard: { routes: null }, fast: policy.modes.fast } },
+    { ...policy, modes: { standard: { routes: [] }, fast: policy.modes.fast } },
+    { ...policy, modes: { standard: { routes: [route], model: "unexpected" }, fast: policy.modes.fast } },
+    { ...policy, modes: { standard: { routes: [route, route] }, fast: policy.modes.fast } },
+    { ...policy, modes: { standard: { routes: [{ ...route, concurrency: 2 }] }, fast: policy.modes.fast } },
+    { ...policy, modes: { standard: { routes: [{ ...route, sourceId: "impala-review" }] }, fast: policy.modes.fast } },
+    { ...policy, modes: { standard: { routes: [{ ...route, requestsPerMinute: 6001 }] }, fast: policy.modes.fast } },
+  ];
+  for (const raw of invalid) assert.throws(() => parsePoolPolicy(raw));
+});

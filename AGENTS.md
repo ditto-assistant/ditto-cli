@@ -26,6 +26,11 @@ unknown supplier price cannot establish a dollar ceiling; preserve unknown
 receipt and cache values rather than converting them to zero. Pool changes must
 not silently alter billing, provider-key selection, or failover consent.
 
+Store new keys disabled by default. Immediate `--enable` is explicit consent for
+eligibility in existing normal BYOK automatic/all-key selection, not just private
+pools. Add/import are create-only; never retry a duplicate as rotation.
+Never add then disable: dormant creation must be atomic on the server.
+
 Exercise these boundaries with synthetic credentials, local API stubs and fake
 platform CLIs. Never use live keys to test redaction.
 

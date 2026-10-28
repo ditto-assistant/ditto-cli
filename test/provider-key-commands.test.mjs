@@ -42,7 +42,7 @@ async function fixture(t, handler) {
       if (req.url === "/api/v5/inference/provider-keys/providers") return send(200, { providers });
       if (req.url.endsWith("/inspect")) return send(200, { keyId: ID, validation: { status: "valid" }, models: { status: "advertised", models: [{ id: "provider/model" }] }, balance: { status: "unsupported" }, key: SECRET });
       if (req.url.endsWith("/probe")) return send(200, { requestLimit: data.requests, outputTokenLimit: data.maxOutputTokens, capacityVerified: false, costBoundAvailable: false, calls: [{ model: data.models[0], status: "completed", attempted: true, latencyMs: 12, inputTokenAccounting: "total_includes_cache", key: SECRET }], secret: SECRET });
-      if (req.url === "/api/v5/inference/provider-keys" && req.method === "POST") return send(201, { ...key, provider: data.provider === "custom" ? data.protocol === "anthropic_messages" ? "custom_anthropic" : "custom_openai" : data.provider, key: data.key, label: `saved ${data.key}`, arbitrary: data.key });
+      if (req.url === "/api/v5/inference/provider-keys" && req.method === "POST") return send(201, { ...key, enabled: data.enabled === true, provider: data.provider === "custom" ? data.protocol === "anthropic_messages" ? "custom_anthropic" : "custom_openai" : data.provider, key: data.key, label: `saved ${data.key}`, arbitrary: data.key });
       if (req.url.startsWith("/api/v5/inference/provider-keys") && req.method === "GET") return send(200, { keys: [{ ...key, key: SECRET, templateParams: { credential: SECRET } }], canManage: true });
       if (req.method === "PATCH") return send(200, key);
       if (req.method === "DELETE") return send(204);
@@ -74,6 +74,19 @@ test("stdin onboarding uploads once to a detected provider and excludes plaintex
   assert.equal(saves.length, 1);
   assert.equal(saves[0].body.key, SECRET);
   assert.equal(saves[0].body.provider, "openai");
+  assert.equal(saves[0].body.enabled, false);
+  assert.equal(JSON.parse(result.stdout).key.enabled, false);
+});
+
+test("new keys remain dormant unless activation is explicitly requested", async t => {
+  const f = await fixture(t);
+  const result = await f.run(["provider-keys", "add", "--stdin", "--provider", "openai", "--no-inspect", "--enable"], SECRET);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(f.calls.find(call => call.method === "POST").body.enabled, true);
+  assert.equal(JSON.parse(result.stdout).key.enabled, true);
+  const help = await f.run(["provider-keys", "add", "--help"]);
+  assert.match(help.stdout, /automatic\/all-key\s+selection/);
+  assert.match(help.stdout, /not limited to a private\s+pool/);
 });
 
 test("unknown keys stop before upload and a full custom endpoint can infer its protocol", async t => {
@@ -170,6 +183,23 @@ test("error responses cannot echo provider credentials", async t => {
   assert.equal(result.code, 1);
   assert.match(result.stderr, /HTTP 400/);
   assert.ok(!`${result.stdout}${result.stderr}`.includes(SECRET));
+});
+
+test("duplicate imports give fixed create-only advice without retrying or exposing an error body", async t => {
+  const f = await fixture(t, (req, res, data, send) => {
+    if (req.method === "POST" || req.method === "PATCH") { send(409, { code: SECRET, message: SECRET }); return true; }
+  });
+  const result = await f.run(["provider-keys", "add", "--stdin", "--provider", "openai", "--no-inspect"], SECRET);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /HTTP 409/);
+  assert.match(result.stderr, /choose another label or rotate the saved key/);
+  assert.ok(!`${result.stdout}${result.stderr}`.includes(SECRET));
+  assert.equal(f.calls.filter(call => call.method === "POST").length, 1);
+  assert.equal(f.calls.filter(call => call.method === "PATCH").length, 0);
+  const pool = await f.run(["endpoints", "pool", "disable", "review"]);
+  assert.equal(pool.code, 1);
+  assert.ok(!pool.stderr.includes("choose another label"));
+  assert.ok(!pool.stderr.includes(SECRET));
 });
 
 test("provider upload redirects are refused before a second destination receives credentials", async t => {
@@ -288,6 +318,56 @@ test("pool writes submit only the typed policy, preserving billing and unrelated
   assert.deepEqual(f.calls.find(call => call.method === "PATCH").body, { privateUpstreamRouting: policy });
 });
 
+test("V2 pool show and set preserve both mode groups; V1 cannot overwrite them", async t => {
+  const policy = { version: 2, enabled: true, modes: { standard: { routes: [{ keyId: ID, weight: 80 }] }, fast: { routes: [{ keyId: ID, weight: 20, requestsPerMinute: 80 }] } } };
+  const f = await fixture(t, (req, res, data, send) => {
+    if (req.method === "GET" && req.url.startsWith("/api/v5/inference/endpoints")) { send(200, { endpoints: [{ id: EP, slug: "review", billingMode: "byok", providerOptions: { private_upstream_routing: policy } }] }); return true; }
+  });
+  const shown = await f.run(["endpoints", "pool", "show", "review"]);
+  assert.equal(shown.code, 0, shown.stderr);
+  assert.deepEqual(JSON.parse(shown.stdout).pool, policy);
+  const file = path.join(f.dir, "modes.json");
+  await writeFile(file, JSON.stringify(policy));
+  const saved = await f.run(["endpoints", "pool", "set", "review", "--file", file]);
+  assert.equal(saved.code, 0, saved.stderr);
+  assert.deepEqual(f.calls.filter(call => call.method === "PATCH").at(-1).body, { privateUpstreamRouting: policy });
+  await writeFile(file, JSON.stringify({ enabled: false, routes: [] }));
+  const refused = await f.run(["endpoints", "pool", "set", "review", "--file", file]);
+  assert.equal(refused.code, 1);
+  assert.match(refused.stderr, /version 2 pool cannot be replaced/);
+  assert.equal(f.calls.filter(call => call.method === "PATCH").length, 1);
+});
+
+test("disable uses an atomic flag patch without replaying a stale mode configuration", async t => {
+  const policy = { version: 2, enabled: true, modes: { standard: { routes: [{ keyId: ID, weight: 80 }] }, fast: { routes: [{ keyId: ID, weight: 20 }] } } };
+  const f = await fixture(t, (req, res, data, send) => {
+    if (req.method === "GET" && req.url.startsWith("/api/v5/inference/endpoints")) {
+      send(200, { endpoints: [{ id: EP, slug: "review", billingMode: "byok", providerOptions: { private_upstream_routing: policy } }] });
+      policy.modes.fast.routes[0].weight = 99; // another editor after the read
+      return true;
+    }
+    if (req.method === "PATCH") { assert.deepEqual(data, { poolEnabled: false }); policy.enabled = false; send(200, {}); return true; }
+  });
+  const dry = await f.run(["endpoints", "pool", "disable", "review", "--dry-run"]);
+  assert.equal(dry.code, 0, dry.stderr);
+  assert.equal(f.calls.filter(call => call.method === "PATCH").length, 0);
+  const result = await f.run(["endpoints", "pool", "disable", "review"]);
+  assert.equal(result.code, 0, result.stderr);
+  const patch = f.calls.find(call => call.method === "PATCH");
+  assert.equal(patch.url, `/api/v5/inference/endpoints/${EP}/private-routing`);
+  assert.deepEqual(patch.body, { poolEnabled: false });
+  assert.equal(policy.enabled, false);
+  assert.equal(policy.modes.fast.routes[0].weight, 99);
+  assert.equal(JSON.parse(result.stdout).poolEnabled, false);
+});
+
+test("probe model identifiers follow the backend's 200-character bound before planning", async t => {
+  const f = await fixture(t);
+  const result = await f.run(["provider-keys", "probe", ID, "--model", "m".repeat(201), "--max-output-tokens", "8", "--dry-run"]);
+  assert.equal(result.code, 1);
+  assert.equal(f.calls.length, 0);
+});
+
 test("gcloud import keeps secret bytes inside child capture and upload; no key in argv or output", async t => {
   const f = await fixture(t);
   const binary = path.join(f.dir, "gcloud");
@@ -298,6 +378,7 @@ test("gcloud import keeps secret bytes inside child capture and upload; no key i
   const result = await f.run(args, "", env);
   assert.equal(result.code, 0, result.stderr);
   assert.ok(!`${result.stdout}${result.stderr}`.includes(SECRET));
+  assert.equal(f.calls.find(call => call.method === "POST").body.enabled, false);
   const calls = (await readFile(log, "utf8")).trim().split("\n").map(JSON.parse);
   assert.equal(calls.length, 3);
   assert.ok(calls[2].includes("my-project") && calls[2].includes("person@example.com"));

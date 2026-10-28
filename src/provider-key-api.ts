@@ -31,6 +31,7 @@ export interface ProviderKeyMetadata {
   modelDeny?: string[];
 }
 export interface ProviderKeyInput {
+  enabled?: boolean;
   companyId?: string;
   provider: string;
   key: string;
@@ -100,7 +101,8 @@ export async function providerManagementFetch<T>(route: string, init: { method?:
   }
   if (!response.ok) {
     await response.body?.cancel().catch(() => undefined);
-    throw new Error(`provider-key management returned HTTP ${response.status}; no response body was printed${response.status === 401 ? "; check heyditto login" : response.status === 403 ? "; check your organization role and provider-key feature access" : ""}`);
+    const advice = response.status === 409 && route === path && init.method === "POST" ? "; choose another label or rotate the saved key" : response.status === 401 ? "; check heyditto login" : response.status === 403 ? "; check your organization role and provider-key feature access" : "";
+    throw new Error(`provider-key management returned HTTP ${response.status}; no response body was printed${advice}`);
   }
   if (response.status === 204) return undefined as T;
   const chunks: Uint8Array[] = [];
