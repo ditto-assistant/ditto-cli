@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { PassThrough } from "node:stream";
 import test from "node:test";
-import { apiFetch, ApiError } from "../dist/api.js";
-import { providerManagementFetch } from "../dist/provider-key-api.js";
-import { gcloudInvocation, readProviderSecret } from "../dist/provider-secrets.js";
+import { apiFetch, ApiError, createApp } from "../dist/api.js";
+import { inspectionMetadata, probeMetadata, providerManagementFetch } from "../dist/provider-key-api.js";
+import { decodeProviderSecret, gcloudInvocation, readProviderSecret, readProviderSecretFromStream } from "../dist/provider-secrets.js";
 import { redactKnownSecrets, secretSafeMetadata } from "../dist/secret-redaction.js";
 import { publicProviderParams } from "../dist/provider-key-input.js";
 
@@ -40,7 +40,7 @@ test("Windows gcloud batch invocation quotes bounded scope tokens and rejects sh
   assert.equal(win.windowsVerbatimArguments, true);
   assert.equal(win.args[3], '\"\"gcloud.cmd\" \"auth\" \"list\" \"--format=json(account,status)\" \"--account\" \"qa+test@example.com\" \"--quiet\" \"--verbosity=none\"\"');
   const posix = gcloudInvocation(args, "linux"); assert.equal(posix.command, "gcloud"); assert.deepEqual(posix.args.slice(0, args.length), args);
-  for (const value of ['bad&whoami', '%PATH%', '!PATH!', 'bad|x', 'bad^x', 'bad"x', 'bad`x', 'bad x', `${SECRET}&exit`]) assert.throws(() => gcloudInvocation(["--account", value], "win32"), error => !error.message.includes(SECRET));
+  for (const value of ['bad&whoami', '%PATH%', '!PATH!', 'bad|x', 'bad^x', 'bad"x', 'bad`x', 'bad x', `${SECRET}&exit`]) assert.throws(() => gcloudInvocation(["--account", value], "win32"), error => /Windows batch wrapper/.test(error.message) && !error.message.includes(SECRET));
 });
 
 test("hidden input backspace removes complete Unicode code points without echo", async () => {
@@ -96,4 +96,52 @@ test("secret response cancellation retains AbortError identity without echoing i
 
 test("required base URL advice never recommends a forbidden --param", () => {
   assert.throws(() => publicProviderParams([], { params: [{ name: "base_url", required: true }] }), error => error.message.includes("--base-url URL") && !error.message.includes("--param"));
+});
+
+test("probe metadata preserves fixed deadline explanations without reflecting arbitrary reasons", () => {
+  for (const reason of ["time_limit", "observed_cost_exceeded_quote", "observed_usage_exceeded_quote"]) assert.equal(probeMetadata({ stoppedReason: reason }).stoppedReason, reason);
+  const result = probeMetadata({ stoppedReason: SECRET });
+  assert.equal(result.stoppedReason, undefined); assert.ok(!JSON.stringify(result).includes(SECRET));
+});
+
+test("app creation requires the one-time secret promised by the backend", async () => {
+  for (const appSecret of [undefined, null, 42, false, "", "   "]) {
+    await withTransport(async () => new Response(JSON.stringify({ appID: "synthetic-app", name: SECRET, ...(appSecret === undefined ? {} : { appSecret }) })), async () => assert.rejects(createApp("Synthetic"), error => /invalid credential metadata/.test(error.message) && !error.message.includes(SECRET)));
+  }
+  await withTransport(async () => new Response(JSON.stringify({ appID: "synthetic-app", appSecret: SECRET })), async () => assert.equal((await createApp("Synthetic")).appSecret, SECRET));
+});
+
+test("all URL percent hex cases and form encoding redact without case-folding credential letters", () => {
+  const secret = "Ab/c =?";
+  const encoded = encodeURIComponent(secret), lowercaseHex = encoded.replace(/%[a-f0-9]{2}/gi, part => part.toLowerCase());
+  const form = new URLSearchParams({ token: secret }).toString().slice("token=".length).replace(/%[a-f0-9]{2}/gi, part => part.toLowerCase());
+  for (const value of [encoded, lowercaseHex, encoded.replace("%2F", "%2f"), form]) assert.equal(redactKnownSecrets(`prefix ${value} suffix`, [secret]), "prefix [redacted] suffix");
+  assert.equal(redactKnownSecrets("axb a.b", ["a.b"]), "axb [redacted]");
+  assert.equal(redactKnownSecrets("ab%2fc", ["Ab/c"]), "ab%2fc");
+  assert.deepEqual(secretSafeMetadata({ url: `https://example.com/?token=${lowercaseHex}` }, [secret]), { url: "https://example.com/?token=[redacted]" });
+});
+
+test("byte secret ingress rejects malformed UTF8 and wipes the oversized current chunk", async () => {
+  const invalid = Buffer.from([0x73, 0x6b, 0xff, 0xfe]);
+  assert.throws(() => decodeProviderSecret(invalid), /valid UTF-8/);
+  await assert.rejects(readProviderSecretFromStream((async function* () { yield invalid; })()), /valid UTF-8/);
+  assert.ok(invalid.every(byte => byte === 0));
+  const first = Buffer.from("synthetic-prefix"), oversized = Buffer.alloc(18_000, 65);
+  await assert.rejects(readProviderSecretFromStream((async function* () { yield first; yield oversized; })()), /too large/);
+  assert.ok(first.every(byte => byte === 0)); assert.ok(oversized.every(byte => byte === 0));
+  assert.equal(decodeProviderSecret(Buffer.from("synthetic-é-key")), "synthetic-é-key");
+});
+
+test("required public parameters cannot be satisfied by inherited prototype properties", () => {
+  for (const name of ["constructor", "toString", "valueOf", "hasOwnProperty"]) assert.throws(() => publicProviderParams([], { params: [{ name, required: true }] }), /requires the public setting/);
+  assert.deepEqual(publicProviderParams(["account_id=synthetic"], { params: [{ name: "account_id", required: true }] }), { account_id: "synthetic" });
+});
+
+test("HTTP status metadata is bounded while signed reported wallet balances remain intact", () => {
+  for (const value of [-1, 0, 99, 600, 2 ** 32, NaN, Infinity, 200.5, "200"]) {
+    assert.equal(inspectionMetadata({ validation: { httpStatus: value } }).validation.httpStatus, undefined);
+    assert.equal(probeMetadata({ calls: [{ httpStatus: value }] }).calls[0].httpStatus, undefined);
+  }
+  for (const value of [100, 200, 429, 599]) assert.equal(inspectionMetadata({ validation: { httpStatus: value } }).validation.httpStatus, value);
+  assert.equal(inspectionMetadata({ balance: { status: "reported", amountUsd: -.25, unit: "USD" } }).balance.amountUsd, -.25);
 });

@@ -137,6 +137,9 @@ export async function providerManagementFetch<T>(route: string, init: { method?:
 function object(raw: unknown): Record<string, unknown> {
   return raw !== null && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
 }
+function httpStatus(raw: unknown): number | undefined {
+  return typeof raw === "number" && Number.isInteger(raw) && raw >= 100 && raw <= 599 ? raw : undefined;
+}
 function safeText(raw: unknown, secret?: string, max = 250): string | undefined {
   if (typeof raw !== "string") return undefined;
   const value = secret ? raw.split(secret).join("[redacted]") : raw;
@@ -203,7 +206,7 @@ export function inspectionMetadata(raw: unknown): Record<string, unknown> {
   return {
     keyId: typeof data.keyId === "string" && UUID.test(data.keyId) ? data.keyId : undefined,
     checkedAt: timestamp(data.checkedAt),
-    validation: { status: status(validation.status, ["valid", "rejected", "unknown", "unsupported"]), ...(Number.isInteger(validation.httpStatus) ? { httpStatus: validation.httpStatus } : {}) },
+    validation: { status: status(validation.status, ["valid", "rejected", "unknown", "unsupported"]), ...(httpStatus(validation.httpStatus) === undefined ? {} : { httpStatus: httpStatus(validation.httpStatus) }) },
     models: { status: status(models.status, ["advertised", "unsupported", "unknown"]), models: Array.isArray(models.models) ? models.models.slice(0, 1000).map(raw => ({ id: safeText(object(raw).id) })).filter(row => row.id) : [], truncated: models.truncated === true },
     balance: { status: status(balance.status, ["reported", "unsupported", "unknown"]), amountUsd: balanceAmount(balance.amountUsd), unit: balance.unit === "USD" ? "USD" : undefined, source: balance.source === "key_limit_remaining" || balance.source === "payg_wallet" || balance.source === "account_wallet" ? balance.source : undefined, checkedAt: timestamp(balance.checkedAt) },
   };
@@ -223,13 +226,13 @@ export function probeMetadata(raw: unknown): Record<string, unknown> {
     costBoundAvailable: data.costBoundAvailable === true, capacityVerified: data.capacityVerified === true,
     quotedBudgetAvailable: data.quotedBudgetAvailable === true,
     ...(data.quote === undefined ? {} : { quote: probeQuoteMetadata(data.quote) }),
-    stoppedReason: data.stoppedReason === "observed_cost_exceeded_quote" || data.stoppedReason === "observed_usage_exceeded_quote" ? data.stoppedReason : undefined,
+    stoppedReason: data.stoppedReason === "observed_cost_exceeded_quote" || data.stoppedReason === "observed_usage_exceeded_quote" || data.stoppedReason === "time_limit" ? data.stoppedReason : undefined,
     observedRequestsPerSecond: numeric(data.observedRequestsPerSecond),
     calls: Array.isArray(data.calls) ? data.calls.slice(0, 20).map(raw => {
       const call = object(raw);
       const accounting = call.inputTokenAccounting === "inclusive" ? "total_includes_cache" : call.inputTokenAccounting === "exclusive" ? "fresh_excludes_cache" : call.inputTokenAccounting;
       const cacheCreationInputTokens = call.cacheCreationInputTokens === null ? null : Number.isSafeInteger(call.cacheCreationInputTokens) ? numeric(call.cacheCreationInputTokens) : undefined;
-      return { model: safeText(call.model), status: typeof call.status === "string" && ["unavailable", "rejected", "rate_limited", "locally_limited", "invalid_request", "incomplete", "completed", "provider_error"].includes(call.status) ? call.status : "unknown", attempted: call.attempted === true, httpStatus: numeric(call.httpStatus), latencyMs: numeric(call.latencyMs), ttftMs: numeric(call.ttftMs), inputTokens: numeric(call.inputTokens), outputTokens: numeric(call.outputTokens), cachedInputTokens: numeric(call.cachedInputTokens), cacheCreationInputTokens, providerReportedCostUsd: numeric(call.providerReportedCostUsd), inputTokenAccounting: typeof accounting === "string" && ["fresh_excludes_cache", "total_includes_cache", "unknown"].includes(accounting) ? accounting : "unknown", tokensPerSecond: numeric(call.tokensPerSecond), tokensPerSecondBasis: call.tokensPerSecondBasis === "end_to_end_output_tokens" ? "end_to_end_output_tokens" : undefined };
+      return { model: safeText(call.model), status: typeof call.status === "string" && ["unavailable", "rejected", "rate_limited", "locally_limited", "invalid_request", "incomplete", "completed", "provider_error"].includes(call.status) ? call.status : "unknown", attempted: call.attempted === true, httpStatus: httpStatus(call.httpStatus), latencyMs: numeric(call.latencyMs), ttftMs: numeric(call.ttftMs), inputTokens: numeric(call.inputTokens), outputTokens: numeric(call.outputTokens), cachedInputTokens: numeric(call.cachedInputTokens), cacheCreationInputTokens, providerReportedCostUsd: numeric(call.providerReportedCostUsd), inputTokenAccounting: typeof accounting === "string" && ["fresh_excludes_cache", "total_includes_cache", "unknown"].includes(accounting) ? accounting : "unknown", tokensPerSecond: numeric(call.tokensPerSecond), tokensPerSecondBasis: call.tokensPerSecondBasis === "end_to_end_output_tokens" ? "end_to_end_output_tokens" : undefined };
     }) : [],
   };
 }

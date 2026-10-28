@@ -1,5 +1,4 @@
 import { spawn } from "node:child_process";
-import { StringDecoder } from "node:string_decoder";
 
 const MAX_SECRET_BYTES = 16_384;
 const MAX_CHILD_BYTES = 65_536;
@@ -13,6 +12,14 @@ export function validateProviderSecret(raw: string): string {
   return value;
 }
 
+/** Reject invalid UTF-8 rather than silently changing credential bytes. */
+export function decodeProviderSecret(bytes: Uint8Array): string {
+  let value: string;
+  try { value = new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
+  catch { throw new Error("provider key bytes must be valid UTF-8; no credential content was printed"); }
+  return validateProviderSecret(value);
+}
+
 export async function readProviderSecretFromStream(input: AsyncIterable<Buffer | string>): Promise<string> {
   const chunks: Buffer[] = [];
   let size = 0;
@@ -20,11 +27,11 @@ export async function readProviderSecretFromStream(input: AsyncIterable<Buffer |
     for await (const part of input) {
       const chunk = Buffer.isBuffer(part) ? part : Buffer.from(part);
       size += chunk.length;
-      if (size > MAX_SECRET_BYTES + 1024) throw new Error("provider key input is too large; its value was not printed");
+      if (size > MAX_SECRET_BYTES + 1024) { chunk.fill(0); throw new Error("provider key input is too large; its value was not printed"); }
       chunks.push(chunk);
     }
     const buffer = Buffer.concat(chunks);
-    try { return validateProviderSecret(buffer.toString("utf8")); }
+    try { return decodeProviderSecret(buffer); }
     finally { buffer.fill(0); }
   } finally {
     for (const chunk of chunks) chunk.fill(0);
@@ -48,7 +55,7 @@ export async function readProviderSecret(options: { stdin?: boolean; keyEnv?: st
   process.stderr.write(options.prompt ?? "Paste provider API key (hidden): ");
   return new Promise((resolve, reject) => {
     const wasRaw = process.stdin.isRaw;
-    const decoder = new StringDecoder("utf8");
+    const decoder = new TextDecoder("utf-8", { fatal: true });
     let value = "";
     let done = false;
     const finish = (error?: Error): void => {
@@ -65,7 +72,10 @@ export async function readProviderSecret(options: { stdin?: boolean; keyEnv?: st
       value = "";
     };
     const onData = (part: Buffer): void => {
-      for (const char of decoder.write(part)) {
+      let decoded: string;
+      try { decoded = decoder.decode(part, { stream: true }); }
+      catch { return finish(new Error("provider key bytes must be valid UTF-8; no credential content was printed")); }
+      for (const char of decoded) {
         if (char === "\u0003" || char === "\u0004") return finish(new Error("provider key entry cancelled"));
         if (char === "\r" || char === "\n") return finish();
         if (char === "\u007f" || char === "\b") value = [...value].slice(0, -1).join("");
@@ -197,6 +207,6 @@ export async function importGCloudProviderSecret(input: GCloudSecretInput, env =
     throw new Error("effective gcloud configuration uses credential, impersonation or API endpoint overrides; remove them before importing");
   }
   const bytes = await captureGCloud(["secrets", "versions", "access", source.version, "--secret", source.secret, "--project", source.project, "--account", account], env);
-  try { return { key: validateProviderSecret(bytes.toString("utf8")), source: { ...source, account } }; }
+  try { return { key: decodeProviderSecret(bytes), source: { ...source, account } }; }
   finally { bytes.fill(0); }
 }

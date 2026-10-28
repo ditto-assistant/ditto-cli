@@ -1,12 +1,19 @@
 /** Redact every exact occurrence, including JSON-escaped and URL-encoded forms. */
 export function redactKnownSecrets(text: string, secrets: Array<string | undefined>): string {
   let safe = text;
-  const forms = new Set<string>();
+  const forms = new Map<string, boolean>();
   for (const secret of secrets) {
     if (!secret) continue;
-    for (const form of [secret, JSON.stringify(secret).slice(1, -1), encodeURIComponent(secret)]) forms.add(form);
+    for (const form of [secret, JSON.stringify(secret).slice(1, -1)]) if (!forms.has(form)) forms.set(form, false);
+    for (const form of [encodeURIComponent(secret), new URLSearchParams({ secret }).toString().slice("secret=".length)]) forms.set(form, true);
   }
-  for (const value of [...forms].sort((a, b) => b.length - a.length)) safe = safe.split(value).join("[redacted]");
+  const literal = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  for (const [value, encoded] of [...forms].sort(([a], [b]) => b.length - a.length)) {
+    if (!encoded) { safe = safe.split(value).join("[redacted]"); continue; }
+    // Percent hex is case-insensitive, while unescaped credential letters are not.
+    const pattern = value.split(/(%[a-f0-9]{2})/i).map(part => /^%[a-f0-9]{2}$/i.test(part) ? part.replace(/[a-f]/gi, char => `[${char.toLowerCase()}${char.toUpperCase()}]`) : literal(part)).join("");
+    safe = safe.replace(new RegExp(pattern, "g"), "[redacted]");
+  }
   return safe;
 }
 

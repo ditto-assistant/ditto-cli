@@ -51,7 +51,7 @@ export function publicProviderParams(raw: string[], entry?: ProviderCatalogEntry
     params[name] = value;
   }
   for (const param of entry?.params ?? []) {
-    if (param.required && !(param.name === "base_url" && baseUrl) && !params[param.name]) throw new Error(`this provider requires the public setting ${param.name}; use ${param.name === "base_url" ? "--base-url URL" : `--param ${param.name}=VALUE`}`);
+    if (param.required && !(param.name === "base_url" && baseUrl) && !Object.hasOwn(params, param.name)) throw new Error(`this provider requires the public setting ${param.name}; use ${param.name === "base_url" ? "--base-url URL" : `--param ${param.name}=VALUE`}`);
   }
   return Object.keys(params).length ? params : undefined;
 }

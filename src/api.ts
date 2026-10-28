@@ -691,7 +691,7 @@ export async function findApp(ref: string, companyId?: string): Promise<Develope
 
 export async function createApp(name: string, companyId?: string): Promise<DeveloperApp> {
   const app = await apiFetch<DeveloperApp>(APPS, { method: "POST", body: { name, ...(companyId ? { companyId } : {}) }, secretResponse: true });
-  if (!app || (app.appSecret !== undefined && typeof app.appSecret !== "string")) throw new Error("app creation returned invalid credential metadata; no response body was printed");
+  if (!app || typeof app.appSecret !== "string" || !app.appSecret.trim()) throw new Error("app creation returned invalid credential metadata; no response body was printed");
   return app;
 }
 

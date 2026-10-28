@@ -504,3 +504,20 @@ test("provider commands print canonical lowercase saved UUIDs", async t => {
   assert.ok(f.calls.some(call => call.url.endsWith(`/${lower}/inspect`)));
   assert.ok(f.calls.some(call => call.method === "DELETE" && call.url.endsWith(`/${lower}`)));
 });
+
+test("explicit blank organization never falls back to personal or saved company scope", async t => {
+  const f = await fixture(t);
+  for (const org of ["", "   "]) {
+    const result = await f.run(["provider-keys", "add", "--org", org, "--provider", "openai", "--key-env", "SYNTHETIC_PROVIDER_KEY", "--no-inspect"], "", { SYNTHETIC_PROVIDER_KEY: SECRET });
+    assert.equal(result.code, 1); assert.match(result.stderr, /non-empty organization/); assert.ok(!`${result.stdout}${result.stderr}`.includes(SECRET));
+  }
+  assert.equal(f.calls.length, 0);
+});
+
+test("Secret Manager binary bytes stop before credential upload", async t => {
+  const f = await fixture(t), binary = path.join(f.dir, "gcloud");
+  await writeFile(binary, `#!${process.execPath}\nif(process.argv[2]==='auth')process.stdout.write(JSON.stringify([{account:'person@example.com',status:'ACTIVE'}]));\nelse if(process.argv[2]==='config')process.stdout.write(JSON.stringify({core:{account:'person@example.com',project:'my-project'}}));\nelse process.stdout.write(Buffer.from([0x73,0x6b,0xff,0xfe]));\n`, { mode: 0o700 });
+  const env = { PATH: f.dir, CLOUDSDK_AUTH_ACCESS_TOKEN: "", CLOUDSDK_AUTH_ACCESS_TOKEN_FILE: "", CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: "", CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT: "" };
+  const result = await f.run(["provider-keys", "import", "--from", "gcloud", "--provider", "openai", "--secret", "provider-key", "--project", "my-project", "--account", "person@example.com", "--no-inspect"], "", env);
+  assert.equal(result.code, 1); assert.match(result.stderr, /valid UTF-8/); assert.ok(f.calls.every(call => call.method === "GET"));
+});

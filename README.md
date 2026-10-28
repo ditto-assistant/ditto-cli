@@ -1331,6 +1331,8 @@ For an unfamiliar key, `provider-keys identify` (alias `detect`) reads a local
 secret reference or hidden paste and reports prefix hints without contacting
 Ditto or any provider. Strong prefixes are hints, not proof of ownership. Agents
 that know the provider should normally supply it explicitly when adding a key.
+Offline hints may name other providers, such as Engy. They are display-only and
+never populate the explicit four-provider network shortlist automatically.
 
 ```bash
 heyditto provider-keys identify --key-env EXISTING_PROVIDER_KEY

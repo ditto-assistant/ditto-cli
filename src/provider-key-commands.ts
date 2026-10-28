@@ -21,6 +21,7 @@ function collect(value: string, previous: string[] = []): string[] { return [...
 
 export async function providerKeyScope(options: ScopeOptions): Promise<{ companyId?: string; scope: Record<string, unknown> }> {
   providerManagementBase(); // before resolving an organization with the shared REST client
+  if (options.org !== undefined && !options.org.trim()) throw new Error("--org must name a non-empty organization; no credential operation was attempted");
   if (options.org && options.personal) throw new Error("choose --org or --personal, not both");
   const wanted = options.org?.trim() || (options.personal ? undefined : (await readStoredAuth())?.defaultCompany);
   if (!wanted) return { scope: { kind: "personal" } };
