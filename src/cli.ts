@@ -470,7 +470,7 @@ async function cmdInit(graphs: string[], options: InitOptions): Promise<void> {
     agentAccountID: signup.accountID,
     agentUserID: signup.userID,
     agentCaller: signup.agentCaller || agentCaller,
-    claimURL: signup.claimURL,
+    claimURL: signupRaw.claimURL,
     createdAt: signup.createdAt,
   });
 

@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import type { Command, Option } from "commander";
+import { printProviderMetadata } from "./provider-output.js";
 import { getEndpoint } from "./api.js";
 import { providerManagementBase, providerManagementFetch, requireProviderKeyId } from "./provider-key-api.js";
 
@@ -43,12 +44,12 @@ export function parsePoolPolicy(raw: unknown): PoolPolicy {
   return { version: 2, enabled: policy.enabled, modes: { standard: modeRoutes(modes.standard), fast: modeRoutes(modes.fast) } };
 }
 
-function print(value: unknown): void { process.stdout.write(`${JSON.stringify(value, null, 2)}\n`); }
+function print(value: unknown, output?: string): void { printProviderMetadata(value, output); }
 
 export function registerRouterPoolCommands(endpoints: Command, outputOption: () => Option): void {
   const pool = endpoints.command("pool").description("configure a private weighted BYOK pool using stored key UUIDs; never changes billing").showHelpAfterError().addHelpText("after", "\nWeights divide new sessions, not individual requests. Existing session affinity and explicit failover remain in force. A probe does not establish provider capacity. Version 2 requires explicit standard and fast route sets; trusted Review context chooses the mode, with no implicit fallback between them. This configures routing pools, not supplier service tiers. Credential rate limits are shared across modes. System-funded Impala is separate from organization-owned custom keys.\n");
-  pool.command("show").description("show private pool configuration and billing without changing either").argument("<endpoint>", "endpoint slug or UUID").addOption(outputOption())
-    .action(async (ref: string) => {
+  pool.command("show").description("show private pool configuration and billing without changing either").argument("<endpoint>", "endpoint slug or UUID").addOption(outputOption().default("json"))
+    .action(async (ref: string, options: { output?: string }) => {
       providerManagementBase();
       const { endpoint } = await getEndpoint(ref);
       const policy = endpoint.providerOptions?.private_upstream_routing;
@@ -57,10 +58,10 @@ export function registerRouterPoolCommands(endpoints: Command, outputOption: () 
         try { sanitized = parsePoolPolicy(policy); }
         catch { /* A system-source or newer policy must not be printed or silently rewritten. */ }
       }
-      print({ endpointId: endpoint.id, slug: endpoint.slug, billingMode: endpoint.billingMode, pool: sanitized ?? null, ...(policy !== undefined && sanitized === undefined ? { note: "This policy contains a system source or a newer schema. No settings were changed." } : {}), privateRoutingAllowed: (endpoint as unknown as Record<string, unknown>).privateUpstreamRoutingAllowed === true });
+      print({ endpointId: endpoint.id, slug: endpoint.slug, billingMode: endpoint.billingMode, pool: sanitized ?? null, ...(policy !== undefined && sanitized === undefined ? { note: "This stored policy is invalid or uses a schema or system source this CLI cannot display. No settings were changed." } : {}), privateRoutingAllowed: (endpoint as unknown as Record<string, unknown>).privateUpstreamRoutingAllowed === true }, options.output);
     });
-  pool.command("set").description("replace only the private BYOK pool from a policy file; leave billing and other options unchanged").argument("<endpoint>", "endpoint slug or UUID").requiredOption("--file <path>", "JSON policy containing saved key UUIDs, never credentials").option("--dry-run", "validate and print the edit without saving it").addOption(outputOption())
-    .action(async (ref: string, options: { file: string; dryRun?: boolean }) => {
+  pool.command("set").description("replace only the private BYOK pool from a policy file; leave billing and other options unchanged").argument("<endpoint>", "endpoint slug or UUID").requiredOption("--file <path>", "JSON policy containing saved key UUIDs, never credentials").option("--dry-run", "validate and print the edit without saving it").addOption(outputOption().default("json"))
+    .action(async (ref: string, options: { file: string; dryRun?: boolean; output?: string }) => {
       providerManagementBase();
       const bytes = await readFile(options.file);
       if (bytes.length > 32_768) throw new Error("pool policy file exceeds 32 KiB");
@@ -73,13 +74,13 @@ export function registerRouterPoolCommands(endpoints: Command, outputOption: () 
       if (existing && typeof existing === "object" && (existing as Record<string, unknown>).version === 2 && !("version" in policy)) throw new Error("a version 2 pool cannot be replaced by a V1 policy; preserve both modes or use pool disable");
       const patch = { privateUpstreamRouting: policy };
       if (!options.dryRun) await providerManagementFetch(`/api/v5/inference/endpoints/${encodeURIComponent(endpoint.id)}`, { method: "PATCH", body: patch });
-      print({ endpointId: endpoint.id, slug: endpoint.slug, billingMode: endpoint.billingMode, pool: policy, saved: !options.dryRun, note: "Only privateUpstreamRouting was submitted. Billing, key selection and failover were not changed." });
+      print({ endpointId: endpoint.id, slug: endpoint.slug, billingMode: endpoint.billingMode, pool: policy, saved: !options.dryRun, note: "Only privateUpstreamRouting was submitted. Billing, key selection and failover were not changed." }, options.output);
     });
-  pool.command("disable").description("disable this private pool atomically while preserving its version and all route sets").argument("<endpoint>", "endpoint slug or UUID").option("--dry-run", "show the edit without saving it").addOption(outputOption())
-    .action(async (ref: string, options: { dryRun?: boolean }) => {
+  pool.command("disable").description("disable this private pool atomically while preserving its version and all route sets").argument("<endpoint>", "endpoint slug or UUID").option("--dry-run", "show the edit without saving it").addOption(outputOption().default("json"))
+    .action(async (ref: string, options: { dryRun?: boolean; output?: string }) => {
       providerManagementBase();
       const { endpoint } = await getEndpoint(ref);
       if (!options.dryRun) await providerManagementFetch(`/api/v5/inference/endpoints/${encodeURIComponent(endpoint.id)}/private-routing`, { method: "PATCH", body: { poolEnabled: false } });
-      print({ endpointId: endpoint.id, slug: endpoint.slug, billingMode: endpoint.billingMode, poolEnabled: false, saved: !options.dryRun, note: options.dryRun ? "Only the enabled flag will change atomically; pool version, routes, modes and billing will be preserved." : "Only the enabled flag was changed atomically. Pool version, routes, modes and billing were preserved." });
+      print({ endpointId: endpoint.id, slug: endpoint.slug, billingMode: endpoint.billingMode, poolEnabled: false, saved: !options.dryRun, note: options.dryRun ? "Only the enabled flag will change atomically; pool version, routes, modes and billing will be preserved." : "Only the enabled flag was changed atomically. Pool version, routes, modes and billing were preserved." }, options.output);
     });
 }

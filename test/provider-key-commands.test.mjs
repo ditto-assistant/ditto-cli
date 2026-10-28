@@ -463,3 +463,34 @@ test("agent signup HTTP, parse and redirect failures never print credential-bear
     assert.equal(f.calls.filter(call => call.method === "POST").length, 1);
   }
 });
+
+test("signup stores the original private claim capability while redacting terminal copies", async t => {
+  const minted = "ditto_mcp_synthetic_claim_key", claimURL = `https://app.example.test/claim?token=${minted}`;
+  const f = await fixture(t, (req, res, data, send) => {
+    if (req.url !== "/api/v5/agents/signup") return;
+    send(201, { accountID: "account_1", userID: "user_1", apiKeyID: 12, apiKey: minted, claimURL, status: "unclaimed", createdAt: "2026-10-28T16:00:00Z" }); return true;
+  });
+  const result = await f.run(["init", "--json"]);
+  assert.equal(result.code, 0, result.stderr); assert.ok(!`${result.stdout}${result.stderr}`.includes(minted));
+  const saved = JSON.parse(await readFile(JSON.parse(result.stdout).configPath, "utf8"));
+  assert.equal(saved.claimURL, claimURL);
+});
+
+test("provider and pool commands honor explicit text output; JSON remains their default", async t => {
+  const f = await fixture(t);
+  for (const args of [["provider-keys", "list", "--personal"], ["provider-keys", "providers"], ["endpoints", "pool", "show", "review"]]) {
+    const result = await f.run([...args, "--output", "text"]);
+    assert.equal(result.code, 0, result.stderr); assert.throws(() => JSON.parse(result.stdout)); assert.ok(!`${result.stdout}${result.stderr}`.includes(SECRET));
+    const json = await f.run(args); assert.equal(json.code, 0, json.stderr); assert.doesNotThrow(() => JSON.parse(json.stdout));
+  }
+});
+
+test("pool show distinguishes unreadable policies without claiming a specific cause", async t => {
+  const f = await fixture(t, (req, res, data, send) => {
+    if (!req.url.startsWith("/api/v5/inference/endpoints") || req.method !== "GET") return;
+    send(200, { endpoints: [{ id: EP, slug: "review", model: "safe", billingMode: "byok", providerOptions: { private_upstream_routing: { enabled: true, routes: [{ keyId: ID, weight: 500 }] } } }] }); return true;
+  });
+  const result = await f.run(["endpoints", "pool", "show", "review"]);
+  assert.equal(result.code, 0, result.stderr); assert.equal(JSON.parse(result.stdout).pool, null); assert.match(JSON.parse(result.stdout).note, /invalid or uses/);
+  assert.ok(f.calls.every(call => call.method === "GET"));
+});

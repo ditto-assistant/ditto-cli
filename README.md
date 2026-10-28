@@ -1323,6 +1323,9 @@ a local `--key-env NAME` reference, hidden terminal paste, `--stdin`, or Google 
 prints the credential, writes it to disk, or accepts it as a command argument.
 Use saved key UUIDs for later operations. MCP can manage the same metadata and
 routing policies; secret bytes enter through the local CLI, not a tool argument.
+Provider-key and pool commands default to JSON. Explicit `--output text` renders
+the same allowed metadata as readable text; `--output markdown` wraps that text
+in a code block, and `--output raw` retains JSON.
 
 For an unfamiliar key, `provider-keys identify` (alias `detect`) reads a local
 secret reference or hidden paste and reports prefix hints without contacting

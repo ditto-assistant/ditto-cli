@@ -1,4 +1,5 @@
 import type { Command, Option } from "commander";
+import { printProviderMetadata } from "./provider-output.js";
 import { resolveCompany } from "./api.js";
 import { readStoredAuth } from "./store.js";
 import { addProviderKey, BALANCE_PROVIDERS, inspectProviderKey, listProviderKeys, probeMetadata, probeProviderKey, providerCatalog, providerManagementBase, removeProviderKey, requireProviderKeyId, setProviderKey, type BalanceProvider, type ProviderKeyInput } from "./provider-key-api.js";
@@ -15,7 +16,7 @@ interface AddOptions extends ScopeOptions {
   from?: string; secret?: string; project?: string; account?: string; version?: string;
 }
 
-function print(value: unknown): void { process.stdout.write(`${JSON.stringify(value, null, 2)}\n`); }
+function print(value: unknown, output?: string): void { printProviderMetadata(value, output); }
 function collect(value: string, previous: string[] = []): string[] { return [...previous, value]; }
 
 export async function providerKeyScope(options: ScopeOptions): Promise<{ companyId?: string; scope: Record<string, unknown> }> {
@@ -61,16 +62,16 @@ async function cmdAdd(options: AddOptions, importing: boolean): Promise<void> {
     const input: ProviderKeyInput = { companyId, provider, key, enabled: options.enable === true, label: options.label, baseUrl: url?.baseUrl, protocol, priority, modelAllow: options.modelAllow, modelDeny: options.modelDeny, templateParams, balanceProvider: options.balanceProvider as BalanceProvider | undefined };
     const saved = await addProviderKey(input);
     key = "";
-    print({ scope, key: saved, ...(source ? { source } : {}), secretPrinted: false });
+    print({ scope, key: saved, ...(source ? { source } : {}), secretPrinted: false }, options.output);
     if (options.inspect !== false) {
-      try { print({ inspection: await inspectProviderKey(saved.id, companyId), note: "Advertised models are not proof of inference or paid access. No generation probe ran." }); }
+      try { print({ inspection: await inspectProviderKey(saved.id, companyId), note: "Advertised models are not proof of inference or paid access. No generation probe ran." }, options.output); }
       catch { process.stderr.write(`Key ${saved.id} was saved. Its no-generation inspection failed; use provider-keys inspect to retry. No credential diagnostics were printed.\n`); }
     }
   } finally { key = ""; }
 }
 
 function addScope(command: Command, outputOption: () => Option): Command {
-  return command.option("--org <org>", "organization slug or UUID (default: saved organization, otherwise personal)").option("--personal", "use personal keys, ignoring the saved organization").addOption(outputOption());
+  return command.option("--org <org>", "organization slug or UUID (default: saved organization, otherwise personal)").option("--personal", "use personal keys, ignoring the saved organization").addOption(outputOption().default("json"));
 }
 
 export function registerProviderKeyCommands(program: Command, outputOption: () => Option): void {
@@ -81,23 +82,23 @@ export function registerProviderKeyCommands(program: Command, outputOption: () =
     .option("--try-provider <id>", "explicit read-only destination: openai, anthropic, openrouter or gm (repeat, maximum four)", collect)
     .option("--confirm-key-sharing", "send this key to every explicitly named provider; no generation or storage")
     .option("--dry-run", "display exact fixed GET destinations without reading a key or making requests")
-    .addOption(outputOption())
+    .addOption(outputOption().default("json"))
     .addHelpText("after", "\nOffline hints never prove ownership. Network checks send the same key to your explicit shortlist, without guessing more destinations. Models advertised by a catalog do not prove key acceptance. Accepted read-only responses do not prove generation access or available spend. Multiple accepted responses never select or store a provider. Agents should normally use an explicit provider with a local secret reference.\n")
-    .action(async (options: { stdin?: boolean; keyEnv?: string; tryProvider?: string[]; confirmKeySharing?: boolean; dryRun?: boolean }) => {
+    .action(async (options: { stdin?: boolean; keyEnv?: string; tryProvider?: string[]; confirmKeySharing?: boolean; dryRun?: boolean; output?: string }) => {
       const plan = identificationPlan(options.tryProvider ?? [], options.confirmKeySharing === true, options.dryRun === true);
-      if (options.dryRun) { print({ destinations: plan, networkRequestsMade: 0, keyRead: false, generationCallsMade: 0 }); return; }
+      if (options.dryRun) { print({ destinations: plan, networkRequestsMade: 0, keyRead: false, generationCallsMade: 0 }, options.output); return; }
       let key = await readProviderSecret(options);
       try {
         const hints = localProviderHints(key), checks = [];
         for (const entry of plan) checks.push(await checkIdentificationProvider(entry.provider, key));
-        print({ hints, ownershipConfirmed: false, checks, networkRequestsMade: checks.length, generationCallsMade: 0, stored: false, selectedProvider: null });
+        print({ hints, ownershipConfirmed: false, checks, networkChecksAttempted: checks.length, generationCallsMade: 0, stored: false, selectedProvider: null }, options.output);
       } finally { key = ""; }
     });
   addScope(keys.command("list").description("list saved key metadata; never retrieve credentials"), outputOption).action(async (options: ScopeOptions) => {
     const { companyId, scope } = await providerKeyScope(options);
-    print({ scope, ...await listProviderKeys(companyId) });
+    print({ scope, ...await listProviderKeys(companyId) }, options.output);
   });
-  keys.command("providers").description("list provider hints and supported protocols without contacting providers").addOption(outputOption()).action(async () => print({ providers: await providerCatalog() }));
+  keys.command("providers").description("list provider hints and supported protocols without contacting providers").addOption(outputOption().default("json")).action(async (options: ScopeOptions) => print({ providers: await providerCatalog() }, options.output));
   for (const importing of [false, true]) {
     const command = addScope(keys.command(importing ? "import" : "add").description(importing ? "copy a key from Secret Manager into Ditto without printing it" : "save a provider key from a local env reference, hidden paste or stdin"), outputOption)
       .option("--provider <id>", "provider id, or custom; omit for unique local prefix detection")
@@ -125,7 +126,7 @@ export function registerProviderKeyCommands(program: Command, outputOption: () =
       const { companyId, scope } = await providerKeyScope(options);
       const priority = options.priority === undefined ? undefined : boundedInteger(options.priority, "--priority", 1, 10_000);
       let key = options.rotateStdin || options.rotateKeyEnv !== undefined ? await readProviderSecret({ stdin: options.rotateStdin, keyEnv: options.rotateKeyEnv }) : undefined;
-      try { print({ scope, key: await setProviderKey(id, { companyId, priority, key, ...(options.enable || options.disable ? { enabled: options.enable === true } : {}) }), secretPrinted: false }); }
+      try { print({ scope, key: await setProviderKey(id, { companyId, priority, key, ...(options.enable || options.disable ? { enabled: options.enable === true } : {}) }), secretPrinted: false }, options.output); }
       finally { key = undefined; }
     });
   addScope(keys.command("remove").description("delete a saved provider key; existing routes may stop working").argument("<key-id>", "saved key UUID"), outputOption).option("--yes", "confirm removal without a terminal prompt")
@@ -134,7 +135,7 @@ export function registerProviderKeyCommands(program: Command, outputOption: () =
       const { companyId, scope } = await providerKeyScope(options);
       if (!options.yes) throw new Error("removing a saved provider key requires --yes; existing routes using it may stop working");
       await removeProviderKey(id, companyId);
-      print({ scope, removed: id });
+      print({ scope, removed: id }, options.output);
     });
   for (const name of ["inspect", "models", "balance"]) {
     addScope(keys.command(name).description(name === "inspect" ? "check one saved key, model listing and balance without generation" : name === "models" ? "list models advertised for one saved key, without generation" : "check a supported balance API; unsupported is not a zero balance").argument("<key-id>", "saved key UUID"), outputOption)
@@ -142,7 +143,7 @@ export function registerProviderKeyCommands(program: Command, outputOption: () =
         requireProviderKeyId(id);
         const { companyId, scope } = await providerKeyScope(options);
         const result = await inspectProviderKey(id, companyId);
-        print({ scope, ...(name === "inspect" ? result : { keyId: id, [name]: result[name] }) });
+        print({ scope, ...(name === "inspect" ? result : { keyId: id, [name]: result[name] }) }, options.output);
       });
   }
   addScope(keys.command("probe").description("run a bounded synthetic probe against an explicit shortlist; supplier charges may apply").argument("<key-id>", "saved key UUID"), outputOption)
@@ -169,6 +170,6 @@ export function registerProviderKeyCommands(program: Command, outputOption: () =
       if (!options.dryRun && (!operatorQuote || !options.acceptEstimate || !options.confirmSpend)) throw new Error("paid probes require --quote-file, --accept-estimate and --confirm-spend; review the same command with --dry-run first");
       const { companyId, scope } = await providerKeyScope(options);
       const plan = { companyId, models, requests, concurrency, requestsPerMinute, maxOutputTokens, maxCostUsd, operatorQuote, acceptEstimate: options.acceptEstimate === true, confirmSpend: options.confirmSpend === true, dryRun: options.dryRun === true };
-      print({ scope, ...probeMetadata(await probeProviderKey(id, plan)), ...(options.dryRun ? { generationCallsMade: 0 } : {}), note: "Operator quotes are estimates, not supplier billing guarantees. Unknown prices stop generation. Observed throughput is not capacity; omitted costs and cache counts remain unknown." });
+      print({ scope, ...probeMetadata(await probeProviderKey(id, plan)), ...(options.dryRun ? { generationCallsMade: 0 } : {}), note: "Operator quotes are estimates, not supplier billing guarantees. Unknown prices stop generation. Observed throughput is not capacity; omitted costs and cache counts remain unknown." }, options.output);
     });
 }

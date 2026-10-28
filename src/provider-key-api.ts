@@ -108,16 +108,30 @@ export async function providerManagementFetch<T>(route: string, init: { method?:
   const chunks: Uint8Array[] = [];
   let size = 0;
   const reader = response.body?.getReader();
-  if (!reader) throw new Error("provider-key management returned an empty response");
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    size += value.byteLength;
-    if (size > 2_000_000) { await reader.cancel(); throw new Error("provider-key management response exceeded its size limit"); }
-    chunks.push(value);
+  if (!reader) {
+    if (init.method === "DELETE") return undefined as T;
+    throw new Error("provider-key management returned an empty response");
   }
-  try { return JSON.parse(Buffer.concat(chunks).toString("utf8")) as T; }
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > 2_000_000) { value.fill(0); throw new Error("response limit"); }
+      chunks.push(value);
+    }
+  } catch {
+    for (const chunk of chunks) chunk.fill(0);
+    void reader.cancel().catch(() => undefined);
+    throw new Error("provider-key management response could not be read within its limits; no credential or response diagnostics were printed");
+  }
+  const buffer = Buffer.concat(chunks);
+  try {
+    if (size === 0 && init.method === "DELETE") return undefined as T;
+    return JSON.parse(buffer.toString("utf8")) as T;
+  }
   catch { throw new Error("provider-key management returned an invalid JSON response; no response body was printed"); }
+  finally { buffer.fill(0); for (const chunk of chunks) chunk.fill(0); }
 }
 
 function object(raw: unknown): Record<string, unknown> {

@@ -45,13 +45,18 @@ export async function apiFetch<T>(
   };
   if (init.body !== undefined) headers["Content-Type"] = "application/json";
   if (init.auth !== false) headers.Authorization = `Bearer ${await requireKey()}`;
-  const response = await fetch(`${apiBase()}${path}`, {
+  let response: Response;
+  try { response = await fetch(`${apiBase()}${path}`, {
     method: init.method ?? "GET",
     headers,
     body: init.body === undefined ? undefined : JSON.stringify(init.body),
     signal: init.signal,
-    ...(init.secretResponse ? { redirect: "error" as const } : {}),
-  });
+    ...(init.secretResponse ? { redirect: "manual" as const } : {}),
+  }); } catch (error) {
+    if (!init.secretResponse) throw error;
+    if (init.signal?.aborted) throw new DOMException("credential operation cancelled; diagnostics were suppressed", "AbortError");
+    throw new Error("credential operation request failed; no credential or response diagnostics were printed");
+  }
   if (!response.ok) {
     if (init.secretResponse) {
       await response.body?.cancel().catch(() => undefined);
@@ -79,7 +84,11 @@ export async function apiFetch<T>(
   }
   if (response.status === 204) return undefined as T;
   try { return (await response.json()) as T; }
-  catch (error) { if (init.secretResponse) throw new Error("credential operation returned an invalid response; no response body was printed"); throw error; }
+  catch (error) {
+    if (!init.secretResponse) throw error;
+    if (init.signal?.aborted) throw new DOMException("credential operation cancelled; diagnostics were suppressed", "AbortError");
+    throw new Error("credential operation returned an invalid response; no response body was printed");
+  }
 }
 
 // ===== Inference endpoints =====

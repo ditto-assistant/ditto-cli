@@ -68,7 +68,7 @@ export async function readProviderSecret(options: { stdin?: boolean; keyEnv?: st
       for (const char of decoder.write(part)) {
         if (char === "\u0003" || char === "\u0004") return finish(new Error("provider key entry cancelled"));
         if (char === "\r" || char === "\n") return finish();
-        if (char === "\u007f" || char === "\b") value = value.slice(0, -1);
+        if (char === "\u007f" || char === "\b") value = [...value].slice(0, -1).join("");
         else if (char >= " " && char !== "\u007f") value += char;
         else return finish(new Error("provider key input contains a control character"));
         if (Buffer.byteLength(value) > MAX_SECRET_BYTES) return finish(new Error("provider key input is too large"));
@@ -116,10 +116,20 @@ function checkCloudOverrides(env: NodeJS.ProcessEnv): void {
   }
 }
 
+/** cmd.exe needs batch wrappers; allow only scope-token characters before shell parsing. */
+export function gcloudInvocation(args: string[], platform = process.platform): { command: string; args: string[]; windowsVerbatimArguments?: boolean } {
+  const all = [...args, "--quiet", "--verbosity=none"];
+  if (platform !== "win32") return { command: "gcloud", args: all };
+  if (all.some(value => !/^[A-Za-z0-9@._=:/+(),-]+$/.test(value))) throw new Error("this gcloud scope cannot be safely passed to the Windows batch wrapper; use a standard account identity without shell metacharacters");
+  return { command: "cmd.exe", args: ["/d", "/s", "/c", `""gcloud.cmd" ${all.map(value => `"${value}"`).join(" ")}"`], windowsVerbatimArguments: true };
+}
+
 /** Capture and discard diagnostics: platform failures can echo credential payloads. */
 async function captureGCloud(args: string[], env: NodeJS.ProcessEnv): Promise<Buffer> {
+  const invocation = gcloudInvocation(args);
   return new Promise((resolve, reject) => {
-    const child = spawn("gcloud", [...args, "--quiet", "--verbosity=none"], {
+    const child = spawn(invocation.command, invocation.args, {
+      ...(invocation.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
       stdio: ["ignore", "pipe", "pipe"],
       env: { ...env, CLOUDSDK_CORE_DISABLE_PROMPTS: "1", CLOUDSDK_CORE_LOG_HTTP: "false", CLOUDSDK_CORE_DISABLE_USAGE_REPORTING: "true" },
     });
