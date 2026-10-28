@@ -27,6 +27,10 @@ try {
 appendFileSync(process.env.FAKE_CLI_LOG, \`\${JSON.stringify({ bin, args, stdin })}\\n\`);
 const fail = process.env.FAKE_CLI_FAIL;
 if (fail && args.join(" ").includes(fail)) {
+  if (process.env.FAKE_CLI_ECHO_STDIN && stdin) {
+    process.stdout.write(stdin + stdin);
+    process.stderr.write(stdin + encodeURIComponent(stdin) + stdin);
+  }
   process.stderr.write(\`\${bin}: refusing "\${fail}" (fake failure)\\n\`);
   process.exit(1);
 }

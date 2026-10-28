@@ -1,12 +1,10 @@
 #!/usr/bin/env node
 import { readFile } from "node:fs/promises";
-import { createInterface } from "node:readline/promises";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { Command, Option } from "commander";
 import {
   type ApiKeySource,
-  agentSignupURL,
   apiBaseURL,
   authFilePath,
   mcpServerURL,
@@ -25,7 +23,7 @@ import {
   registerSessionCommands,
 } from "./commands.js";
 import { type ActiveSession, markSessionUsed, resolveActiveSession, sessionHeaders } from "./mcp-session.js";
-import { NO_KEY_MESSAGE } from "./api.js";
+import { apiFetch, NO_KEY_MESSAGE } from "./api.js";
 import { openInBrowser } from "./browser.js";
 import { registerOrgCommands } from "./org-commands.js";
 import { registerReviewCommands } from "./review-commands.js";
@@ -36,6 +34,9 @@ import { registerAppCommands } from "./app-commands.js";
 import { registerConfigCommands } from "./dittoconfig/commands.js";
 import { deviceLogin } from "./device-login.js";
 import { registerSelfUpdateCommands } from "./self-update.js";
+import { registerProviderKeyCommands } from "./provider-key-commands.js";
+import { readProviderSecret, validateProviderSecret } from "./provider-secrets.js";
+import { secretSafeMetadata } from "./secret-redaction.js";
 
 type OutputFormat = "json" | "text" | "markdown" | "raw";
 const OUTPUT_FORMATS: readonly OutputFormat[] = ["json", "text", "markdown", "raw"];
@@ -298,35 +299,16 @@ async function callAndPrint(
   }
 }
 
-async function readKeyFromStdin(): Promise<string> {
-  return new Promise((resolve, reject) => {
-    let buf = "";
-    process.stdin.setEncoding("utf-8");
-    process.stdin.on("data", (chunk) => (buf += chunk));
-    process.stdin.on("end", () => resolve(buf));
-    process.stdin.on("error", reject);
-  });
-}
-
-async function promptForKey(message: string): Promise<string> {
-  const rl = createInterface({ input: process.stdin, output: process.stderr });
-  try {
-    return await rl.question(message);
-  } finally {
-    rl.close();
-  }
-}
-
 async function cmdLogin(keyArg: string | undefined, options: LoginOptions): Promise<void> {
   parseOutputFormat(options.output); // validate but ignored: login is interactive
-
-  let key = keyArg?.trim();
+  if (keyArg !== undefined) throw new Error("raw API keys in command arguments are refused because they enter process listings and shell history. Use heyditto login --stdin, --paste (hidden input), or browser login instead");
+  let key: string | undefined;
   let viaDevice = false;
   let defaultEndpoint: string | undefined;
   let pickedEndpoint: string | undefined;
 
   if (!key && options.stdin) {
-    key = (await readKeyFromStdin()).trim();
+    key = await readProviderSecret({ stdin: true });
   } else if (!key && !options.paste && process.stdin.isTTY) {
     // Browser device flow: no key to copy around. The page signs the user in
     // (or creates the account) and hands the key back to this process.
@@ -354,10 +336,10 @@ async function cmdLogin(keyArg: string | undefined, options: LoginOptions): Prom
     }
     if (!process.stdin.isTTY) {
       throw new Error(
-        `no key provided and stdin is not a TTY. Pass the key as an argument or pipe it via --stdin.`,
+        `stdin is not a TTY. Pipe the key via heyditto login --stdin; raw key arguments are refused.`,
       );
     }
-    key = (await promptForKey(`Paste your Ditto API key (from ${newKeyURL()}): `)).trim();
+    key = await readProviderSecret({ prompt: "Paste Ditto API key (hidden): " });
   }
 
   if (!key) throw new Error("no key provided");
@@ -420,7 +402,7 @@ async function cmdInit(graphs: string[], options: InitOptions): Promise<void> {
 
   const stored = await readStoredAuth();
   if (stored?.apiKey && stored.agentMode) {
-    const existing = {
+    const existing = secretSafeMetadata({
       created: false,
       accountID: stored.agentAccountID,
       userID: stored.agentUserID,
@@ -429,12 +411,12 @@ async function cmdInit(graphs: string[], options: InitOptions): Promise<void> {
       claimURL: stored.claimURL,
       status: "configured",
       configPath: authFilePath(),
-    };
+    }, [stored.apiKey]);
     if (output === "json" || output === "raw") {
       process.stdout.write(`${JSON.stringify(existing, null, 2)}\n`);
     } else {
       process.stdout.write(`Agent account already configured at ${authFilePath()}\n`);
-      if (stored.claimURL) process.stdout.write(`Claim later: ${stored.claimURL}\n`);
+      if (existing.claimURL) process.stdout.write(`Claim later: ${existing.claimURL}\n`);
     }
     return;
   }
@@ -443,13 +425,11 @@ async function cmdInit(graphs: string[], options: InitOptions): Promise<void> {
   }
 
   const agentCaller = options.name?.trim() || options.agentCaller?.trim() || defaultAgentCaller();
-  const response = await fetch(agentSignupURL(), {
+  const signupRaw = await apiFetch<Partial<AgentSignupResponse>>("/api/v5/agents/signup", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "User-Agent": `${packageName}/${packageVersion}`,
-    },
-    body: JSON.stringify({
+    auth: false,
+    secretResponse: true,
+    body: {
       agentCaller,
       ...(subscribeGraphs.length > 0 ? { subscribeGraphs } : {}),
       metadata: {
@@ -458,27 +438,34 @@ async function cmdInit(graphs: string[], options: InitOptions): Promise<void> {
         platform: process.platform,
         arch: process.arch,
       },
-    }),
+    },
   });
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    throw new Error(`agent signup failed: HTTP ${response.status}${body ? ` - ${body}` : ""}`);
-  }
-  const signupRaw = (await response.json()) as Partial<AgentSignupResponse>;
   if (
+    !signupRaw ||
     typeof signupRaw.accountID !== "string" ||
     typeof signupRaw.userID !== "string" ||
-    typeof signupRaw.apiKeyID !== "number" ||
+    !Number.isSafeInteger(signupRaw.apiKeyID) || Number(signupRaw.apiKeyID) <= 0 ||
     typeof signupRaw.apiKey !== "string" ||
     typeof signupRaw.claimURL !== "string" ||
     signupRaw.status !== "unclaimed" ||
-    typeof signupRaw.createdAt !== "string"
+    typeof signupRaw.createdAt !== "string" || !Number.isFinite(Date.parse(signupRaw.createdAt)) ||
+    (signupRaw.agentCaller !== undefined && typeof signupRaw.agentCaller !== "string") ||
+    [signupRaw.accountID, signupRaw.userID, signupRaw.agentCaller ?? agentCaller].some(value => !value || value.length > 250 || /[\x00-\x1f\x7f]/.test(value)) ||
+    [signupRaw.subscribedGraphs, signupRaw.failedGraphs].some(value => value !== undefined && (!Array.isArray(value) || value.length > 1000 || value.some(item => typeof item !== "string" || item.length > 250 || /[\x00-\x1f\x7f]/.test(item))))
   ) {
     throw new Error("agent signup failed: invalid response payload");
   }
-  const signup: AgentSignupResponse = signupRaw as AgentSignupResponse;
+  const signupKey = validateProviderSecret(signupRaw.apiKey);
+  let claimURL: URL;
+  try { claimURL = new URL(signupRaw.claimURL); }
+  catch { throw new Error("agent signup failed: invalid claim URL; no response body was printed"); }
+  if (signupRaw.claimURL.length > 2000 || claimURL.username || claimURL.password || (claimURL.protocol !== "https:" && !(claimURL.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(claimURL.hostname)))) {
+    throw new Error("agent signup failed: invalid claim URL; no response body was printed");
+  }
+  const { apiKey: _plaintext, ...metadata } = signupRaw as AgentSignupResponse;
+  const signup = secretSafeMetadata(metadata, [signupKey]);
   await writeStoredAuth({
-    apiKey: signup.apiKey,
+    apiKey: signupKey,
     agentMode: true,
     agentAccountID: signup.accountID,
     agentUserID: signup.userID,
@@ -812,7 +799,7 @@ async function cmdStatus(options: CommonOptions): Promise<void> {
     `api key:   ${report.apiKey.present ? "set" : "MISSING"}  (source: ${report.apiKey.source})`,
   ];
   if (!report.apiKey.present) {
-    lines.push(``, `Run 'heyditto login' to sign in through your browser, 'heyditto init --json' for no-human agent setup, or get a key at ${newKeyURL()} and run 'heyditto login <key>'.`);
+    lines.push(``, `Run 'heyditto login' to sign in through your browser, 'heyditto init --json' for no-human agent setup, or use 'heyditto login --stdin' or '--paste' for an existing key.`);
   } else if (report.tools) {
     lines.push(`tools:     ${report.tools.join(", ")}`);
   } else if (report.toolsError) {
@@ -1239,13 +1226,14 @@ your own workspace or an app workspace.`,
   program
     .command("login")
     .description("sign in through your browser (device flow) or save an API key")
-    .argument("[key]", "Ditto API key (omit to sign in through the browser)")
+    .argument("[legacy-key]", "legacy positional keys are refused; use --stdin or --paste")
     .option("--paste", "open the key creation page and paste a key instead of the device flow")
     .option("--stdin", "read the API key from stdin")
     .addOption(hiddenOutputOption())
     .action(cmdLogin);
 
   registerEndpointCommands(program, addExamples, outputOption);
+  registerProviderKeyCommands(program, outputOption);
   registerAppCommands(program, addExamples, outputOption);
   registerOrgCommands(program, addExamples, outputOption, orgOption,
     (name, args, output) => callAndPrint(name, args, parseOutputFormat(output), true));

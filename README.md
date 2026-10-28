@@ -155,8 +155,9 @@ heyditto login
 
 This prints a short code, opens `https://heyditto.ai/device` (pre-filled with the
 code), and saves the resulting key to your CLI config directory once you approve
-it. Pass a key as an argument (`heyditto login ditto_mcp_…`), pipe it with
-`--stdin`, or use `--paste` for the older copy-a-key page.
+it. Pipe an existing key with `heyditto login --stdin`, or use `--paste` for
+hidden input from the older copy-a-key page. Raw key arguments are refused so
+they cannot enter process listings or shell history.
 
 Agents can self-provision without a browser, email, or OTP:
 
@@ -206,11 +207,11 @@ npx @heyditto/cli@latest claude --yolo --worktree
 ```
 
 You can still paste a key from **https://app.heyditto.ai/mcp/newkey**
-(`heyditto login <key>`, `--paste`, or `--stdin`), or set it in the environment:
+(`heyditto login --paste` for hidden input, or `--stdin`), or configure a private
+runtime environment containing `DITTO_API_KEY` without printing it:
 
 ```bash
-export DITTO_API_KEY=ditto_mcp_…
-# add to ~/.zshrc / ~/.bashrc to persist
+# Prefer browser login or --stdin; never paste key values into shell history.
 ```
 
 ## Commands
@@ -242,7 +243,7 @@ heyditto graphs remove <@username>
 heyditto graphs subscribers
 heyditto graphs sharing (--enable|--disable) [--title <t>] [--description <d>]
 heyditto init [--name <name>] [--subscribe <@graph>]... [<@graph>...] [--json]
-heyditto login [<key>] [--paste] [--stdin]
+heyditto login [--paste] [--stdin]
 heyditto endpoints [--set-default <slug>] [--clear-default]
 heyditto apps list [--company <id>]
 heyditto apps create <name> [--gh-secret NAME --repo o/r | --gcp-secret NAME | …]
@@ -1314,3 +1315,103 @@ heyditto orgs set-role @teammate member --org your-team --expected-role viewer
 `allowance` reads your own allowance when the member is omitted. Current org managers can inspect another member by exact id, email or handle. It uses Ditto MCP, exposes no company balance or purchase history, and changes no budget. MCP refusals exit with an error.
 
 `set-role` resolves exactly one member, sends only the role, and reports the previous role. `--expected-role` is a client preflight, not an atomic compare-and-set. Owner/admin authorization and last-owner/last-manager protections are enforced by the backend. Reverting a role uses the same command with the reported previous role and current authorization. Directory listing is capped at 2000 rows and reports possible truncation. Role changes refuse a directory at that cap, since an exact name lookup cannot be guaranteed complete. These commands need a full account CLI key and a backend that admits the member routes; narrowed space/tool/thread keys are refused.
+
+## Provider keys and private BYOK pools
+
+Provider-key management is designed for agents. The CLI accepts credentials from
+hidden terminal paste, `--stdin`, or Google Secret Manager import. It never
+prints the credential, writes it to disk, or accepts it as a command argument.
+Use saved key UUIDs for later operations. MCP can manage the same metadata and
+routing policies; secret bytes enter through the local CLI, not a tool argument.
+
+```bash
+heyditto provider-keys providers
+heyditto provider-keys list --org omniaura
+heyditto provider-keys add --org omniaura --provider custom \
+  --protocol openai --base-url https://inference.example.com/v1
+heyditto provider-keys import --org omniaura --from gcloud \
+  --secret impala-review --project my-gcp-project --account me@example.com \
+  --provider custom --protocol openai --base-url https://inference.example.com/v1
+heyditto provider-keys inspect <saved-key-uuid> --org omniaura
+heyditto provider-keys models <saved-key-uuid> --org omniaura
+heyditto provider-keys balance <saved-key-uuid> --org omniaura
+heyditto provider-keys set <saved-key-uuid> --org omniaura --disable
+```
+
+`--org` selects an organization. Without it the saved `orgs use` organization
+applies; `--personal` overrides that selection. Import verifies a signed-in
+gcloud account and requires an explicit project or a full Secret Manager
+resource. It changes no global cloud defaults and suppresses subprocess
+diagnostics, which could contain secret values. It needs Secret Manager access,
+not Application Default Credentials. Keep the provider key out of shell
+variables, command substitutions and agent transcripts by using this import
+instead of running `gcloud secrets versions access` yourself.
+
+Unique provider prefixes can suggest a provider locally. Ambiguous or unknown
+keys require `--provider`; a custom API key also needs a URL and an OpenAI or
+Anthropic protocol. Base URLs and full chat/messages URLs are accepted. Custom
+path prefixes remain intact. URLs containing embedded credentials or query
+parameters are rejected. No key is tried against several companies to guess its
+owner. Provider-key management accepts the production Ditto API or an explicit
+loopback test API; an arbitrary `DITTO_API_BASE` override is refused.
+Providers that need public account or gateway identifiers expose those settings
+in `provider-keys providers`. Supply them with repeatable `--param name=value`.
+Only declared public settings are accepted; credentials never belong in these
+arguments. Use `--base-url` for URLs.
+
+Saving a key performs a no-generation inspection unless `--no-inspect` is set.
+The result distinguishes advertised models, valid/rejected/unknown credentials,
+and reported/unsupported/unknown balance checks. Not every provider offers a
+balance API. A missing balance is not zero, and a listed model is not proof that
+the account can run it. `--balance-provider impala` or `openrouter` opts a custom
+key into that adapter on its confirmed destination only.
+
+Paid probing is separate and bounded. An explicit shortlist prevents an
+accidental sweep of every public model name. Run the plan first, then add
+`--confirm-spend` to execute it:
+
+```bash
+heyditto provider-keys probe <saved-key-uuid> --org omniaura \
+  --model provider/model --requests 3 --concurrency 1 \
+  --max-output-tokens 8 --allow-unknown-cost --dry-run
+```
+
+Every run is limited to 20 calls, four concurrent requests, 32 output tokens per
+call and 30 seconds. `--requests-per-minute` defaults to 60 and is capped at
+6,000; a stricter existing shared credential limit still applies. This probe
+rate does not change the live pool configuration. `--max-cost-usd` is accepted only when trusted pricing can
+establish a ceiling; otherwise the server refuses before generation. Use
+`--allow-unknown-cost` only when you accept unknown supplier charges. The current
+probe cannot enforce a dollar ceiling, so a dollar-capped run refuses before
+generation. Provider-reported costs are not settled billing receipts; omitted
+costs and cache counts stay unknown. Attempted calls, HTTP responses and completed
+generations are separate counts. Observed
+requests per second and latency are measurements, not capacity guarantees.
+
+Private pools use saved organization or personal key UUIDs. For example,
+`pool.json` can contain:
+
+```json
+{
+  "enabled": true,
+  "routes": [
+    { "keyId": "11111111-1111-1111-1111-111111111111", "weight": 70, "requestsPerMinute": 75 },
+    { "keyId": "22222222-2222-2222-2222-222222222222", "weight": 30 }
+  ]
+}
+```
+
+```bash
+heyditto endpoints pool show ditto-review
+heyditto endpoints pool set ditto-review --file pool.json --dry-run
+heyditto endpoints pool set ditto-review --file pool.json
+heyditto endpoints pool disable ditto-review --dry-run
+```
+
+Pool writes change only `privateUpstreamRouting`. They do not change billing,
+selected key UUIDs, or failover. Enabling requires full BYOK and the server's
+pilot access. Weights divide new sessions; session affinity preserves caches.
+Rate limits are manual admission caps. Switching to another provider still
+requires explicit failover policy. `disable` disables and clears the pool, but
+leaves provider credentials stored. This custom-key pool is separate from the
+private Impala source used for Ditto-funded reviews.

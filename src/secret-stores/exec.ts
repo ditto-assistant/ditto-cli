@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Delivery, SecretStore } from "./types.js";
 import { writePrivateKey } from "./local-file.js";
+import { redactKnownSecrets } from "../secret-redaction.js";
 
 /**
  * Subprocess plumbing shared by every store. Generalized from the original
@@ -101,9 +102,8 @@ export function preflight(input: {
     throw new Error(`storing a key in ${input.label} needs ${input.bin} on PATH; ${input.installHint}`);
   }
   if (auth.status !== 0) {
-    const detail = trimmedStderr(auth);
     throw new Error(
-      `${bin} is not signed in (\`${bin} ${input.authArgs.join(" ")}\` failed${detail ? `: ${detail}` : ""}). ${input.authHint}`,
+      `${bin} is not signed in (\`${bin} ${input.authArgs.join(" ")}\` failed; authentication diagnostics suppressed). ${input.authHint}`,
     );
   }
 }
@@ -135,7 +135,7 @@ export function deliver(store: SecretStore, name: string, attempts: Delivery[], 
         writePrivateKey(attempt.path, value);
         return;
       } catch (error) {
-        failures.push(`${attempt.note}: ${error instanceof Error ? error.message : "private file delivery failed"}`);
+        failures.push(redactKnownSecrets(`${attempt.note}: ${error instanceof Error ? error.message : "private file delivery failed"}`, [value]));
         continue;
       }
     }
@@ -145,8 +145,9 @@ export function deliver(store: SecretStore, name: string, attempts: Delivery[], 
       throw new Error(`${store.bin} disappeared from PATH while storing the secret; ${store.installHint}`);
     }
     if (res.status === 0) return;
-    const detail = trimmedStderr(res);
-    failures.push(`${attempt.note}: ${detail || `exit ${res.status}`}`);
+    // The child has just received a credential. Its stdout/stderr may echo it
+    // or encode it in arbitrary ways, so suppress those diagnostics entirely.
+    failures.push(`${attempt.note}: exit ${res.status}; credential-bearing subprocess diagnostics suppressed`);
   }
   throw new Error(`${store.id === "file" ? store.label : store.bin} could not store ${name} — ${failures.join("; ")}`);
 }

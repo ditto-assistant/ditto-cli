@@ -26,7 +26,7 @@ function userAgent(): string {
 export const NO_KEY_MESSAGE =
   "no Ditto API key configured.\n\n" +
   "  Run: heyditto login                 (opens your browser)\n" +
-  "  Or:  heyditto login <key>           (save an existing key)\n" +
+  "  Or:  heyditto login --stdin         (save an existing key without argv exposure)\n" +
   "  Or:  heyditto init --json           (create a claimable agent account, no browser)\n";
 
 async function requireKey(): Promise<string> {
@@ -37,7 +37,7 @@ async function requireKey(): Promise<string> {
 
 export async function apiFetch<T>(
   path: string,
-  init: { method?: string; body?: unknown; auth?: boolean; signal?: AbortSignal } = {},
+  init: { method?: string; body?: unknown; auth?: boolean; signal?: AbortSignal; secretResponse?: boolean } = {},
 ): Promise<T> {
   const headers: Record<string, string> = {
     Accept: "application/json",
@@ -50,8 +50,13 @@ export async function apiFetch<T>(
     headers,
     body: init.body === undefined ? undefined : JSON.stringify(init.body),
     signal: init.signal,
+    ...(init.secretResponse ? { redirect: "error" as const } : {}),
   });
   if (!response.ok) {
+    if (init.secretResponse) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new ApiError(`${init.method ?? "GET"} ${path} failed: HTTP ${response.status}; response diagnostics were suppressed because this operation can return credentials`, response.status, "");
+    }
     const text = await response.text().catch(() => "");
     let detail = text;
     try {
@@ -73,7 +78,8 @@ export async function apiFetch<T>(
     );
   }
   if (response.status === 204) return undefined as T;
-  return (await response.json()) as T;
+  try { return (await response.json()) as T; }
+  catch (error) { if (init.secretResponse) throw new Error("credential operation returned an invalid response; no response body was printed"); throw error; }
 }
 
 // ===== Inference endpoints =====
@@ -356,9 +362,9 @@ export interface CreateKeyInput {
 export async function createKey(endpointId: string, input: CreateKeyInput): Promise<InferenceKey> {
   const key = await apiFetch<InferenceKey>(
     `/api/v5/inference/endpoints/${encodeURIComponent(endpointId)}/keys`,
-    { method: "POST", body: input },
+    { method: "POST", body: input, secretResponse: true },
   );
-  if (!key.key) throw new Error("key creation succeeded but no plaintext key was returned");
+  if (!key || typeof key.key !== "string" || !key.key) throw new Error("key creation succeeded but no valid plaintext key was returned");
   return key;
 }
 
@@ -507,6 +513,7 @@ export async function pollDeviceToken(deviceCode: string): Promise<DeviceTokenRe
   }>("/api/v2/mcp/device-token", {
     method: "POST",
     auth: false,
+    secretResponse: true,
     body: { device_code: deviceCode, grant_type: "urn:ietf:params:oauth:grant-type:device_code" },
   });
   if (res.access_token) {
@@ -673,8 +680,10 @@ export async function findApp(ref: string, companyId?: string): Promise<Develope
   throw new Error(`"${ref}" matches several apps (${matches.map((a) => a.appID).join(", ")}); pass the app id`);
 }
 
-export function createApp(name: string, companyId?: string): Promise<DeveloperApp> {
-  return apiFetch<DeveloperApp>(APPS, { method: "POST", body: { name, ...(companyId ? { companyId } : {}) } });
+export async function createApp(name: string, companyId?: string): Promise<DeveloperApp> {
+  const app = await apiFetch<DeveloperApp>(APPS, { method: "POST", body: { name, ...(companyId ? { companyId } : {}) }, secretResponse: true });
+  if (!app || (app.appSecret !== undefined && typeof app.appSecret !== "string")) throw new Error("app creation returned invalid credential metadata; no response body was printed");
+  return app;
 }
 
 export interface AppPatch {
@@ -715,8 +724,10 @@ export function revokeAppShare(appId: string, subjectType: AppShare["subjectType
 }
 
 /** Mints a fresh app secret. The response is the ONLY copy. */
-export function rotateAppSecret(appId: string): Promise<{ appID: string; appSecret: string }> {
-  return apiFetch(`${APPS}/${encodeURIComponent(appId)}/rotate-secret`, { method: "POST", body: {} });
+export async function rotateAppSecret(appId: string): Promise<{ appID: string; appSecret: string }> {
+  const result = await apiFetch<{ appID: string; appSecret: string }>(`${APPS}/${encodeURIComponent(appId)}/rotate-secret`, { method: "POST", body: {}, secretResponse: true });
+  if (!result || typeof result.appSecret !== "string" || !result.appSecret) throw new Error("app secret rotation returned invalid credential metadata; no response body was printed");
+  return result;
 }
 
 export interface OriginChallenge {

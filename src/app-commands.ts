@@ -32,6 +32,7 @@ import {
 } from "./api.js";
 import { type KeysCreateOptions, confirmTyped, isJSON, printTable, shorthandsOf } from "./commands.js";
 import { STORE_IDS, VERCEL_TARGETS, deliver, selectStore } from "./secret-stores/index.js";
+import { secretSafeError, secretSafeMetadata } from "./secret-redaction.js";
 
 /**
  * Developer apps from the shell — everything the developer console does for
@@ -187,25 +188,26 @@ export async function cmdAppsCreate(name: string, options: KeysCreateOptions & S
   // a typo in --repo would create the app and lose its only secret.
   const prepared = hasStoreFlag(options) ? prepareSecretStore(options, "DITTO_OIDC_CLIENT_SECRET") : undefined;
   const app = await createApp(name.trim(), options.company);
-  const { appSecret, ...safe } = app;
+  const { appSecret, ...metadata } = app;
+  const safe = secretSafeMetadata(metadata, [appSecret]);
   let stored: { secretName: string; describe: string } | undefined;
   if (appSecret && prepared) {
     try {
       stored = deliverPrepared(prepared, appSecret, "the app secret");
     } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err);
+      const reason = secretSafeError(err, [appSecret]);
       throw new Error(
-        `${reason}\nApp ${app.appID} was created but its secret could NOT be stored and is not recoverable. Rotate it into a store: heyditto apps secret rotate ${app.appID} --gh-secret ${prepared.secretName} --repo <owner/repo>`,
+        `${reason}\nApp ${safe.appID} was created but its secret could NOT be stored and is not recoverable. Rotate it into a store: heyditto apps secret rotate ${safe.appID} --gh-secret ${prepared.secretName} --repo <owner/repo>`,
       );
     }
   }
-  if (isJSON(options)) return writeJSON({ app: safe, secretStored: stored ?? null, oidc: oidcConfig(app) });
-  process.stdout.write(`Created app ${app.appID} ("${app.name}").\n`);
-  process.stdout.write(`${envLines(oidcConfig(app))}\n`);
+  if (isJSON(options)) return writeJSON({ app: safe, secretStored: stored ?? null, oidc: oidcConfig(safe) });
+  process.stdout.write(`Created app ${safe.appID} ("${safe.name}").\n`);
+  process.stdout.write(`${envLines(oidcConfig(safe))}\n`);
   if (appSecret && !stored) {
     process.stderr.write(
       "The app secret was minted but NOT shown. Store it somewhere your server can read it:\n" +
-        `  heyditto apps secret rotate ${app.appID} --gh-secret DITTO_OIDC_CLIENT_SECRET --repo <owner/repo>\n` +
+        `  heyditto apps secret rotate ${safe.appID} --gh-secret DITTO_OIDC_CLIENT_SECRET --repo <owner/repo>\n` +
         "(rotating mints a fresh secret and forwards it straight into the store).\n",
     );
   }
@@ -477,11 +479,12 @@ export async function cmdAppsSecretRotate(ref: string, options: KeysCreateOption
     preview: `Will mint a new app secret for ${app.appID} and store ${secretName} in ${target.describe}. Your server must switch to it right away.`,
   });
   const rotated = await rotateAppSecret(app.appID);
-  const { appSecret, ...safe } = rotated;
+  const { appSecret, ...metadata } = rotated;
+  const safe = secretSafeMetadata(metadata, [appSecret]);
   try {
     deliver(store, secretName, store.deliveries(secretName, target), appSecret ?? "");
   } catch (err) {
-    const reason = err instanceof Error ? err.message : String(err);
+    const reason = secretSafeError(err, [appSecret]);
     // The backend already replaced the secret; the plaintext is gone with this
     // process. Never print it as a fallback — say what happened and how to recover.
     throw new Error(

@@ -1,5 +1,31 @@
 # Agent Instructions
 
+## Agent-friendly secret handling is the first priority
+
+Provider credentials must never appear in command arguments, terminal output,
+logs, exception bodies, fixtures with live values, MCP tool arguments, or saved
+configuration. Use hidden terminal input, piped stdin, or the built-in Secret
+Manager import. Import captures the platform CLI's output in process memory and
+sends the credential directly to Ditto; do not print or materialize it as a
+shell variable or temporary file. Process-memory strings are not a secure erase
+guarantee.
+
+Provider-key commands return allowlisted metadata only. Do not add a reveal or
+fetch-secret operation. Do not pass through arbitrary provider or subprocess
+errors. Prefix detection is local and advisory; a key may be sent only to one
+confirmed destination. Never try a credential against a list of providers to
+guess its owner.
+
+Model catalogs and balance checks must not silently run generation. Paid model
+or throughput probes require an explicit model shortlist, request/output/time
+bounds and spend confirmation. A small probe does not establish capacity. An
+unknown supplier price cannot establish a dollar ceiling; preserve unknown
+receipt and cache values rather than converting them to zero. Pool changes must
+not silently alter billing, provider-key selection, or failover consent.
+
+Exercise these boundaries with synthetic credentials, local API stubs and fake
+platform CLIs. Never use live keys to test redaction.
+
 This repo publishes [`@heyditto/cli`](https://www.npmjs.com/package/@heyditto/cli) to npm via [semantic-release](https://github.com/semantic-release/semantic-release) on every push to `main`. The conventions below are non-negotiable — break them and the release silently won't fire.
 
 ## Conventional commits (required)
