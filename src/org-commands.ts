@@ -161,7 +161,7 @@ export async function cmdOrgMembers(options: ScopeOptions): Promise<void> {
   const company = await requireOrg(options);
   const members = await listCompanyMembers(company.id);
   if (isJSON(options)) {
-    writeJSON({ company: company.slug, members, truncated: members.length >= 2000 });
+    writeJSON({ company: company.slug, members, possiblyTruncated: members.length >= 2000 });
     return;
   }
   printTable(
@@ -182,8 +182,12 @@ export async function cmdOrgMemberRole(
     throw new Error("role must be owner, admin, member or viewer");
   }
   const company = await requireOrg(options);
-  const members = await listCompanyMembers(company.id);
   const needle = member.trim().replace(/^@/, "").toLowerCase();
+  if (!needle) throw new Error("provide a membership id, user id, email or @handle");
+  const members = await listCompanyMembers(company.id);
+  if (members.length >= 2000) {
+    throw new Error("directory may be truncated at 2000 members; cannot safely resolve a role change");
+  }
   const matches = members.filter((m) =>
     [m.id, m.userUid, m.email, m.handle].some((v) => v?.toLowerCase() === needle),
   );
@@ -197,11 +201,19 @@ export async function cmdOrgMemberRole(
     throw new Error(`expected role ${options.expectedRole}, found ${target.role}; inspect the membership before retrying`);
   }
   if (options.dryRun) {
-    writeJSON({ company: company.slug, member: target, newRole: role, dryRun: true });
+    if (isJSON(options)) {
+      writeJSON({ company: company.slug, member: target, newRole: role, dryRun: true });
+    } else {
+      process.stdout.write(`Would change ${member} in ${company.slug}: ${target.role} -> ${role}.\n`);
+    }
     return;
   }
   const updated = await setCompanyMemberRole(company.id, target.id, role);
-  writeJSON({ company: company.slug, previousRole: target.role, member: updated });
+  if (isJSON(options)) {
+    writeJSON({ company: company.slug, previousRole: target.role, member: updated });
+  } else {
+    process.stdout.write(`Changed ${member} in ${company.slug}: ${target.role} -> ${updated.role}.\n`);
+  }
 }
 
 // ---------------------------------------------------------------------------

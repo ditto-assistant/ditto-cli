@@ -846,7 +846,7 @@ export interface CompanyMember {
 }
 
 export async function listCompanyMembers(companyId: string): Promise<CompanyMember[]> {
-  // The API caps this directory at 2000. Refuse ambiguous/incomplete selection.
+  // The API caps this directory at 2000; callers must treat a full page as possibly incomplete.
   const out = await apiFetch<{ members: CompanyMember[] }>(`/api/v5/companies/${encodeURIComponent(companyId)}/members?limit=2000`);
   return out.members;
 }

@@ -116,11 +116,11 @@ function bearerKeyAccepted(method, url) {
   });
 }
 
-function startStub({ companies = [OMNI, KLYRO], canManage = true, canDecide = true } = {}) {
+function startStub({ companies = [OMNI, KLYRO], canManage = true, canDecide = true, directorySize = 1 } = {}) {
   const calls = [];
   const connections = [structuredClone(LINEAR), structuredClone(INTERNAL)];
   const approvals = structuredClone(APPROVALS);
-  const members = [{id:"member-one",userUid:"user-one",handle:"Teammate",email:"teammate@example.com",role:"viewer",status:"active"}];
+  const members = Array.from({length:directorySize},(_,i)=>({id:i===0?"member-one":`member-${i}`,userUid:`user-${i}`,handle:i===0?"Teammate":`member-${i}`,email:i===0?"teammate@example.com":"",role:"viewer",status:"active"}));
   const server = http.createServer((req, res) => {
     let body = "";
     req.on("data", (chunk) => (body += chunk));
@@ -555,7 +555,7 @@ test("org directory and exact role change preserve scope and show the inverse", 
   assert.equal(members.status,0,members.stderr); assert.equal(JSON.parse(members.stdout).members[0].role,"viewer");
   const dry=await run(stub.base,["orgs","set-role","@teammate","member","--org","omni-aura","--expected-role","viewer","--dry-run"]);
   assert.equal(dry.status,0,dry.stderr);assert.equal(stub.calls.filter(c=>c.method==="PATCH").length,0);
-  const changed=await run(stub.base,["orgs","set-role","teammate@example.com","member","--org","omni-aura","--expected-role","viewer"]);
+  const changed=await run(stub.base,["orgs","set-role","teammate@example.com","member","--org","omni-aura","--expected-role","viewer","--output","json"]);
   assert.equal(changed.status,0,changed.stderr);assert.equal(JSON.parse(changed.stdout).previousRole,"viewer");
   assert.deepEqual(stub.calls.find(c=>c.method==="PATCH"),{method:"PATCH",url:`/api/v5/companies/${OMNI.id}/members/member-one`,body:{role:"member"}});
   const stale=await run(stub.base,["orgs","set-role","member-one","viewer","--org","omni-aura","--expected-role","viewer"]);
@@ -566,4 +566,27 @@ test("org directory and exact role change preserve scope and show the inverse", 
 test("member role changes preserve server denials", async()=>{
  const stub=await startStub({canManage:false});
  try {const r=await run(stub.base,["orgs","set-role","member-one","member","--org","omni-aura"]);assert.equal(r.status,1);assert.match(r.stderr,/403/);assert.match(r.stderr,/owner or admin/);}finally{stub.close();}
+});
+
+
+test("role selection rejects blanks and capped directories before any mutation",async()=>{
+ const stub=await startStub({directorySize:2000});
+ try {
+  for(const member of ["@"," ","member-one"]){const r=await run(stub.base,["orgs","set-role",member,"member","--org","omni-aura"]);assert.equal(r.status,1,r.stdout);}
+  assert.equal(stub.calls.filter(c=>c.method==="PATCH").length,0);
+  const listed=await run(stub.base,["orgs","members","--org","omni-aura","--output","json"]);
+  assert.equal(listed.status,0,listed.stderr);assert.equal(JSON.parse(listed.stdout).possiblyTruncated,true);
+ }finally{stub.close();}
+});
+
+test("role confirmations respect text and JSON output",async()=>{
+ const stub=await startStub();
+ try {
+  const text=await run(stub.base,["orgs","set-role","member-one","member","--org","omni-aura","--dry-run"]);
+  assert.equal(text.status,0,text.stderr);assert.match(text.stdout,/Would change.*viewer -> member/);
+  const json=await run(stub.base,["orgs","set-role","member-one","member","--org","omni-aura","--dry-run","--output","json"]);
+  assert.equal(json.status,0,json.stderr);assert.equal(JSON.parse(json.stdout).dryRun,true);
+  const changed=await run(stub.base,["orgs","set-role","member-one","member","--org","omni-aura"]);
+  assert.equal(changed.status,0,changed.stderr);assert.match(changed.stdout,/Changed.*viewer -> member/);
+ }finally{stub.close();}
 });
