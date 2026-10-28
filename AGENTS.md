@@ -4,8 +4,9 @@
 
 Provider credentials must never appear in command arguments, terminal output,
 logs, exception bodies, fixtures with live values, MCP tool arguments, or saved
-configuration. Use hidden terminal input, piped stdin, or the built-in Secret
-Manager import. Import captures the platform CLI's output in process memory and
+configuration. Use an existing local environment reference (`--key-env NAME`), hidden terminal
+input, piped stdin, or the built-in Secret Manager import. Never expand or print
+the environment value in an agent tool call. Import captures the platform CLI's output in process memory and
 sends the credential directly to Ditto; do not print or materialize it as a
 shell variable or temporary file. Process-memory strings are not a secure erase
 guarantee.
@@ -18,7 +19,9 @@ guess its owner.
 
 Model catalogs and balance checks must not silently run generation. Paid model
 or throughput probes require an explicit model shortlist, request/output/time
-bounds and spend confirmation. A small probe does not establish capacity. An
+bounds, a current operator price quote, acceptance of its estimate and spend
+confirmation. Default estimates stay within $0.10 and 20 calls; unknown prices
+stop generation and the budget never escalates automatically. A small probe does not establish capacity. An
 unknown supplier price cannot establish a dollar ceiling; preserve unknown
 receipt and cache values rather than converting them to zero. Pool changes must
 not silently alter billing, provider-key selection, or failover consent.

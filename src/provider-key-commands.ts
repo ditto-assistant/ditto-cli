@@ -3,13 +3,14 @@ import { resolveCompany } from "./api.js";
 import { readStoredAuth } from "./store.js";
 import { addProviderKey, BALANCE_PROVIDERS, inspectProviderKey, listProviderKeys, probeMetadata, probeProviderKey, providerCatalog, providerManagementBase, removeProviderKey, requireProviderKeyId, setProviderKey, type BalanceProvider, type ProviderKeyInput } from "./provider-key-api.js";
 import { boundedInteger, parseProviderProtocol, providerKeyHints, providerURLInput, publicProviderParams } from "./provider-key-input.js";
+import { readOperatorQuote } from "./provider-probe-quote.js";
 import { importGCloudProviderSecret, readProviderSecret } from "./provider-secrets.js";
 
 interface ScopeOptions { org?: string; personal?: boolean; output?: string }
 interface AddOptions extends ScopeOptions {
   provider?: string; protocol?: string; baseUrl?: string; balanceProvider?: string; label?: string;
   priority?: string; modelAllow?: string[]; modelDeny?: string[]; stdin?: boolean; inspect?: boolean;
-  param?: string[];
+  param?: string[]; keyEnv?: string;
   from?: string; secret?: string; project?: string; account?: string; version?: string;
 }
 
@@ -72,14 +73,14 @@ function addScope(command: Command, outputOption: () => Option): Command {
 }
 
 export function registerProviderKeyCommands(program: Command, outputOption: () => Option): void {
-  const keys = program.command("provider-keys").description("manage provider credentials without exposing their values; designed for agents").showHelpAfterError().addHelpText("after", "\nSecrets enter through hidden paste, --stdin, or Secret Manager import. Never pass raw keys as arguments or MCP tool inputs. Prefixes are hints; validation uses one confirmed destination. JSON output contains metadata only.\n");
+  const keys = program.command("provider-keys").description("manage provider credentials without exposing their values; designed for agents").showHelpAfterError().addHelpText("after", "\nSecrets enter through a local --key-env reference, hidden paste, --stdin, or Secret Manager import. Never pass raw keys as arguments or MCP tool inputs. Prefixes are hints; validation uses one confirmed destination. JSON output contains metadata only.\n");
   addScope(keys.command("list").description("list saved key metadata; never retrieve credentials"), outputOption).action(async (options: ScopeOptions) => {
     const { companyId, scope } = await providerKeyScope(options);
     print({ scope, ...await listProviderKeys(companyId) });
   });
   keys.command("providers").description("list provider hints and supported protocols without contacting providers").addOption(outputOption()).action(async () => print({ providers: await providerCatalog() }));
   for (const importing of [false, true]) {
-    const command = addScope(keys.command(importing ? "import" : "add").description(importing ? "copy a key from Secret Manager into Ditto without printing it" : "save a provider key from hidden paste or stdin"), outputOption)
+    const command = addScope(keys.command(importing ? "import" : "add").description(importing ? "copy a key from Secret Manager into Ditto without printing it" : "save a provider key from a local env reference, hidden paste or stdin"), outputOption)
       .option("--provider <id>", "provider id, or custom; omit for unique local prefix detection")
       .option("--base-url <url>", "public HTTPS base or full chat/messages URL; credentials and query parameters are rejected")
       .option("--protocol <protocol>", "custom API protocol: openai or anthropic")
@@ -92,18 +93,18 @@ export function registerProviderKeyCommands(program: Command, outputOption: () =
       .option("--no-inspect", "skip the default no-generation validation, model listing and balance check")
       .addHelpText("after", "\nBalance inspection sends the saved key to a fixed provider API. Impala uses https://api.platform.getimpala.ai/v1/account, which is a different origin from its inference endpoint. OpenRouter uses https://openrouter.ai/api/v1/key; GM uses https://api.saygm.com/v1/credits; Vercel uses https://ai-gateway.vercel.sh/v1/credits. Native OpenRouter, GM and Vercel keys use their adapter automatically unless a base URL override is configured. A custom key uses Impala billing only after explicit --balance-provider impala association.\n");
     if (importing) command.requiredOption("--from <store>", "source store (currently gcloud)").requiredOption("--secret <name-or-resource>", "secret name or projects/PROJECT/secrets/SECRET[/versions/VERSION]").option("--project <id>", "explicit Google Cloud project (required for a short secret name)").option("--account <email>", "signed-in gcloud account; otherwise verify the single active account").option("--version <version>", "secret version (default: latest)");
-    else command.option("--stdin", "read a piped key without echo; omit for hidden TTY paste");
+    else command.option("--stdin", "read a piped key without echo; omit for hidden TTY paste").option("--key-env <name>", "read an existing local environment variable internally; never print its value");
     command.action((options: AddOptions) => cmdAdd(options, importing));
   }
-  addScope(keys.command("set").description("enable, disable or reprioritize a saved key; optionally rotate via stdin").argument("<key-id>", "saved key UUID, never the credential"), outputOption)
-    .option("--enable", "enable this saved key").option("--disable", "disable this saved key").option("--priority <number>", "priority, an integer from 1 to 10000").option("--rotate-stdin", "replace the key from piped stdin; never printed")
-    .action(async (id: string, options: ScopeOptions & { enable?: boolean; disable?: boolean; priority?: string; rotateStdin?: boolean }) => {
+  addScope(keys.command("set").description("enable, disable or reprioritize a saved key; optionally rotate from a local secret reference").argument("<key-id>", "saved key UUID, never the credential"), outputOption)
+    .option("--enable", "enable this saved key").option("--disable", "disable this saved key").option("--priority <number>", "priority, an integer from 1 to 10000").option("--rotate-stdin", "replace the key from piped stdin; never printed").option("--rotate-key-env <name>", "replace the key from an existing local env reference; never print its value")
+    .action(async (id: string, options: ScopeOptions & { enable?: boolean; disable?: boolean; priority?: string; rotateStdin?: boolean; rotateKeyEnv?: string }) => {
       requireProviderKeyId(id);
       if (options.enable && options.disable) throw new Error("choose --enable or --disable");
-      if (!options.enable && !options.disable && options.priority === undefined && !options.rotateStdin) throw new Error("set needs --enable, --disable, --priority or --rotate-stdin");
+      if (!options.enable && !options.disable && options.priority === undefined && !options.rotateStdin && options.rotateKeyEnv === undefined) throw new Error("set needs --enable, --disable, --priority, --rotate-stdin or --rotate-key-env");
       const { companyId, scope } = await providerKeyScope(options);
       const priority = options.priority === undefined ? undefined : boundedInteger(options.priority, "--priority", 1, 10_000);
-      let key = options.rotateStdin ? await readProviderSecret({ stdin: true }) : undefined;
+      let key = options.rotateStdin || options.rotateKeyEnv !== undefined ? await readProviderSecret({ stdin: options.rotateStdin, keyEnv: options.rotateKeyEnv }) : undefined;
       try { print({ scope, key: await setProviderKey(id, { companyId, priority, key, ...(options.enable || options.disable ? { enabled: options.enable === true } : {}) }), secretPrinted: false }); }
       finally { key = undefined; }
     });
@@ -126,29 +127,30 @@ export function registerProviderKeyCommands(program: Command, outputOption: () =
   }
   addScope(keys.command("probe").description("run a bounded synthetic probe against an explicit shortlist; supplier charges may apply").argument("<key-id>", "saved key UUID"), outputOption)
     .requiredOption("--model <id>", "exact model id to test (repeatable, no automatic catalog sweep)", collect)
-    .requiredOption("--requests <count>", "total generation calls, 1–20 across all selected models")
+    .option("--requests <count>", "total generation calls, 1–20 across all selected models (default: 20)", "20")
     .option("--concurrency <count>", "parallel calls, 1–4 (default: 1)", "1")
     .option("--requests-per-minute <count>", "probe admission rate, 1–6000 (default: 60); does not configure live pool limits", "60")
     .requiredOption("--max-output-tokens <count>", "maximum output per call, 1–32")
-    .option("--max-cost-usd <amount>", "hard ceiling only when trusted model pricing supports it; otherwise the server refuses")
-    .option("--allow-unknown-cost", "explicitly accept unknown supplier cost instead of asserting a dollar ceiling")
-    .option("--confirm-spend", "confirm this exact bounded run can incur supplier charges")
-    .option("--dry-run", "print the bounded plan; make no generation calls")
-    .action(async (id: string, options: ScopeOptions & { model: string[]; requests: string; concurrency: string; requestsPerMinute: string; maxOutputTokens: string; maxCostUsd?: string; allowUnknownCost?: boolean; confirmSpend?: boolean; dryRun?: boolean }) => {
+    .option("--max-cost-usd <amount>", "local quoted estimate limit in USD (default: 0.10); not a guaranteed supplier bill ceiling", "0.10")
+    .option("--quote-file <file>", "current operator price estimate as closed JSON; exact models and four decimal-string USD rates")
+    .option("--accept-estimate", "accept the quote and its estimated input framing; supplier billing can differ")
+    .option("--allow-unknown-cost", "removed: unknown prices cannot authorize generation")
+    .option("--confirm-spend", "confirm this exact quoted run can incur supplier charges")
+    .option("--dry-run", "ask the server to prepare a quote plan; make no generation calls")
+    .action(async (id: string, options: ScopeOptions & { model: string[]; requests: string; concurrency: string; requestsPerMinute: string; maxOutputTokens: string; maxCostUsd: string; quoteFile?: string; acceptEstimate?: boolean; allowUnknownCost?: boolean; confirmSpend?: boolean; dryRun?: boolean }) => {
       requireProviderKeyId(id);
       const requests = boundedInteger(options.requests, "--requests", 1, 20), concurrency = boundedInteger(options.concurrency, "--concurrency", 1, 4), maxOutputTokens = boundedInteger(options.maxOutputTokens, "--max-output-tokens", 1, 32);
       const requestsPerMinute = boundedInteger(options.requestsPerMinute, "--requests-per-minute", 1, 6000);
       const models = [...new Set(options.model.map(id => id.trim()))];
       if (models.length < 1 || models.length > 20 || models.some(id => !id || id.length > 250 || /[\s\x00-\x1f\x7f]/.test(id))) throw new Error("provide 1–20 exact --model identifiers without whitespace");
       if (requests < models.length || concurrency > requests) throw new Error("--requests must cover every model and be at least --concurrency");
-      const maxCostUsd = options.maxCostUsd === undefined ? undefined : Number(options.maxCostUsd);
-      if (maxCostUsd !== undefined && (!Number.isFinite(maxCostUsd) || maxCostUsd <= 0)) throw new Error("--max-cost-usd must be a positive number");
-      if (options.allowUnknownCost && maxCostUsd !== undefined) throw new Error("choose a known --max-cost-usd ceiling or --allow-unknown-cost, not both");
-      if (maxCostUsd === undefined && !options.allowUnknownCost) throw new Error("set --max-cost-usd or explicitly accept --allow-unknown-cost");
+      const maxCostUsd = Number(options.maxCostUsd);
+      if (!Number.isFinite(maxCostUsd) || maxCostUsd <= 0) throw new Error("--max-cost-usd must be a positive number");
+      if (options.allowUnknownCost) throw new Error("--allow-unknown-cost no longer authorizes probes; provide a current --quote-file and accept its estimate");
+      const operatorQuote = options.quoteFile ? await readOperatorQuote(options.quoteFile, models) : undefined;
+      if (!options.dryRun && (!operatorQuote || !options.acceptEstimate || !options.confirmSpend)) throw new Error("paid probes require --quote-file, --accept-estimate and --confirm-spend; review the same command with --dry-run first");
       const { companyId, scope } = await providerKeyScope(options);
-      const plan = { companyId, models, requests, concurrency, requestsPerMinute, maxOutputTokens, confirmSpend: options.confirmSpend === true, ...(maxCostUsd === undefined ? {} : { maxCostUsd }), ...(options.allowUnknownCost ? { allowUnknownCost: true } : {}) };
-      if (options.dryRun) { print({ scope, keyId: id, plan, durationLimitSeconds: 30, generationCallsMade: 0, note: "Unknown prices cannot establish a USD ceiling. Small probes measure observed throughput, not provider capacity." }); return; }
-      if (!options.confirmSpend) throw new Error("paid probes require --confirm-spend after reviewing the same command with --dry-run");
-      print({ scope, ...probeMetadata(await probeProviderKey(id, plan)), note: "Observed throughput is not a capacity guarantee. Missing receipts and cache counts remain unknown." });
+      const plan = { companyId, models, requests, concurrency, requestsPerMinute, maxOutputTokens, maxCostUsd, operatorQuote, acceptEstimate: options.acceptEstimate === true, confirmSpend: options.confirmSpend === true, dryRun: options.dryRun === true };
+      print({ scope, ...probeMetadata(await probeProviderKey(id, plan)), ...(options.dryRun ? { generationCallsMade: 0 } : {}), note: "Operator quotes are estimates, not supplier billing guarantees. Unknown prices stop generation. Observed throughput is not capacity; omitted costs and cache counts remain unknown." });
     });
 }

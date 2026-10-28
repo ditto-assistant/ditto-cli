@@ -1,5 +1,6 @@
 import { apiBase, NO_KEY_MESSAGE } from "./api.js";
 import { packageName, packageVersion, resolveApiKey } from "./config.js";
+import { quoteRate } from "./provider-probe-quote.js";
 
 export type ProviderProtocol = "openai_chat" | "anthropic_messages";
 export type BalanceProvider = "impala" | "openrouter" | "gm" | "vercel_ai_gateway";
@@ -42,6 +43,10 @@ export interface ProviderKeyInput {
   modelDeny?: string[];
   templateParams?: Record<string, string>;
 }
+export interface ProviderOperatorQuote {
+  checkedAt: string;
+  models: Array<{ model: string; inputPerMillionUsd: string; outputPerMillionUsd: string; perRequestUsd: string; minimumRequestUsd: string }>;
+}
 export interface ProviderProbeInput {
   companyId?: string;
   models: string[];
@@ -51,7 +56,9 @@ export interface ProviderProbeInput {
   maxOutputTokens: number;
   confirmSpend: boolean;
   maxCostUsd?: number;
-  allowUnknownCost?: boolean;
+  operatorQuote?: ProviderOperatorQuote;
+  acceptEstimate: boolean;
+  dryRun: boolean;
 }
 
 const path = "/api/v5/inference/provider-keys";
@@ -93,7 +100,7 @@ export async function providerManagementFetch<T>(route: string, init: { method?:
   }
   if (!response.ok) {
     await response.body?.cancel().catch(() => undefined);
-    throw new Error(`provider-key management returned HTTP ${response.status}; no response body was printed${response.status === 401 ? "; check heyditto login" : response.status === 403 ? "; check your organization role and pilot access" : ""}`);
+    throw new Error(`provider-key management returned HTTP ${response.status}; no response body was printed${response.status === 401 ? "; check heyditto login" : response.status === 403 ? "; check your organization role and provider-key feature access" : ""}`);
   }
   if (response.status === 204) return undefined as T;
   const chunks: Uint8Array[] = [];
@@ -198,10 +205,39 @@ export function probeMetadata(raw: unknown): Record<string, unknown> {
   return {
     startedAt: timestamp(data.startedAt), elapsedMs: numeric(data.elapsedMs), requestLimit: numeric(data.requestLimit), outputTokenLimit: numeric(data.outputTokenLimit), requestsPerMinute: numeric(data.requestsPerMinute), attemptedRequests: numeric(data.attemptedRequests), httpResponses: numeric(data.httpResponses), successfulRequests: numeric(data.successfulRequests),
     costBoundAvailable: data.costBoundAvailable === true, capacityVerified: data.capacityVerified === true,
+    quotedBudgetAvailable: data.quotedBudgetAvailable === true,
+    ...(data.quote === undefined ? {} : { quote: probeQuoteMetadata(data.quote) }),
+    stoppedReason: data.stoppedReason === "observed_cost_exceeded_quote" || data.stoppedReason === "observed_usage_exceeded_quote" ? data.stoppedReason : undefined,
     observedRequestsPerSecond: numeric(data.observedRequestsPerSecond),
     calls: Array.isArray(data.calls) ? data.calls.slice(0, 20).map(raw => {
       const call = object(raw);
-      return { model: safeText(call.model), status: typeof call.status === "string" && ["unavailable", "rejected", "rate_limited", "locally_limited", "invalid_request", "incomplete", "completed", "provider_error"].includes(call.status) ? call.status : "unknown", attempted: call.attempted === true, httpStatus: numeric(call.httpStatus), latencyMs: numeric(call.latencyMs), ttftMs: numeric(call.ttftMs), inputTokens: numeric(call.inputTokens), outputTokens: numeric(call.outputTokens), cachedInputTokens: numeric(call.cachedInputTokens), providerReportedCostUsd: numeric(call.providerReportedCostUsd), inputTokenAccounting: typeof call.inputTokenAccounting === "string" && ["inclusive", "exclusive", "unknown"].includes(call.inputTokenAccounting) ? call.inputTokenAccounting : "unknown", tokensPerSecond: numeric(call.tokensPerSecond) };
+      const accounting = call.inputTokenAccounting === "inclusive" ? "total_includes_cache" : call.inputTokenAccounting === "exclusive" ? "fresh_excludes_cache" : call.inputTokenAccounting;
+      const cacheCreationInputTokens = call.cacheCreationInputTokens === null ? null : Number.isSafeInteger(call.cacheCreationInputTokens) ? numeric(call.cacheCreationInputTokens) : undefined;
+      return { model: safeText(call.model), status: typeof call.status === "string" && ["unavailable", "rejected", "rate_limited", "locally_limited", "invalid_request", "incomplete", "completed", "provider_error"].includes(call.status) ? call.status : "unknown", attempted: call.attempted === true, httpStatus: numeric(call.httpStatus), latencyMs: numeric(call.latencyMs), ttftMs: numeric(call.ttftMs), inputTokens: numeric(call.inputTokens), outputTokens: numeric(call.outputTokens), cachedInputTokens: numeric(call.cachedInputTokens), cacheCreationInputTokens, providerReportedCostUsd: numeric(call.providerReportedCostUsd), inputTokenAccounting: typeof accounting === "string" && ["fresh_excludes_cache", "total_includes_cache", "unknown"].includes(accounting) ? accounting : "unknown", tokensPerSecond: numeric(call.tokensPerSecond) };
+    }) : [],
+  };
+}
+
+function probeQuoteMetadata(raw: unknown): Record<string, unknown> {
+  const data = object(raw);
+  const numeric = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+  const reasons = ["invalid_budget", "unknown_cost_not_allowed", "missing_quote", "invalid_quote", "expired_quote", "quote_model_mismatch", "over_budget", "estimate_not_accepted"];
+  let destinationUrl: string | undefined;
+  try { const url = new URL(String(data.destinationUrl)); if (url.protocol === "https:" && !url.username && !url.password && !url.search && !url.hash) destinationUrl = safeText(url.toString(), undefined, 2000); } catch { /* omit invalid destination */ }
+  return {
+    status: data.status === "ready" || data.status === "blocked" ? data.status : "blocked",
+    blockedReason: typeof data.blockedReason === "string" && reasons.includes(data.blockedReason) ? data.blockedReason : undefined,
+    sourceKind: data.sourceKind === "operator_estimate" ? "operator_estimate" : "unknown",
+    keyId: typeof data.keyId === "string" && UUID.test(data.keyId) ? data.keyId : undefined,
+    destinationUrl,
+    protocol: data.protocol === "openai_chat" || data.protocol === "anthropic_messages" ? data.protocol : undefined,
+    serviceTier: data.serviceTier === "account_default" ? "account_default" : undefined,
+    inputAssumption: data.inputAssumption === "serialized_bytes_plus_512_framing_tokens_estimate" ? data.inputAssumption : undefined,
+    checkedAt: timestamp(data.checkedAt), expiresAt: timestamp(data.expiresAt),
+    localQuoteLimitUsd: numeric(data.localQuoteLimitUsd), estimatedCostUsd: numeric(data.estimatedCostUsd),
+    models: Array.isArray(data.models) ? data.models.slice(0, 20).map(raw => {
+      const row = object(raw);
+      return { model: safeText(row.model), inputPerMillionUsd: quoteRate(row.inputPerMillionUsd) ? row.inputPerMillionUsd : undefined, outputPerMillionUsd: quoteRate(row.outputPerMillionUsd) ? row.outputPerMillionUsd : undefined, perRequestUsd: quoteRate(row.perRequestUsd) ? row.perRequestUsd : undefined, minimumRequestUsd: quoteRate(row.minimumRequestUsd) ? row.minimumRequestUsd : undefined, requests: numeric(row.requests), inputTokensPerRequest: numeric(row.inputTokensPerRequest), outputTokensPerRequest: numeric(row.outputTokensPerRequest), estimatedCostUsd: numeric(row.estimatedCostUsd) };
     }) : [],
   };
 }

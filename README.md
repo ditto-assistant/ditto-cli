@@ -1319,7 +1319,7 @@ heyditto orgs set-role @teammate member --org your-team --expected-role viewer
 ## Provider keys and private BYOK pools
 
 Provider-key management is designed for agents. The CLI accepts credentials from
-hidden terminal paste, `--stdin`, or Google Secret Manager import. It never
+a local `--key-env NAME` reference, hidden terminal paste, `--stdin`, or Google Secret Manager import. It never
 prints the credential, writes it to disk, or accepts it as a command argument.
 Use saved key UUIDs for later operations. MCP can manage the same metadata and
 routing policies; secret bytes enter through the local CLI, not a tool argument.
@@ -1327,6 +1327,8 @@ routing policies; secret bytes enter through the local CLI, not a tool argument.
 ```bash
 heyditto provider-keys providers
 heyditto provider-keys list --org omniaura
+# The variable must already exist locally. The agent supplies only its name.
+heyditto provider-keys add --org omniaura --provider openai --key-env OPENAI_API_KEY
 heyditto provider-keys add --org omniaura --provider custom \
   --protocol openai --base-url https://inference.example.com/v1
 heyditto provider-keys import --org omniaura --from gcloud \
@@ -1337,6 +1339,11 @@ heyditto provider-keys models <saved-key-uuid> --org omniaura
 heyditto provider-keys balance <saved-key-uuid> --org omniaura
 heyditto provider-keys set <saved-key-uuid> --org omniaura --disable
 ```
+
+`--key-env` reads an existing environment variable inside the CLI. It cannot be
+combined with `--stdin`; import uses its own Secret Manager source. Do not read
+or expand the variable in an agent tool call. Rotation supports
+`set <saved-key-uuid> --rotate-key-env NAME` or `--rotate-stdin`.
 
 `--org` selects an organization. Without it the saved `orgs use` organization
 applies; `--personal` overrides that selection. Import verifies a signed-in
@@ -1381,27 +1388,60 @@ origin, `https://api.platform.getimpala.ai`. A custom inference URL cannot
 redirect a balance check to another host. Reported negative wallet balances
 remain negative; unsupported or unknown balances remain distinct from zero.
 
-Paid probing is separate and bounded. An explicit shortlist prevents an
-accidental sweep of every public model name. Run the plan first, then add
-`--confirm-spend` to execute it:
+Paid probing requires a current price estimate for the saved destination and
+exact model shortlist. Discovery and balance inspection never generate tokens.
+The default plan allows at most $0.10 in quoted estimates and 20 calls. A higher
+budget requires an explicit `--max-cost-usd`; the CLI never raises it on retry.
+
+Create a nonsensitive `quote.json` with the provider's current prices. All four
+rates must be decimal strings, including explicit zero request fees. This shape
+uses placeholders, not vendor prices:
+
+```json
+{
+  "checkedAt": "<current RFC3339 time>",
+  "models": [{
+    "model": "provider/model",
+    "inputPerMillionUsd": "<USD per million input tokens>",
+    "outputPerMillionUsd": "<USD per million output tokens>",
+    "perRequestUsd": "<USD fee per request>",
+    "minimumRequestUsd": "<minimum USD per request>"
+  }]
+}
+```
+
+The quote must be no more than 24 hours old. Do not reuse another provider's
+prices. Prepare a plan without generation, then add `--confirm-spend` to the
+same command to execute it:
 
 ```bash
 heyditto provider-keys probe <saved-key-uuid> --org omniaura \
   --model provider/model --requests 3 --concurrency 1 \
-  --max-output-tokens 8 --allow-unknown-cost --dry-run
+  --max-output-tokens 8 --quote-file quote.json --accept-estimate --dry-run
 ```
+
+`--dry-run` contacts Ditto to prepare the plan and makes no generation calls.
+Without a quote it reports why generation is blocked. Every paid run requires
+`--quote-file`, `--accept-estimate` and `--confirm-spend`. Unknown prices cannot
+bypass these requirements; `--allow-unknown-cost` refuses execution.
+
+The server reserves the whole quoted plan before dispatch. Quotes include input
+bytes plus an estimated 512 framing tokens, output/reasoning allowance, request
+fees and minimum fees. This is an operator estimate, not a supplier bill ceiling:
+`costBoundAvailable` remains false. `quotedBudgetAvailable` reports whether that
+estimated plan fits the local quote limit. Provider billing can differ. The
+server stops remaining calls if observed costs or usage exceed the quote.
 
 Every run is limited to 20 calls, four concurrent requests, 32 output tokens per
 call and 30 seconds. `--requests-per-minute` defaults to 60 and is capped at
 6,000; a stricter existing shared credential limit still applies. This probe
-rate does not change the live pool configuration. `--max-cost-usd` is accepted only when trusted pricing can
-establish a ceiling; otherwise the server refuses before generation. Use
-`--allow-unknown-cost` only when you accept unknown supplier charges. The current
-probe cannot enforce a dollar ceiling, so a dollar-capped run refuses before
-generation. Provider-reported costs are not settled billing receipts; omitted
-costs and cache counts stay unknown. Attempted calls, HTTP responses and completed
-generations are separate counts. Observed
-requests per second and latency are measurements, not capacity guarantees.
+rate does not change the live pool configuration. Service tier is the account's
+default; the CLI does not invent tier selections a provider cannot accept.
+Provider-reported costs are not settled receipts. Omitted costs and cache counts
+stay unknown. Input accounting distinguishes fresh input excluding cached tokens
+from totals including cached tokens; no cache ratio is inferred without that
+denominator. Attempted calls, HTTP responses and successful generations remain
+separate counts. Observed throughput is not a capacity guarantee.
 
 Private pools use saved organization or personal key UUIDs. For example,
 `pool.json` can contain:
@@ -1425,7 +1465,8 @@ heyditto endpoints pool disable ditto-review --dry-run
 
 Pool writes change only `privateUpstreamRouting`. They do not change billing,
 selected key UUIDs, or failover. Enabling requires full BYOK and the server's
-pilot access. Weights divide new sessions; session affinity preserves caches.
+server-controlled feature access, initially enabled only for the pilot owner.
+Platform Impala credentials remain separately restricted. Weights divide new sessions; session affinity preserves caches.
 Rate limits are manual admission caps. Switching to another provider still
 requires explicit failover policy. `disable` disables and clears the pool, but
 leaves provider credentials stored. This custom-key pool is separate from the

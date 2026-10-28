@@ -41,7 +41,7 @@ async function fixture(t, handler) {
       if (req.url.startsWith("/api/v5/inference/endpoints") && req.method === "GET") return send(200, { endpoints: [{ id: EP, slug: "review", model: "z-ai/glm-5.3-flash", billingMode: "byok", providerOptions: { private_upstream_routing: { enabled: false, routes: [] }, unrelated: "preserve" }, privateUpstreamRoutingAllowed: true }] });
       if (req.url === "/api/v5/inference/provider-keys/providers") return send(200, { providers });
       if (req.url.endsWith("/inspect")) return send(200, { keyId: ID, validation: { status: "valid" }, models: { status: "advertised", models: [{ id: "provider/model" }] }, balance: { status: "unsupported" }, key: SECRET });
-      if (req.url.endsWith("/probe")) return send(200, { requestLimit: data.requests, outputTokenLimit: data.maxOutputTokens, capacityVerified: false, costBoundAvailable: false, calls: [{ model: data.models[0], status: "completed", attempted: true, latencyMs: 12, inputTokenAccounting: "inclusive", key: SECRET }], secret: SECRET });
+      if (req.url.endsWith("/probe")) return send(200, { requestLimit: data.requests, outputTokenLimit: data.maxOutputTokens, capacityVerified: false, costBoundAvailable: false, calls: [{ model: data.models[0], status: "completed", attempted: true, latencyMs: 12, inputTokenAccounting: "total_includes_cache", key: SECRET }], secret: SECRET });
       if (req.url === "/api/v5/inference/provider-keys" && req.method === "POST") return send(201, { ...key, provider: data.provider === "custom" ? data.protocol === "anthropic_messages" ? "custom_anthropic" : "custom_openai" : data.provider, key: data.key, label: `saved ${data.key}`, arbitrary: data.key });
       if (req.url.startsWith("/api/v5/inference/provider-keys") && req.method === "GET") return send(200, { keys: [{ ...key, key: SECRET, templateParams: { credential: SECRET } }], canManage: true });
       if (req.method === "PATCH") return send(200, key);
@@ -199,20 +199,80 @@ test("list and inspection retain unsupported balance without any generation", as
   assert.ok(!f.calls.some(call => call.url.endsWith("/probe")));
 });
 
-test("probe requires explicit bounds and spend confirmation; dry run makes no probe call", async t => {
+test("probe defaults to 10 cents and 20 requests; server plans without generation and paid runs require a quote and consent", async t => {
   const f = await fixture(t);
-  const args = ["provider-keys", "probe", ID, "--model", "provider/model", "--requests", "3", "--max-output-tokens", "8", "--allow-unknown-cost"];
+  const args = ["provider-keys", "probe", ID, "--model", "provider/model", "--max-output-tokens", "8"];
   const plan = await f.run([...args, "--dry-run"]);
   assert.equal(plan.code, 0, plan.stderr);
   assert.equal(JSON.parse(plan.stdout).generationCallsMade, 0);
-  const refused = await f.run(args);
-  assert.equal(refused.code, 1);
-  assert.equal(f.calls.filter(call => call.url.endsWith("/probe")).length, 0);
-  const ran = await f.run([...args, "--confirm-spend"]);
+  const planned = f.calls.filter(call => call.url.endsWith("/probe"));
+  assert.equal(planned.length, 1);
+  assert.equal(planned[0].body.dryRun, true);
+  assert.equal(planned[0].body.confirmSpend, false);
+  assert.equal(planned[0].body.maxCostUsd, 0.10);
+  assert.equal(planned[0].body.requests, 20);
+  const quoteFile = path.join(f.dir, "quote.json");
+  const quote = { checkedAt: new Date().toISOString(), models: [{ model: "provider/model", inputPerMillionUsd: "0.1", outputPerMillionUsd: "0.2", perRequestUsd: "0", minimumRequestUsd: "0" }] };
+  await writeFile(quoteFile, JSON.stringify(quote));
+  for (const suffix of [[], ["--confirm-spend"], ["--quote-file", quoteFile, "--confirm-spend"], ["--quote-file", quoteFile, "--accept-estimate"], ["--allow-unknown-cost", "--confirm-spend"]]) {
+    const refused = await f.run([...args, ...suffix]);
+    assert.equal(refused.code, 1);
+    assert.equal(f.calls.filter(call => call.url.endsWith("/probe")).length, 1);
+  }
+  const ran = await f.run([...args, "--quote-file", quoteFile, "--accept-estimate", "--confirm-spend"]);
   assert.equal(ran.code, 0, ran.stderr);
-  assert.equal(f.calls.filter(call => call.url.endsWith("/probe")).length, 1);
+  const sent = f.calls.filter(call => call.url.endsWith("/probe")).at(-1).body;
+  assert.deepEqual(sent.operatorQuote, quote);
+  assert.equal(sent.acceptEstimate, true);
+  assert.equal(sent.confirmSpend, true);
+  assert.equal(sent.dryRun, false);
+  assert.equal(sent.allowUnknownCost, undefined);
   assert.ok(!ran.stdout.includes(SECRET));
   assert.equal(JSON.parse(ran.stdout).capacityVerified, false);
+  assert.equal(JSON.parse(ran.stdout).calls[0].inputTokenAccounting, "total_includes_cache");
+});
+
+test("local env references upload one key without echo and reject conflicting or unsafe references", async t => {
+  const f = await fixture(t);
+  const args = ["provider-keys", "add", "--no-inspect", "--provider", "openai", "--key-env", "SYNTHETIC_PROVIDER_KEY"];
+  const added = await f.run(args, "", { SYNTHETIC_PROVIDER_KEY: SECRET });
+  assert.equal(added.code, 0, added.stderr);
+  assert.equal(f.calls.filter(call => call.method === "POST").length, 1);
+  assert.equal(f.calls.find(call => call.method === "POST").body.key, SECRET);
+  assert.ok(!`${added.stdout}${added.stderr}`.includes(SECRET));
+  for (const [suffix, env] of [[["--stdin"], { SYNTHETIC_PROVIDER_KEY: SECRET }], [[], { SYNTHETIC_PROVIDER_KEY: "" }], [[], { SYNTHETIC_PROVIDER_KEY: `${SECRET} invalid` }]]) {
+    const result = await f.run([...args, ...suffix], SECRET, env);
+    assert.equal(result.code, 1);
+    assert.ok(!`${result.stdout}${result.stderr}`.includes(SECRET));
+    assert.equal(f.calls.filter(call => call.method === "POST").length, 1);
+  }
+  const unsafe = await f.run(["provider-keys", "add", "--provider", "openai", "--key-env", SECRET]);
+  assert.equal(unsafe.code, 1);
+  assert.ok(!`${unsafe.stdout}${unsafe.stderr}`.includes(SECRET));
+});
+
+test("malformed quote files stop before server planning and never echo their contents", async t => {
+  const f = await fixture(t);
+  const file = path.join(f.dir, "bad-quote.json");
+  for (const contents of [SECRET, JSON.stringify({ checkedAt: SECRET }), "x".repeat(65537)]) {
+    await writeFile(file, contents);
+    const result = await f.run(["provider-keys", "probe", ID, "--model", "provider/model", "--max-output-tokens", "8", "--quote-file", file, "--dry-run"]);
+    assert.equal(result.code, 1);
+    assert.ok(!`${result.stdout}${result.stderr}`.includes(SECRET));
+    assert.equal(f.calls.length, 0);
+  }
+});
+
+test("env-reference rotation stays secret and is exclusive with stdin", async t => {
+  const f = await fixture(t);
+  const args = ["provider-keys", "set", ID, "--rotate-key-env", "SYNTHETIC_PROVIDER_KEY"];
+  const rotated = await f.run(args, "", { SYNTHETIC_PROVIDER_KEY: SECRET });
+  assert.equal(rotated.code, 0, rotated.stderr);
+  assert.equal(f.calls.filter(call => call.method === "PATCH").at(-1).body.key, SECRET);
+  assert.ok(!`${rotated.stdout}${rotated.stderr}`.includes(SECRET));
+  const conflict = await f.run([...args, "--rotate-stdin"], SECRET, { SYNTHETIC_PROVIDER_KEY: SECRET });
+  assert.equal(conflict.code, 1);
+  assert.equal(f.calls.filter(call => call.method === "PATCH").length, 1);
 });
 
 test("pool writes submit only the typed policy, preserving billing and unrelated options", async t => {

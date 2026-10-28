@@ -4,6 +4,7 @@ import test from "node:test";
 import { providerKeyHints, providerURLInput, publicProviderParams } from "../dist/provider-key-input.js";
 import { inspectionMetadata, probeMetadata, providerKeyMetadata, providerManagementBase } from "../dist/provider-key-api.js";
 import { parseGCloudSecretReference, readProviderSecretFromStream, validateProviderSecret } from "../dist/provider-secrets.js";
+import { parseOperatorQuote } from "../dist/provider-probe-quote.js";
 import { parsePoolPolicy } from "../dist/router-pool-commands.js";
 import { redactKnownSecrets, secretSafeMetadata } from "../dist/secret-redaction.js";
 
@@ -91,4 +92,39 @@ test("public settings must be declared by the selected provider and never creden
   const entry = { params: [{ name: "account_id", required: true }, { name: "api_key", required: false }] };
   assert.deepEqual(publicProviderParams(["account_id=public-id"], entry), { account_id: "public-id" });
   for (const params of [["api_key=value"], ["undeclared=value"], ["account_id=one", "account_id=two"], [`account_id=${SECRET}`], [`account_id=${"a".repeat(513)}`], []]) assert.throws(() => publicProviderParams(params, entry, undefined, SECRET));
+});
+
+
+test("operator quotes require current exact closed model prices without reflecting malformed input", () => {
+  const now = Date.now();
+  const quote = { checkedAt: new Date(now).toISOString(), models: [{ model: "provider/model", inputPerMillionUsd: "0.1", outputPerMillionUsd: "0.2", perRequestUsd: "0", minimumRequestUsd: "0" }] };
+  assert.deepEqual(parseOperatorQuote(quote, ["provider/model"], now), quote);
+  for (const raw of [null, { ...quote, secret: SECRET }, { ...quote, checkedAt: new Date(now - 86400001).toISOString() }, { ...quote, checkedAt: new Date(now + 300001).toISOString() }, { ...quote, checkedAt: SECRET }, { ...quote, models: [] }, { ...quote, models: [{ ...quote.models[0], model: "different" }] }, ...["1e-3", "-1", "0.0000000001", "1000000.1", SECRET, 0.1].map(rate => ({ ...quote, models: [{ ...quote.models[0], inputPerMillionUsd: rate }] }))]) {
+    assert.throws(() => parseOperatorQuote(raw, ["provider/model"], now), error => !error.message.includes(SECRET));
+  }
+});
+
+test("quote plans preserve estimates and cache accounting but omit arbitrary provider diagnostics", () => {
+  const quote = { status: "ready", sourceKind: "operator_estimate", keyId: ID, destinationUrl: "https://api.example.com/prefix", protocol: "anthropic_messages", serviceTier: "account_default", inputAssumption: "serialized_bytes_plus_512_framing_tokens_estimate", checkedAt: "2026-10-28T13:00:00Z", expiresAt: "2026-10-29T13:00:00Z", localQuoteLimitUsd: 0.1, estimatedCostUsd: 0.01, models: [{ model: "provider/model", inputPerMillionUsd: "0.1", outputPerMillionUsd: "0.2", perRequestUsd: "0", minimumRequestUsd: "0", requests: 20, inputTokensPerRequest: 600, outputTokensPerRequest: 32, estimatedCostUsd: 0.01 }] };
+  const result = probeMetadata({ quotedBudgetAvailable: true, quote, stoppedReason: "observed_usage_exceeded_quote", calls: [{ attempted: true, inputTokenAccounting: "fresh_excludes_cache" }] });
+  assert.equal(result.quote.sourceKind, "operator_estimate");
+  assert.equal(result.quote.estimatedCostUsd, 0.01);
+  assert.equal(result.quote.models[0].perRequestUsd, "0");
+  assert.equal(result.quotedBudgetAvailable, true);
+  assert.equal(result.stoppedReason, "observed_usage_exceeded_quote");
+  assert.equal(result.calls[0].inputTokenAccounting, "fresh_excludes_cache");
+  const hostile = probeMetadata({ quote: { status: SECRET, blockedReason: SECRET, sourceKind: SECRET, keyId: SECRET, destinationUrl: `https://${SECRET}@api.example.com`, protocol: SECRET, serviceTier: SECRET, inputAssumption: SECRET, checkedAt: SECRET, models: [{ inputPerMillionUsd: SECRET }] }, stoppedReason: SECRET, calls: [{ inputTokenAccounting: SECRET }] });
+  assert.ok(!JSON.stringify(hostile).includes(SECRET));
+});
+
+
+test("legacy accounting labels normalize and missing cache creation stays unknown", () => {
+  for (const [wire, expected] of [["inclusive", "total_includes_cache"], ["exclusive", "fresh_excludes_cache"], ["fresh_excludes_cache", "fresh_excludes_cache"], ["total_includes_cache", "total_includes_cache"]]) {
+    assert.equal(probeMetadata({ calls: [{ inputTokenAccounting: wire }] }).calls[0].inputTokenAccounting, expected);
+  }
+  for (const [wire, expected] of [[undefined, undefined], [null, null], [0, 0], [5, 5], [-1, undefined], [0.5, undefined], ["5", undefined]]) {
+    const call = probeMetadata({ calls: [{ cacheCreationInputTokens: wire }] }).calls[0];
+    assert.equal(call.cacheCreationInputTokens, expected);
+    assert.equal(call.cacheHitRate, undefined);
+  }
 });

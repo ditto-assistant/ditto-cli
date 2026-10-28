@@ -32,7 +32,12 @@ export async function readProviderSecretFromStream(input: AsyncIterable<Buffer |
 }
 
 /** Hidden paste input, without readline echo or a raw-key command argument. */
-export async function readProviderSecret(options: { stdin?: boolean; prompt?: string }): Promise<string> {
+export async function readProviderSecret(options: { stdin?: boolean; keyEnv?: string; prompt?: string }): Promise<string> {
+  if (options.keyEnv !== undefined) {
+    if (options.stdin) throw new Error("choose --key-env or --stdin, not both");
+    if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(options.keyEnv)) throw new Error("--key-env requires an environment variable name, never its value");
+    return validateProviderSecret(process.env[options.keyEnv] ?? "");
+  }
   if (options.stdin) {
     if (process.stdin.isTTY) throw new Error("--stdin expects a pipe; omit it for hidden terminal input");
     return readProviderSecretFromStream(process.stdin);
