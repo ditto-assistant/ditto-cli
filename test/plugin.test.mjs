@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { preparePluginSession, runPluginServer } from "../dist/remote/plugin-server.js";
 import { hookNodeExecutable, claudeHookSettings, codexNotifyOverride } from "../dist/remote/hooks.js";
+import { remoteSessionURL } from "../dist/remote/session-link.js";
 import { startHostStub } from "./helpers/host-stub.mjs";
 
 // Real symlink resolution proves upgrades do not bake removed Cellar paths into hooks.
@@ -22,6 +23,12 @@ test("Homebrew hooks use the matching stable opt link and reject a different Nod
     assert.ok(command.startsWith(`'${stable}'`));
     assert.ok(!command.includes("Cellar"));
     assert.ok(codexNotifyOverride("/tmp/socket", "/hook.js", hookNodeExecutable(executable)).includes("/opt/node/bin/node"));
+    await rm(path.join(root, "opt/node"));
+    const other = path.join(root, "Cellar/node/27.0.0/bin/node");
+    await mkdir(path.dirname(other), {recursive:true});
+    await writeFile(other, "other node");
+    await symlink(path.join(root, "Cellar/node/27.0.0"), path.join(root, "opt/node"));
+    assert.equal(hookNodeExecutable(executable), executable, "a different installed Node must not be substituted");
     await rm(path.join(root, "opt/node"));
     assert.equal(hookNodeExecutable(executable), executable);
     assert.equal(hookNodeExecutable("/usr/local/bin/node"), "/usr/local/bin/node");
@@ -79,4 +86,12 @@ test("installing the plugin without explicit channel opt-in cannot register a re
   const original=process.env.DITTO_REMOTE_CHANNELS_ENABLED;
   try { delete process.env.DITTO_REMOTE_CHANNELS_ENABLED; await assert.rejects(runPluginServer(),/explicitly/); }
   finally { original===undefined?delete process.env.DITTO_REMOTE_CHANNELS_ENABLED:process.env.DITTO_REMOTE_CHANNELS_ENABLED=original; }
+});
+
+
+test("session links select a public graph alias and never use an internal storage KG ID", () => {
+  const link=new URL(remoteSessionURL({threadId:"external:session",kgID:"app_ditto-private-owner",graphAlias:"omniaura/ditto"}));
+  assert.equal(link.searchParams.get("graph"),"omniaura/ditto");
+  assert.equal(link.pathname,"/chat/external%3Asession");
+  assert.equal(new URL(remoteSessionURL({threadId:"t",kgID:"app_ditto-private-owner"})).search,"");
 });

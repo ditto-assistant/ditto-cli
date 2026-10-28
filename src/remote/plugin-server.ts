@@ -2,10 +2,11 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { apiFetch, findEndpoint, listEndpoints } from "../api.js";
-import { appBaseURL, resolveApiKey } from "../config.js";
+import { resolveApiKey } from "../config.js";
 import { findProfileEndpoint, repoDefaultProfile } from "../dittoconfig/profiles.js";
 import { readStoredAuth } from "../store.js";
 import { runChannelServer } from "./channel-server.js";
+import { remoteSessionURL } from "./session-link.js";
 
 /** A plain `claude` plugin launch has no Ditto wrapper to register its shell.
  * Resolve existing read-only configuration; never create endpoints or keys,
@@ -24,11 +25,11 @@ export async function preparePluginSession(cwd = process.env.DITTO_REMOTE_CWD ??
     : selected ? findEndpoint(catalog.endpoints, selected) : catalog.endpoints.length === 1 ? catalog.endpoints[0] : undefined;
   if (!endpoint) throw new Error("Select an existing endpoint with `heyditto endpoints use <slug>` or apply this repository's .ditto profile, then restart Ditto Remote.");
   const sessionId = randomUUID();
-  const registration = await apiFetch<{ threadId: string; kgID?: string }>("/api/v5/sessions/register", { method: "POST", body: {
+  const registration = await apiFetch<{ threadId: string; kgID?: string; graphAlias?: string }>("/api/v5/sessions/register", { method: "POST", body: {
     sessionId, endpointId: endpoint.id, harness: "claude-code", inference: "native", transport: "channels",
     title: `${path.basename(cwd)} · ${sessionId.slice(0, 8)}`,
   } });
-  process.stderr.write(`Ditto Remote: ${appBaseURL()}/chat/${encodeURIComponent(registration.threadId)}${registration.kgID ? `?graph=${encodeURIComponent(registration.kgID)}` : ""}\n`);
+  process.stderr.write(`Ditto Remote: ${remoteSessionURL(registration)}\n`);
   return { sessionId, cwd };
 }
 

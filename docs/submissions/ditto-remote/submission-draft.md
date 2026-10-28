@@ -12,6 +12,8 @@ No submission terms have been accepted and no Anthropic message has been sent.
 - Plugin slug: `ditto-remote` (**owner decision**, retain after publication).
 - Publisher: Ditto / ditto-assistant (**owner decision**: choose the permanent
   Anthropic submitting account and owning organization).
+- Local review identity: `ditto-remote@ditto-remote-review`; generated local
+  marketplace only, separate from a public publisher identity.
 - Proposed Ditto-controlled marketplace name: `ditto-official` (**owner decision**;
   proposed namespace only, not a published or verified marketplace).
 - Source: https://github.com/ditto-assistant/ditto-cli, `plugins/ditto-remote`

@@ -14,6 +14,8 @@ await cp(path.join(root, "plugins", "ditto-remote"), target, { recursive: true }
 const manifestFile = path.join(target, ".claude-plugin", "plugin.json");
 const manifest = JSON.parse(await readFile(manifestFile, "utf8"));
 await writeFile(manifestFile, JSON.stringify({ ...manifest, version: pkg.version }, null, 2) + "\n");
+// Local-only review identity: not a public marketplace or an approval claim.
+await writeFile(path.join(target, ".claude-plugin", "marketplace.json"), JSON.stringify({ name: "ditto-remote-review", metadata: { description: "Local review candidate for Ditto Remote; not a public or approved marketplace" }, owner: { name: "Ditto" }, plugins: [{ name: manifest.name, source: "./", version: pkg.version, description: manifest.description }] }, null, 2) + "\n");
 const runtime = path.join(target, "runtime");
 await mkdir(runtime);
 for (const file of ["package.json", "package-lock.json", "LICENSE"]) await cp(path.join(root, file), path.join(runtime, file));

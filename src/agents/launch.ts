@@ -22,6 +22,7 @@ import { apiBaseURL, appBaseURL, configDir, endpointURL, resolveApiKey } from ".
 import { deviceLogin } from "../device-login.js";
 import { formatActivation } from "../endpoint-format.js";
 import { readStoredAuth, saveLogin, updateStoredAuth } from "../store.js";
+import { remoteSessionURL } from "../remote/session-link.js";
 import { findProfileEndpoint, repoDefaultProfile } from "../dittoconfig/profiles.js";
 import { err as c } from "../ui.js";
 import { holdNotesForTui, type NoteOptions, releaseNotes, writeNote } from "../terminal-note.js";
@@ -692,12 +693,12 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   const remote: RemoteMode = remoteMode(options);
   let exitCode: number | null = null;
   try {
-    const registration = remote !== "off" ? await apiFetch<{ threadId: string; kgID: string }>("/api/v5/sessions/register", { method: "POST", body: { sessionId, endpointId: endpoint.id, harness: harness === "claude" ? "claude-code" : harness, inference: options.mcpOnly ? "native" : "router", transport: options.remoteTransport ?? "cli", title: options.name?.trim() || `${path.basename(cwd)} · ${sessionId.slice(0,8)}` } }).catch((err) => {
+    const registration = remote !== "off" ? await apiFetch<{ threadId: string; kgID: string; graphAlias?: string }>("/api/v5/sessions/register", { method: "POST", body: { sessionId, endpointId: endpoint.id, harness: harness === "claude" ? "claude-code" : harness, inference: options.mcpOnly ? "native" : "router", transport: options.remoteTransport ?? "cli", title: options.name?.trim() || `${path.basename(cwd)} · ${sessionId.slice(0,8)}` } }).catch((err) => {
       if (options.mcpOnly) throw err;
       log("session link unavailable; the CLI bridge will still announce this launch");
       return undefined;
     }) : undefined;
-    if (registration) log(`session: ${appBaseURL()}/chat/${encodeURIComponent(registration.threadId)}${registration.kgID ? `?graph=${encodeURIComponent(registration.kgID)}` : ""}`);
+    if (registration) log(`session: ${remoteSessionURL(registration)}`);
     if (options.remoteTransport === "channels") {
       const { withChannelServer } = await import("../remote/channels-plan.js");
       const channelPlan = withChannelServer(plan, sessionId, cwd);

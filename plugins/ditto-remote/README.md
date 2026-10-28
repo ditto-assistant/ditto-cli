@@ -52,11 +52,21 @@ sets its matching Channels flag; installation alone must not register a remote
 session. This environment opt-in cannot prove Claude accepted the flag, so the
 explicit model receipt and reply remain the delivery evidence.
 
-For local review, load the built plugin with `--plugin-dir`, then explicitly
-opt it in with the development-channel flag using the identity Claude reports.
+The bundle includes a **local-only** marketplace named `ditto-remote-review`
+so review uses a precise identity without claiming a public listing. Install
+from the generated directory in a disposable review project:
+
+```sh
+claude plugin install ditto-remote --marketplace /absolute/path/to/built-plugin --scope local
+DITTO_REMOTE_CHANNELS_ENABLED=1 claude --dangerously-load-development-channels plugin:ditto-remote@ditto-remote-review
+```
+
+Review the local source/trust prompt. Do not add a global permanent marketplace
+merely to test a candidate. The local install writes Claude settings for the
+review project; use the plugin manager to disable/remove it afterwards.
+Alternatively, `--plugin-dir` loads the built root for a single process, using
+the identity Claude reports for that mode.
 Do not use `-p` or the SDK for this test: development Channels are interactive.
-For a local marketplace review, generate a local manifest with an agreed review
-marketplace identity and use `plugin:ditto-remote@<that-marketplace>`.
 An ordinary community marketplace does not put the plugin on Anthropic's default
 channel allowlist. The approval packet documents the two proposed routes:
 an organization administrator's exact allowlist, or coordination with Anthropic
