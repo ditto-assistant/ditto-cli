@@ -1,7 +1,7 @@
 import type { Command, Option } from "commander";
 import { resolveCompany } from "./api.js";
 import { readStoredAuth } from "./store.js";
-import { addProviderKey, inspectProviderKey, listProviderKeys, probeMetadata, probeProviderKey, providerCatalog, providerManagementBase, removeProviderKey, requireProviderKeyId, setProviderKey, type ProviderKeyInput } from "./provider-key-api.js";
+import { addProviderKey, BALANCE_PROVIDERS, inspectProviderKey, listProviderKeys, probeMetadata, probeProviderKey, providerCatalog, providerManagementBase, removeProviderKey, requireProviderKeyId, setProviderKey, type BalanceProvider, type ProviderKeyInput } from "./provider-key-api.js";
 import { boundedInteger, parseProviderProtocol, providerKeyHints, providerURLInput, publicProviderParams } from "./provider-key-input.js";
 import { importGCloudProviderSecret, readProviderSecret } from "./provider-secrets.js";
 
@@ -29,7 +29,7 @@ async function cmdAdd(options: AddOptions, importing: boolean): Promise<void> {
   const { companyId, scope } = await providerKeyScope(options);
   if (importing && options.from !== "gcloud") throw new Error("--from currently supports gcloud");
   if (importing && !options.secret) throw new Error("import requires --secret NAME or a Secret Manager resource");
-  if (options.balanceProvider !== undefined && !["impala", "openrouter"].includes(options.balanceProvider)) throw new Error("--balance-provider must be impala or openrouter");
+  if (options.balanceProvider !== undefined && !BALANCE_PROVIDERS.includes(options.balanceProvider as BalanceProvider)) throw new Error("--balance-provider must be impala, openrouter, gm or vercel_ai_gateway");
   const url = options.baseUrl === undefined ? undefined : providerURLInput(options.baseUrl);
   const protocol = parseProviderProtocol(options.protocol) ?? url?.protocolHint;
   if (options.protocol && url?.protocolHint && protocol !== url.protocolHint) throw new Error("--protocol conflicts with the method in --base-url");
@@ -53,9 +53,10 @@ async function cmdAdd(options: AddOptions, importing: boolean): Promise<void> {
     const entry = catalog.find(row => row.id === provider);
     if (entry?.requiresBaseUrl && !url) throw new Error("this provider requires --base-url URL");
     const templateParams = publicProviderParams(options.param ?? [], entry, url?.baseUrl, key);
-    if (options.balanceProvider && !url) throw new Error("--balance-provider needs an explicit --base-url so balance checks stay at the confirmed destination");
+    if (options.balanceProvider === "impala" && !["custom", "custom_openai", "custom_anthropic"].includes(provider)) throw new Error("the Impala balance adapter requires a custom API key");
+    if (options.balanceProvider && options.balanceProvider !== "impala" && options.balanceProvider !== provider) throw new Error("the balance adapter must match the selected named provider");
     if (options.label && options.label.includes(key)) throw new Error("the key label must not contain the API key");
-    const input: ProviderKeyInput = { companyId, provider, key, label: options.label, baseUrl: url?.baseUrl, protocol, priority, modelAllow: options.modelAllow, modelDeny: options.modelDeny, templateParams, balanceProvider: options.balanceProvider as "impala" | "openrouter" | undefined };
+    const input: ProviderKeyInput = { companyId, provider, key, label: options.label, baseUrl: url?.baseUrl, protocol, priority, modelAllow: options.modelAllow, modelDeny: options.modelDeny, templateParams, balanceProvider: options.balanceProvider as BalanceProvider | undefined };
     const saved = await addProviderKey(input);
     key = "";
     print({ scope, key: saved, ...(source ? { source } : {}), secretPrinted: false });
@@ -82,13 +83,14 @@ export function registerProviderKeyCommands(program: Command, outputOption: () =
       .option("--provider <id>", "provider id, or custom; omit for unique local prefix detection")
       .option("--base-url <url>", "public HTTPS base or full chat/messages URL; credentials and query parameters are rejected")
       .option("--protocol <protocol>", "custom API protocol: openai or anthropic")
-      .option("--balance-provider <provider>", "optional same-destination balance adapter: impala or openrouter")
+      .option("--balance-provider <provider>", "explicitly send the saved key to this provider's fixed balance API: impala, openrouter, gm or vercel_ai_gateway")
       .option("--label <label>", "key label, never its value")
       .option("--priority <number>", "provider priority, an integer from 1 to 10000")
       .option("--param <name=value>", "declared public provider setting, such as account_id or gateway_id (repeatable; never credentials)", collect)
       .option("--model-allow <pattern>", "model allow pattern (repeatable)", collect)
       .option("--model-deny <pattern>", "model deny pattern (repeatable)", collect)
-      .option("--no-inspect", "skip the default no-generation validation, model listing and balance check");
+      .option("--no-inspect", "skip the default no-generation validation, model listing and balance check")
+      .addHelpText("after", "\nBalance inspection sends the saved key to a fixed provider API. Impala uses https://api.platform.getimpala.ai/v1/account, which is a different origin from its inference endpoint. OpenRouter uses https://openrouter.ai/api/v1/key; GM uses https://api.saygm.com/v1/credits; Vercel uses https://ai-gateway.vercel.sh/v1/credits. Native OpenRouter, GM and Vercel keys use their adapter automatically unless a base URL override is configured. A custom key uses Impala billing only after explicit --balance-provider impala association.\n");
     if (importing) command.requiredOption("--from <store>", "source store (currently gcloud)").requiredOption("--secret <name-or-resource>", "secret name or projects/PROJECT/secrets/SECRET[/versions/VERSION]").option("--project <id>", "explicit Google Cloud project (required for a short secret name)").option("--account <email>", "signed-in gcloud account; otherwise verify the single active account").option("--version <version>", "secret version (default: latest)");
     else command.option("--stdin", "read a piped key without echo; omit for hidden TTY paste");
     command.action((options: AddOptions) => cmdAdd(options, importing));

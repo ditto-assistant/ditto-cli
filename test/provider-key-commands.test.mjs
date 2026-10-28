@@ -16,9 +16,12 @@ const SECRET = "sk-proj-synthetic-provider-test-value";
 const key = { id: ID, provider: "openai", label: "test", keyHint: "alue", enabled: true, configured: true };
 // Mirrors providerkeys.Provider's wire shape, rather than a UI-only catalog.
 const providers = [
-  { id: "openai", displayName: "OpenAI", keyPrefixHints: ["sk-proj-"], protocols: ["openai_chat"], requiresBaseUrl: false, modelDiscovery: true, balanceSupported: false, routable: true },
+  { id: "openai", displayName: "OpenAI", keyPrefixHints: ["sk-proj-", "sk-svcacct-", "sk-"], protocols: ["openai_chat"], requiresBaseUrl: false, modelDiscovery: true, balanceSupported: false, routable: true },
   { id: "anthropic", displayName: "Anthropic", keyPrefixHints: ["sk-ant-"], protocols: ["anthropic_messages"], requiresBaseUrl: false, modelDiscovery: true, balanceSupported: false, routable: true },
-  { id: "gm", displayName: "GM", protocols: ["openai_chat"], requiresBaseUrl: false, modelDiscovery: true, balanceSupported: false, routable: true },
+  { id: "openrouter", displayName: "OpenRouter", keyPrefixHints: ["sk-or-v1-"], protocols: ["openai_chat"], requiresBaseUrl: false, modelDiscovery: true, balanceSupported: true, routable: true },
+  { id: "gm", displayName: "GM", protocols: ["openai_chat"], requiresBaseUrl: false, modelDiscovery: true, balanceSupported: true, routable: true },
+  { id: "engy", displayName: "Engy", keyPrefixHints: ["sk-engy-"], protocols: ["openai_chat"], requiresBaseUrl: false, modelDiscovery: true, balanceSupported: false, routable: true },
+  { id: "vercel_ai_gateway", displayName: "Vercel AI Gateway", protocols: ["openai_chat"], requiresBaseUrl: false, modelDiscovery: true, balanceSupported: true, routable: true },
   { id: "cloudflare_ai_gateway", displayName: "Cloudflare AI Gateway", protocols: ["openai_chat"], requiresBaseUrl: false, modelDiscovery: false, balanceSupported: false, routable: true, params: [{ name: "account_id", label: "Account ID", required: true }, { name: "gateway_id", label: "Gateway ID", required: true }] },
 ];
 
@@ -38,8 +41,8 @@ async function fixture(t, handler) {
       if (req.url.startsWith("/api/v5/inference/endpoints") && req.method === "GET") return send(200, { endpoints: [{ id: EP, slug: "review", model: "z-ai/glm-5.3-flash", billingMode: "byok", providerOptions: { private_upstream_routing: { enabled: false, routes: [] }, unrelated: "preserve" }, privateUpstreamRoutingAllowed: true }] });
       if (req.url === "/api/v5/inference/provider-keys/providers") return send(200, { providers });
       if (req.url.endsWith("/inspect")) return send(200, { keyId: ID, validation: { status: "valid" }, models: { status: "advertised", models: [{ id: "provider/model" }] }, balance: { status: "unsupported" }, key: SECRET });
-      if (req.url.endsWith("/probe")) return send(200, { requestLimit: data.requests, outputTokenLimit: data.maxOutputTokens, capacityVerified: false, costBoundAvailable: false, calls: [{ model: data.models[0], status: "ok", latencyMs: 12, key: SECRET }], secret: SECRET });
-      if (req.url === "/api/v5/inference/provider-keys" && req.method === "POST") return send(201, { ...key, provider: data.provider === "custom" ? "custom_openai" : data.provider, key: data.key, label: `saved ${data.key}`, arbitrary: data.key });
+      if (req.url.endsWith("/probe")) return send(200, { requestLimit: data.requests, outputTokenLimit: data.maxOutputTokens, capacityVerified: false, costBoundAvailable: false, calls: [{ model: data.models[0], status: "completed", attempted: true, latencyMs: 12, inputTokenAccounting: "inclusive", key: SECRET }], secret: SECRET });
+      if (req.url === "/api/v5/inference/provider-keys" && req.method === "POST") return send(201, { ...key, provider: data.provider === "custom" ? data.protocol === "anthropic_messages" ? "custom_anthropic" : "custom_openai" : data.provider, key: data.key, label: `saved ${data.key}`, arbitrary: data.key });
       if (req.url.startsWith("/api/v5/inference/provider-keys") && req.method === "GET") return send(200, { keys: [{ ...key, key: SECRET, templateParams: { credential: SECRET } }], canManage: true });
       if (req.method === "PATCH") return send(200, key);
       if (req.method === "DELETE") return send(204);
@@ -97,6 +100,33 @@ test("backend-shaped catalog supports named OpenAI, Anthropic and GM credentials
   const hinted = await f.run(["provider-keys", "add", "--stdin", "--no-inspect"], "sk-ant-synthetic-credential");
   assert.equal(hinted.code, 0, hinted.stderr);
   assert.equal(f.calls.filter(call => call.method === "POST").at(-1).body.provider, "anthropic");
+  for (const [secret, provider] of [["sk-svcacct-synthetic-credential", "openai"], ["sk-engy-synthetic-credential", "engy"]]) {
+    const detected = await f.run(["provider-keys", "add", "--stdin", "--no-inspect"], secret);
+    assert.equal(detected.code, 0, detected.stderr);
+    assert.equal(f.calls.filter(call => call.method === "POST").at(-1).body.provider, provider);
+    assert.ok(!`${detected.stdout}${detected.stderr}`.includes(secret));
+  }
+});
+
+test("balance help discloses fixed billing origins and adapter choices match the server", async t => {
+  const f = await fixture(t);
+  const help = await f.run(["provider-keys", "add", "--help"]);
+  assert.equal(help.code, 0, help.stderr);
+  assert.match(help.stdout, /https:\/\/api\.platform\.getimpala\.ai\/v1\/account/);
+  assert.match(help.stdout, /different origin/);
+  for (const provider of ["openrouter", "gm", "vercel_ai_gateway"]) {
+    const saved = await f.run(["provider-keys", "add", "--stdin", "--no-inspect", "--provider", provider, "--balance-provider", provider], SECRET);
+    assert.equal(saved.code, 0, saved.stderr);
+    assert.equal(f.calls.filter(call => call.method === "POST").at(-1).body.balanceProvider, provider);
+  }
+  const before = f.calls.filter(call => call.method === "POST").length;
+  const mismatched = await f.run(["provider-keys", "add", "--stdin", "--no-inspect", "--provider", "openai", "--balance-provider", "gm"], SECRET);
+  assert.equal(mismatched.code, 1);
+  assert.equal(f.calls.filter(call => call.method === "POST").length, before);
+  const custom = await f.run(["provider-keys", "add", "--stdin", "--no-inspect", "--provider", "custom", "--protocol", "anthropic", "--base-url", "https://inference.example.com", "--balance-provider", "impala"], SECRET);
+  assert.equal(custom.code, 0, custom.stderr);
+  assert.equal(f.calls.filter(call => call.method === "POST").at(-1).body.balanceProvider, "impala");
+  assert.equal(JSON.parse(custom.stdout).key.provider, "custom_anthropic");
 });
 
 test("declared public provider parameters are required and credentials cannot enter them", async t => {

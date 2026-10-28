@@ -2,6 +2,8 @@ import { apiBase, NO_KEY_MESSAGE } from "./api.js";
 import { packageName, packageVersion, resolveApiKey } from "./config.js";
 
 export type ProviderProtocol = "openai_chat" | "anthropic_messages";
+export type BalanceProvider = "impala" | "openrouter" | "gm" | "vercel_ai_gateway";
+export const BALANCE_PROVIDERS: readonly BalanceProvider[] = ["impala", "openrouter", "gm", "vercel_ai_gateway"];
 export interface ProviderCatalogEntry {
   id: string;
   displayName: string;
@@ -23,7 +25,7 @@ export interface ProviderKeyMetadata {
   priority?: number;
   baseUrl?: string;
   protocol?: ProviderProtocol;
-  balanceProvider?: "impala" | "openrouter";
+  balanceProvider?: BalanceProvider;
   modelAllow?: string[];
   modelDeny?: string[];
 }
@@ -34,7 +36,7 @@ export interface ProviderKeyInput {
   label?: string;
   baseUrl?: string;
   protocol?: ProviderProtocol;
-  balanceProvider?: "impala" | "openrouter";
+  balanceProvider?: BalanceProvider;
   priority?: number;
   modelAllow?: string[];
   modelDeny?: string[];
@@ -141,7 +143,7 @@ export function providerKeyMetadata(raw: unknown, secret?: string): ProviderKeyM
     enabled: data.enabled === true, configured: data.configured === true,
     ...(typeof data.priority === "number" && Number.isSafeInteger(data.priority) ? { priority: data.priority } : {}),
     ...(baseUrl ? { baseUrl } : {}), ...(protocol ? { protocol } : {}),
-    ...(data.balanceProvider === "impala" || data.balanceProvider === "openrouter" ? { balanceProvider: data.balanceProvider } : {}),
+    ...(typeof data.balanceProvider === "string" && BALANCE_PROVIDERS.includes(data.balanceProvider as BalanceProvider) ? { balanceProvider: data.balanceProvider as BalanceProvider } : {}),
     ...(Array.isArray(data.modelAllow) ? { modelAllow: stringList(data.modelAllow, secret) } : {}),
     ...(Array.isArray(data.modelDeny) ? { modelDeny: stringList(data.modelDeny, secret) } : {}),
   };
@@ -180,7 +182,7 @@ export function inspectionMetadata(raw: unknown): Record<string, unknown> {
     checkedAt: timestamp(data.checkedAt),
     validation: { status: status(validation.status, ["valid", "rejected", "unknown", "unsupported"]), ...(Number.isInteger(validation.httpStatus) ? { httpStatus: validation.httpStatus } : {}) },
     models: { status: status(models.status, ["advertised", "unsupported", "unknown"]), models: Array.isArray(models.models) ? models.models.slice(0, 1000).map(raw => ({ id: safeText(object(raw).id) })).filter(row => row.id) : [], truncated: models.truncated === true },
-    balance: { status: status(balance.status, ["reported", "unsupported", "unknown"]), amountUsd: balanceAmount(balance.amountUsd), unit: balance.unit === "USD" ? "USD" : undefined, source: balance.source === "key_limit_remaining" || balance.source === "payg_wallet" ? balance.source : undefined, checkedAt: timestamp(balance.checkedAt) },
+    balance: { status: status(balance.status, ["reported", "unsupported", "unknown"]), amountUsd: balanceAmount(balance.amountUsd), unit: balance.unit === "USD" ? "USD" : undefined, source: balance.source === "key_limit_remaining" || balance.source === "payg_wallet" || balance.source === "account_wallet" ? balance.source : undefined, checkedAt: timestamp(balance.checkedAt) },
   };
 }
 export async function inspectProviderKey(id: string, companyId?: string): Promise<Record<string, unknown>> {
@@ -199,7 +201,7 @@ export function probeMetadata(raw: unknown): Record<string, unknown> {
     observedRequestsPerSecond: numeric(data.observedRequestsPerSecond),
     calls: Array.isArray(data.calls) ? data.calls.slice(0, 20).map(raw => {
       const call = object(raw);
-      return { model: safeText(call.model), status: typeof call.status === "string" && ["unavailable", "rejected", "rate_limited", "locally_limited", "incomplete", "completed", "provider_error"].includes(call.status) ? call.status : "unknown", attempted: call.attempted === true, httpStatus: numeric(call.httpStatus), latencyMs: numeric(call.latencyMs), ttftMs: numeric(call.ttftMs), inputTokens: numeric(call.inputTokens), outputTokens: numeric(call.outputTokens), cachedInputTokens: numeric(call.cachedInputTokens), providerReportedCostUsd: numeric(call.providerReportedCostUsd), inputTokenAccounting: typeof call.inputTokenAccounting === "string" && ["inclusive", "exclusive", "unknown"].includes(call.inputTokenAccounting) ? call.inputTokenAccounting : "unknown", tokensPerSecond: numeric(call.tokensPerSecond) };
+      return { model: safeText(call.model), status: typeof call.status === "string" && ["unavailable", "rejected", "rate_limited", "locally_limited", "invalid_request", "incomplete", "completed", "provider_error"].includes(call.status) ? call.status : "unknown", attempted: call.attempted === true, httpStatus: numeric(call.httpStatus), latencyMs: numeric(call.latencyMs), ttftMs: numeric(call.ttftMs), inputTokens: numeric(call.inputTokens), outputTokens: numeric(call.outputTokens), cachedInputTokens: numeric(call.cachedInputTokens), providerReportedCostUsd: numeric(call.providerReportedCostUsd), inputTokenAccounting: typeof call.inputTokenAccounting === "string" && ["inclusive", "exclusive", "unknown"].includes(call.inputTokenAccounting) ? call.inputTokenAccounting : "unknown", tokensPerSecond: numeric(call.tokensPerSecond) };
     }) : [],
   };
 }

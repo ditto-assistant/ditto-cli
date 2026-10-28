@@ -24,6 +24,10 @@ test("prefix hints never treat broad sk- as proof and preserve ambiguity", () =>
   assert.deepEqual(providerKeyHints("sk-unknown", catalog), []);
   assert.deepEqual(providerKeyHints("sk-ant-synthetic", catalog), ["anthropic"]);
   assert.deepEqual(providerKeyHints(SECRET, catalog), ["clone", "openai"]);
+  const actualStrongHints = [row("openai", ["sk-proj-", "sk-svcacct-", "sk-"]), row("engy", ["sk-engy-"])];
+  assert.deepEqual(providerKeyHints("sk-svcacct-synthetic", actualStrongHints), ["openai"]);
+  assert.deepEqual(providerKeyHints("sk-engy-synthetic", actualStrongHints), ["engy"]);
+  assert.deepEqual(providerKeyHints("sk-ambiguous", actualStrongHints), []);
 });
 
 test("custom URLs preserve paths and infer protocols without guessing version prefixes", () => {
@@ -59,6 +63,9 @@ test("inspection and probe status, units, source and date fields cannot reflect 
   assert.equal(inspectionMetadata({ checkedAt: "2026-10-28T13:00:00.123456Z", balance: { status: "reported", unit: "USD", source: "payg_wallet", amountUsd: 0 } }).checkedAt, "2026-10-28T13:00:00.123Z");
   assert.equal(inspectionMetadata({ balance: { status: "reported", unit: "USD", source: "payg_wallet", amountUsd: -0.25 } }).balance.amountUsd, -0.25);
   assert.equal(probeMetadata({ calls: [{ providerReportedCostUsd: -0.25 }] }).calls[0].providerReportedCostUsd, undefined);
+  assert.equal(inspectionMetadata({ balance: { status: "reported", unit: "USD", source: "account_wallet", amountUsd: -0.25 } }).balance.source, "account_wallet");
+  for (const status of ["invalid_request", "locally_limited"]) assert.equal(probeMetadata({ calls: [{ status }] }).calls[0].status, status);
+  for (const balanceProvider of ["impala", "openrouter", "gm", "vercel_ai_gateway"]) assert.equal(providerKeyMetadata({ id: ID, provider: "custom_openai", balanceProvider }).balanceProvider, balanceProvider);
 });
 
 test("GCP references require explicit scope and reject conflicts before any child runs", () => {

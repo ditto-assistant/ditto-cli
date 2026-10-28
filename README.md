@@ -1363,8 +1363,23 @@ Saving a key performs a no-generation inspection unless `--no-inspect` is set.
 The result distinguishes advertised models, valid/rejected/unknown credentials,
 and reported/unsupported/unknown balance checks. Not every provider offers a
 balance API. A missing balance is not zero, and a listed model is not proof that
-the account can run it. `--balance-provider impala` or `openrouter` opts a custom
-key into that adapter on its confirmed destination only.
+the account can run it. Native OpenRouter, GM and Vercel keys use their known
+balance API automatically when no base URL override is configured. An explicit
+`--balance-provider` association allows balance inspection with the matching
+named provider; `--balance-provider impala` supports either custom protocol.
+Inspection sends the saved key to the selected provider's fixed API:
+
+| Provider | Balance API | Meaning |
+| --- | --- | --- |
+| Impala | `https://api.platform.getimpala.ai/v1/account` | PAYG wallet, separate from the inference origin |
+| OpenRouter | `https://openrouter.ai/api/v1/key` | Remaining key limit, not necessarily the organization wallet |
+| GM | `https://api.saygm.com/v1/credits` | Account wallet |
+| Vercel AI Gateway | `https://ai-gateway.vercel.sh/v1/credits` | Account wallet |
+
+For Impala, this explicitly transmits the custom key to its separate billing
+origin, `https://api.platform.getimpala.ai`. A custom inference URL cannot
+redirect a balance check to another host. Reported negative wallet balances
+remain negative; unsupported or unknown balances remain distinct from zero.
 
 Paid probing is separate and bounded. An explicit shortlist prevents an
 accidental sweep of every public model name. Run the plan first, then add
