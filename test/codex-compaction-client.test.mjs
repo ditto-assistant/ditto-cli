@@ -184,9 +184,15 @@ for (const model of ["gpt-6.1-sol", "anthropic/claude-fable-5.1", "z-ai/glm-5.3"
       assert.ok(requests.every(r => r.session === "qa-compaction-session"), "launch and resume must keep the Ditto session identity");
       assert.equal(new Set(requests.map(r => r.auth)).size, 2, "resume must work with a renewed temporary key");
     } finally {
-      if (client) await client.stop();
-      server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
-      await rm(home, { recursive: true, force: true });
+      try {
+        if (client) await client.stop();
+      } finally {
+        try {
+          server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
+        } finally {
+          await rm(home, { recursive: true, force: true });
+        }
+      }
     }
   });
 }
