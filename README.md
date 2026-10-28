@@ -1297,3 +1297,5 @@ requires interactive native Claude Code, an eligible signed-in account and an
 organization that allows Channels. The CLI attaches `ditto-remote` and adds the
 development channel flag in one launch; Claude's experimental-channel
 confirmation still appears. Router inference defaults to the CLI bridge.
+
+Channel distribution and approval: [Claude Code channel approval plan](docs/claude-channel-approval.md).

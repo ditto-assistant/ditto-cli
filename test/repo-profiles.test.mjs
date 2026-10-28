@@ -484,6 +484,13 @@ test("Claude launch defaults: repo overrides cloud, endpoint flag bypasses repo,
     const cliTransport = await run(["claude", "--dry-run", "--remote-transport", "cli"], stub.base, dir);
     assert.equal(cliTransport.status, 0, cliTransport.stderr);
     assert.equal(JSON.parse(cliTransport.stdout).remoteTransport, "cli");
+    for (const args of [["-p", "hello"], ["--headless"], ["--no-remote-control"]]) {
+      const out = await run(["claude", "--dry-run", ...args], stub.base, dir);
+      assert.equal(out.status, 0, out.stderr);
+      assert.equal(JSON.parse(out.stdout).remoteTransport, "cli", "saved Channels applies only to interactive remote sessions");
+    }
+    const explicitBad = await run(["claude", "--dry-run", "-p", "hello", "--remote-transport", "channels"], stub.base, dir);
+    assert.notEqual(explicitBad.status, 0);
     const applied = await run(["repo", "apply"], stub.base, dir);
     assert.equal(applied.status, 0, applied.stderr);
     assert.equal(stub.writes.at(-1).body.providerOptions.claude_inference, "native");

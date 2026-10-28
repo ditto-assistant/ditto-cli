@@ -100,3 +100,36 @@ test("Channels merges inline, repeated and variadic MCP configs and rejects inva
  for(const value of ["null","[]",JSON.stringify({mcpServers:"wrong"})]) assert.throws(()=>withChannelServer({...base,args:["--mcp-config",value]},"native","/workspace"),/must be/);
  assert.throws(()=>withChannelServer({...base,args:["--mcp-config"]},"native","/workspace"),/requires a value/);
 });
+
+
+test("Channels refuses a user-configured ditto-remote collision", () => {
+ const config = JSON.stringify({mcpServers:{"ditto-remote":{command:"owned-by-user"}}});
+ assert.throws(() => withChannelServer({command:"claude",args:["--mcp-config",config],envSet:{},envUnset:[]},"s","/workspace"), /already defines/);
+});
+
+test("a stalled notification expires, a late event cannot be acknowledged, and capacity recovers", async () => {
+ const stub = await startHostStub();
+ const url = new URL("../dist/remote/channel-server.js",import.meta.url).href;
+ const script = `import {Server} from "@modelcontextprotocol/sdk/server/index.js"; const original=Server.prototype.notification; let release; Server.prototype.notification=function(event){ if(event.params?.meta?.turn_id==="stalled") return new Promise(resolve=>{release=()=>resolve(original.call(this,event));}); if(event.params?.meta?.turn_id==="fresh") release?.(); return original.call(this,event); }; const {runChannelServer}=await import(${JSON.stringify(url)}); await runChannelServer({receiptTimeoutMs:1000,completionTimeoutMs:50});`;
+ const transport = new StdioClientTransport({command:process.execPath,args:["--input-type=module","-e",script],cwd:process.cwd(),env:{...process.env,DITTO_API_BASE:stub.base,DITTO_API_KEY:"ditto_mcp_test",DITTO_CONFIG_DIR:mkdtempSync(path.join(os.tmpdir(),"ditto-channel-stall-")),DITTO_REMOTE_SESSION_ID:"stall-session",DITTO_REMOTE_CWD:os.tmpdir()},stderr:"pipe"});
+ const client = new Client({name:"claude-code",version:"test"});
+ const seen = new Set();
+ client.setNotificationHandler(z.object({method:z.literal("notifications/claude/channel"),params:z.object({content:z.string(),meta:z.record(z.string(),z.string())})}), event=>seen.add(event.params.meta.turn_id));
+ try {
+  await client.connect(transport);
+  await stub.waitFor(frame=>frame.type==="session.announce");
+  const turn={type:"turn.deliver",sessionId:"stall-session",turnId:"stalled",text:"stalled prompt",attachments:[]};
+  stub.send(turn);
+  const expired=await stub.waitFor(frame=>frame.type==="turn.finished"&&frame.turnId==="stalled");
+  assert.ok(expired.error);
+  stub.send({...turn,turnId:"fresh"});
+  await stub.waitFor(frame=>frame.type==="turn.ack"&&frame.turnId==="fresh");
+  const late=await client.callTool({name:"acknowledge",arguments:{turn_id:"stalled"}});
+  assert.equal(late.isError,true);
+  const fresh=await client.callTool({name:"acknowledge",arguments:{turn_id:"fresh"}});
+  assert.notEqual(fresh.isError,true);
+  const completed=await stub.waitFor(frame=>frame.type==="turn.finished"&&frame.turnId==="fresh", {timeout:500});
+  assert.ok(completed.error,"completion timeout is polled on its own short interval");
+  assert.ok(seen.has("fresh"));
+ } finally { await client.close(); await stub.close(); }
+});

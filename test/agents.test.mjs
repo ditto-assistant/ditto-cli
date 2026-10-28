@@ -29,7 +29,7 @@ const ENDPOINTS = {
 };
 
 /** Tiny stand-in for the Ditto management API. */
-function startStub() {
+function startStub({ mcpError = false } = {}) {
   const calls = [];
   const server = http.createServer((req, res) => {
     let body = "";
@@ -42,7 +42,7 @@ function startStub() {
           res.statusCode = 401;
           return res.end(JSON.stringify({ message: "unauthorized" }));
         }
-        return res.end(JSON.stringify(ENDPOINTS));
+        return res.end(JSON.stringify(mcpError ? { ...ENDPOINTS, baseUrl: `http://127.0.0.1:${server.address().port}/v1` } : ENDPOINTS));
       }
       if (/\/keys$/.test(req.url) && req.method === "POST") {
         res.statusCode = 201;
@@ -734,4 +734,18 @@ test("searchTranscripts: exact title wins, then title words, then prompts; this 
   assert.deepEqual(searchTranscripts(all, "DITTO REVIEW QUALITY AND UX", "/a").map((x) => x.id), ["3", "2"]);
   assert.deepEqual(searchTranscripts(all, "review", "/a").map((x) => x.id), ["3", "4", "2", "1"]);
   assert.deepEqual(searchTranscripts(all, "", "/a").length, 4);
+});
+
+
+test("MCP setup failure honors explicit key retention", async () => {
+ for (const keep of [false,true]) {
+  const stub = await startStub({mcpError:true});
+  const claude = fakeClaude();
+  try {
+   const result = await runAsync(["claude","--endpoint","alpha","--mcp-only","-p","hello",...(keep?["--keep-key"]:[])], claude.env({DITTO_API_BASE:stub.base,DITTO_API_KEY:"ditto_mcp_test"}));
+   assert.notEqual(result.status,0);
+   assert.match(result.stderr,/MCP-only setup failed/);
+   assert.equal(stub.calls.filter(c=>c.method==="DELETE"&&/keys\/key-1$/.test(c.url)).length,keep?0:1);
+  } finally { stub.close(); }
+ }
 });

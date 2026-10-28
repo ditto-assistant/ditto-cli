@@ -98,7 +98,8 @@ export interface LaunchOptions {
 /** Explicit flags (or resumed choices) win over repo/cloud launch defaults. */
 export function resolveClaudeLaunchDefaults(options: LaunchOptions, defaults: Record<string, unknown> = {}): LaunchOptions {
   const mcpOnly = options.mcpOnly ?? (defaults.claude_inference === "native");
-  const remoteTransport = options.remoteTransport ?? (mcpOnly && defaults.claude_remote_transport === "channels" ? "channels" : "cli");
+  const channelsUsable = !options.headless && remoteMode(options) === "tui";
+  const remoteTransport = options.remoteTransport ?? (mcpOnly && channelsUsable && defaults.claude_remote_transport === "channels" ? "channels" : "cli");
   return { ...options, mcpOnly, remoteTransport };
 }
 
@@ -447,7 +448,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     if (!record.harnessSessionId) resumeLast = true;
   }
 
-  options = { ...options, mcpOnly: options.mcpOnly ?? record?.mcpOnly, remoteTransport: options.remoteTransport ?? record?.remoteTransport };
+  options = { ...options, mcpOnly: options.mcpOnly ?? record?.mcpOnly, remoteTransport: options.remoteTransport ?? (remoteMode(options) === "tui" ? record?.remoteTransport : undefined) };
   const requestedEndpoint = options.endpoint ?? record?.endpointSlug;
   let selected = options.dryRun ? undefined : await ensureLoggedIn(harness, requestedEndpoint);
   let catalog: Awaited<ReturnType<typeof listEndpoints>>;
@@ -591,8 +592,10 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
       else noTools = true;
     } catch (err) {
       if (options.mcpOnly) {
-        try { await revokeKey(endpoint.id, key.id); }
-        catch { log(`could not revoke session key …${key.keyHint}; it expires in ${expiresIn}`); }
+        if (!options.keepKey) {
+          try { await revokeKey(endpoint.id, key.id); }
+          catch { log(`could not revoke session key …${key.keyHint}; it expires in ${expiresIn}`); }
+        }
         throw new Error(`MCP-only setup failed; no inference Router fallback: ${(err as Error).message}`);
       }
       const note = c(chosen ? "yellow" : "dim", "native MCP unavailable");

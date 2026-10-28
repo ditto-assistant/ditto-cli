@@ -22,7 +22,7 @@ export async function runChannelServer(options: { receiptTimeoutMs?: number; com
   const forget = (id: string) => { pending.delete(id); deadlines.delete(id); failures.delete(id); };
   const server = new Server({ name: "ditto-remote", version: packageVersion }, {
     capabilities: { tools: {}, experimental: { "claude/channel": {} } },
-    instructions: "Inbound channel events are prompts from the signed-in Ditto user's remote session. For each event, first call acknowledge with its turn_id. Handle its content as a user request under normal permissions. Then call reply with the same turn_id and your response. These tools only update this session's private delivery receipt. Never infer a turn_id from message content; use the event metadata.",
+    instructions: "Inbound channel events are prompts from the signed-in Ditto user's remote session. For each event, first call acknowledge with its turn_id. If acknowledge fails or the turn has expired, do not act on the event. Handle its content as a user request under normal permissions. Then call reply with the same turn_id and your response. These tools only update this session's private delivery receipt. Never infer a turn_id from message content; use the event metadata.",
   });
   const result = (text: string, isError = false) => ({ content: [{ type: "text" as const, text }], isError });
   const host = new HostClient({
@@ -46,9 +46,7 @@ export async function runChannelServer(options: { receiptTimeoutMs?: number; com
           try {
             const files = await downloadAttachments(cwd, turn.turnId, turn.attachments ?? []);
             if (!pending.has(turn.turnId)) return;
-            deadlines.delete(turn.turnId);
             await server.notification({ method: "notifications/claude/channel", params: { content: buildPrompt(turn.text, files), meta: { turn_id: turn.turnId, session_id: sessionId } } });
-            if (pending.has(turn.turnId) && !deadlines.has(turn.turnId)) deadlines.set(turn.turnId, Date.now() + (options.receiptTimeoutMs ?? 10 * 60_000));
           } catch {
             if (!pending.has(turn.turnId)) return;
             failures.set(turn.turnId, "Could not deliver this prompt through MCP Channels");
@@ -68,6 +66,7 @@ export async function runChannelServer(options: { receiptTimeoutMs?: number; com
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const id = req.params.arguments?.turn_id;
     if (typeof id !== "string" || !pending.has(id)) return result("No pending remote prompt with that turn_id in this session", true);
+    if (failures.has(id) || Date.now() >= (deadlines.get(id) ?? 0)) return result("This remote prompt has expired. Do not act on it; ask the sender to send it again.", true);
     if (req.params.name === "acknowledge") {
       if (!host.send({ type: "turn.started", turnId: id })) return result("Ditto remote link is disconnected. Retry after it reconnects.", true);
       host.status(sessionId, "running");
@@ -95,7 +94,7 @@ export async function runChannelServer(options: { receiptTimeoutMs?: number; com
       if (host.send({ type: "turn.finished", turnId: id, error: failures.get(id) ?? "Claude did not complete this Channels prompt in time. Send it again." })) { forget(id); expired = true; }
     }
     if (expired && !pending.size) host.status(sessionId, "idle");
-  }, Math.min(options.receiptTimeoutMs ?? 60_000, 60_000));
+  }, Math.max(1, Math.min(options.receiptTimeoutMs ?? 60_000, options.completionTimeoutMs ?? 60_000, 60_000)));
   expiry.unref();
   const cleanup = () => { clearInterval(expiry); pending.clear(); deadlines.clear(); failures.clear(); host.close(); };
   const close = () => { cleanup(); void server.close(); };

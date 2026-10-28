@@ -31,6 +31,7 @@ export function withChannelServer(plan: HarnessPlan, sessionId: string, cwd: str
     while (i + 1 < plan.args.length && !plan.args[i + 1].startsWith("-")) { merge(plan.args[++i]); count++; }
     if (!count) throw new Error("--mcp-config requires a value");
   }
+  if (Object.prototype.hasOwnProperty.call(config.mcpServers, "ditto-remote")) throw new Error("--mcp-config already defines a server named ditto-remote");
   config.mcpServers["ditto-remote"] = {
     command: process.execPath,
     args: [fileURLToPath(new URL("./channel-server.js", import.meta.url))],
