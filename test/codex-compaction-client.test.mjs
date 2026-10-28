@@ -81,7 +81,7 @@ for (const model of ["gpt-6.1-sol", "anthropic/claude-fable-5.1", "z-ai/glm-5.3"
     await mkdir(path.join(home, "work"));
     await mkdir(path.join(home, "codex"));
     await symlink(path.resolve(binary), path.join(home, "bin", "codex"));
-    await writeFile(path.join(home, "codex", "config.toml"), `model = ${JSON.stringify(model)}\n`);
+    await writeFile(path.join(home, "codex", "config.toml"), `model = ${JSON.stringify(model)}\n[features]\nplugins = false\nremote_plugin = false\napps = false\n`);
     const requests = [];
     let launches = 0;
     let base;
