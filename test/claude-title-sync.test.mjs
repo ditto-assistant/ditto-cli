@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFile, mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -167,4 +167,27 @@ test("unreadable custom sidecars suppress AI reports until custom metadata is va
   await writeFile(f.sidecar,"{");await sleep(50);assert.equal(reports.length,0);
   await writeFile(f.sidecar,JSON.stringify({customTitle:"Recovered custom name"}));
   await eventually(()=>reports.length===1);assert.equal(reports[0].title,"Recovered custom name");
+});
+
+
+test("failed global scans retry on error backoff instead of consuming the scan throttle",{skip:process.platform==="win32"},async t=>{
+  const f=await fixture(t);const reports=[];
+  const moved=path.join(path.dirname(f.project),"moved");await mkdir(moved);
+  const movedFile=path.join(moved,`${native}.jsonl`);
+  // ELOOP is deterministic without relying on filesystem permissions/root.
+  await symlink(path.basename(movedFile),movedFile);
+  await assert.rejects(stat(movedFile),{code:"ELOOP"});
+  const watcher=watchClaudeSessionTitle({nativeSessionId:native,cwd:f.cwd,intervalMs:10,discoveryIntervalMs:10000,retryBaseMs:10,retryMaxMs:10,report:async value=>{reports.push(value);}});
+  t.after(()=>watcher.stop());await sleep(50);assert.equal(reports.length,0);
+  await rm(movedFile);await writeFile(movedFile,line(ai("Recovered moved title")));
+  await eventually(()=>reports.length===1);
+  assert.equal(reports[0].title,"Recovered moved title");
+});
+
+test("unscoped tail metadata cannot make a head title fresh across an unread gap",async t=>{
+  const f=await fixture(t);
+  await writeFile(f.file,line({type:"custom-title",customTitle:"Copied parent name"})+line({type:"user",message:{content:"x".repeat(400000)}})+line({type:"ai-title",aiTitle:"Unscoped tail name"}));
+  assert.equal(await readClaudeSessionTitle(f.file,native),undefined);
+  await mkdir(path.dirname(f.sidecar));await writeFile(f.sidecar,JSON.stringify({customTitle:"Verified sidecar name"}));
+  assert.equal((await readClaudeSessionTitle(f.file,native)).title,"Verified sidecar name");
 });

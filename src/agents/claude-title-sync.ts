@@ -78,8 +78,8 @@ export function watchClaudeSessionTitle(options: ClaudeTitleWatcherOptions): { s
       if (!file) {
         if (await fileStamp(expected)) file = expected;
         else if (Date.now() >= nextDiscovery) {
-          nextDiscovery = Date.now() + (options.discoveryIntervalMs ?? 30_000);
           file = await locateTitleFile(options.nativeSessionId);
+          nextDiscovery = Date.now() + (options.discoveryIntervalMs ?? 30_000);
         }
       }
       if (!file) { schedule(interval); return; }

@@ -149,7 +149,7 @@ export async function readClaudeSessionTitle(file: string, nativeSessionId: stri
   const titleRecords = (text: string) => jsonLines(text.split("\n").filter(line => line.includes('"ai-title"') || line.includes('"custom-title"')).join("\n"));
   const tailRecords = titleRecords(tail);
   const tailHasTitle = tailRecords.some(line =>
-    (line.sessionId === undefined || (typeof line.sessionId === "string" && line.sessionId.toLowerCase() === nativeSessionId.toLowerCase())) &&
+    (typeof line.sessionId === "string" && line.sessionId.toLowerCase() === nativeSessionId.toLowerCase()) &&
     ((line.type === "ai-title" && str(line.aiTitle)) || (line.type === "custom-title" && str(line.customTitle))));
   const unreadGap = info.size > HEAD_BYTES + TAIL_BYTES;
   const records = unreadGap && !tailHasTitle ? [] : [...titleRecords(head), ...tailRecords];
