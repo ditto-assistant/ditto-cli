@@ -31,6 +31,7 @@ const MINTED_PLAINTEXT = "ditto_inf_PLAINTEXT_MUST_NEVER_PRINT_zz99";
 /** Stub covering the routes codex-app touches: catalog, key mint/revoke, endpoint patch. */
 function startStub({ endpoint = ALPHA, catalogStatus = 200, models, pages } = {}) {
   const calls = [];
+  let minted = 1;
   const server = http.createServer((req, res) => {
     let body = "";
     req.on("data", (c) => (body += c));
@@ -58,7 +59,7 @@ function startStub({ endpoint = ALPHA, catalogStatus = 200, models, pages } = {}
       if (m && m[2] === "/keys" && req.method === "POST") {
         const input = JSON.parse(body);
         if (endpoint.access?.iamEnforced && !endpoint.access.createKey && !["1h","4h","8h","12h"].includes(input.expiresIn)) return json(403,{message:"this role permits temporary session keys only"});
-        return json(201, { id: "key-2", endpointId: m[1], name: input.name, keyHint: "zz99", key: MINTED_PLAINTEXT, expiresAt: "2027-09-05T00:00:00Z", spendLimitTokens: input.spendLimitTokens ?? null, spendPeriod: input.spendPeriod ?? "never" });
+        return json(201, { id: `key-${++minted}`, endpointId: m[1], name: input.name, keyHint: "zz99", key: MINTED_PLAINTEXT, expiresAt: "2027-09-05T00:00:00Z", spendLimitTokens: input.spendLimitTokens ?? null, spendPeriod: input.spendPeriod ?? "never" });
       }
       if (m && m[3] && req.method === "DELETE") return json(204);
       if (m && req.method === "PATCH") return json(200, { ...ALPHA, ...JSON.parse(body) });
@@ -223,6 +224,7 @@ test("codex-app wires config.toml + auth.json and a local picker without changin
     assert.ok(restored.includes("[projects."), "tables preserved");
     assert.equal(existsSync(authPath), false, "codex-app's auth.json removed");
     assert.equal(stub.revocations().length, 2, "key revoked on unset");
+    assert.deepEqual(stub.revocations().map((call) => call.url.split("/").at(-1)), ["key-2", "key-3"], "rotation revokes old ID and unset revokes new ID");
   } finally {
     stub.close();
   }

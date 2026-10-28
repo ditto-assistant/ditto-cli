@@ -1,6 +1,6 @@
-import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { readFile, rm } from "node:fs/promises";
 import { authFilePath } from "./config.js";
+import { writeAtomicProfile, type AtomicProfileIO } from "./atomic-profile.js";
 
 export interface StoredAuth {
   apiKey?: string;
@@ -68,26 +68,22 @@ export async function readStoredKey(): Promise<string | undefined> {
   return key && key.length > 0 ? key : undefined;
 }
 
-export async function writeStoredAuth(auth: StoredAuth): Promise<void> {
+export async function writeStoredAuth(auth: StoredAuth, io?: AtomicProfileIO): Promise<void> {
   const cleaned = auth.apiKey?.trim();
   if (!cleaned) throw new Error("refusing to store empty api key");
   const path = authFilePath();
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  await writeFile(path, `${JSON.stringify({ ...auth, apiKey: cleaned }, null, 2)}\n`, { mode: 0o600 });
-  await chmod(path, 0o600);
+  await writeAtomicProfile(path, `${JSON.stringify({ ...auth, apiKey: cleaned }, null, 2)}\n`, io);
 }
 
 /** Merge fields into the stored auth file without dropping the saved key or agent fields. */
-export async function updateStoredAuth(partial: Partial<StoredAuth>): Promise<StoredAuth> {
+export async function updateStoredAuth(partial: Partial<StoredAuth>, io?: AtomicProfileIO): Promise<StoredAuth> {
   const current = (await readStoredAuth()) ?? {};
   const merged: StoredAuth = { ...current, ...partial };
   for (const [k, v] of Object.entries(partial)) {
     if (v === undefined) delete (merged as Record<string, unknown>)[k];
   }
   const path = authFilePath();
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  await writeFile(path, `${JSON.stringify(merged, null, 2)}\n`, { mode: 0o600 });
-  await chmod(path, 0o600);
+  await writeAtomicProfile(path, `${JSON.stringify(merged, null, 2)}\n`, io);
   return merged;
 }
 
@@ -103,7 +99,7 @@ export async function writeStoredKey(key: string): Promise<void> {
  * fields from a previous `heyditto init` are cleared (the key now belongs to a
  * person, not a claimable agent).
  */
-export async function saveLogin(key: string, extra: { defaultEndpoint?: string } = {}): Promise<StoredAuth> {
+export async function saveLogin(key: string, extra: { defaultEndpoint?: string } = {}, io?: AtomicProfileIO): Promise<StoredAuth> {
   const cleaned = key.trim();
   if (!cleaned) throw new Error("refusing to store empty api key");
   const partial: Partial<StoredAuth> = {
@@ -116,7 +112,7 @@ export async function saveLogin(key: string, extra: { defaultEndpoint?: string }
     createdAt: new Date().toISOString(),
   };
   if (extra.defaultEndpoint) partial.defaultEndpoint = extra.defaultEndpoint;
-  return updateStoredAuth(partial);
+  return updateStoredAuth(partial, io);
 }
 
 /**

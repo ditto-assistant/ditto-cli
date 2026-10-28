@@ -1,5 +1,5 @@
 import { iamLaunchExpiry } from "./iam.js";
-import { chmod, copyFile, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import os from "node:os";
 import path from "node:path";
@@ -7,22 +7,25 @@ import { parse as parseToml } from "smol-toml";
 import { Command, Option } from "commander";
 import {
   type InferenceEndpoint,
+  type InferenceKey,
   type InferenceEndpointsResponse,
   type SelectedEndpoint,
-  createKey,
+  apiFetch,
+  ApiError,
   findEndpoint,
   isEndpointPending,
   listEndpoints,
   revokeKey,
 } from "../api.js";
 import { openInBrowser } from "../browser.js";
-import { endpointURL, resolveApiKey } from "../config.js";
+import { authFilePath, endpointURL, resolveApiKey } from "../config.js";
 import { deviceLogin } from "../device-login.js";
 import { formatActivation } from "../endpoint-format.js";
-import { readStoredAuth, saveLogin, updateStoredAuth } from "../store.js";
+import { readStoredAuth, saveLogin, updateStoredAuth, type StoredAuth } from "../store.js";
 import { err as c } from "../ui.js";
 import { assertEndpointActive, pickEndpoint } from "./launch.js";
 import { DEFAULT_LAUNCH_EXPIRY, KEY_EXPIRIES, type KeyExpiry } from "./types.js";
+import { assertNoCodexRecovery, codexFileSnapshot, withCodexAppTransaction, type CodexAppTransaction, type CodexFileChange, type CodexTransactionHooks } from "./codexapp-transaction.js";
 
 /**
  * `heyditto codex-app`: point the Codex desktop app (ChatGPT.app) at a Ditto
@@ -67,7 +70,9 @@ async function fetchCodexModels(baseUrl: string, key: string): Promise<CodexMode
       signal: AbortSignal.timeout(15_000),
     });
     if (!response.ok) throw new Error(`could not load Ditto's model picker (HTTP ${response.status}); your previous Codex setup is unchanged`);
-    const catalog = await response.json() as CodexModelCatalog;
+    let catalog: CodexModelCatalog;
+    try { catalog = await response.json() as CodexModelCatalog; }
+    catch { throw new Error("the router returned an unreadable model picker; your previous Codex setup is unchanged"); }
     if (!Array.isArray(catalog.models) || catalog.models.some((m) => typeof m?.slug !== "string" || !m.slug.trim())) {
       throw new Error("the router did not return a Codex model catalog; update the router before setting up Desktop. Your previous Codex setup is unchanged");
     }
@@ -195,14 +200,6 @@ async function readMaybe(filePath: string): Promise<string | undefined> {
   }
 }
 
-/** Copies `fromPath` to `toPath` once; never overwrites an earlier backup. */
-async function backupOnce(fromPath: string, toPath: string): Promise<boolean> {
-  if ((await readMaybe(toPath)) !== undefined) return false;
-  if ((await readMaybe(fromPath)) === undefined) return false;
-  await copyFile(fromPath, toPath);
-  return true;
-}
-
 export interface CodexAppOptions {
   endpoint?: string;
   budget?: string;
@@ -214,6 +211,7 @@ export interface CodexAppOptions {
   yes?: boolean;
   dryRun?: boolean;
   unset?: boolean;
+  recover?: boolean;
   showKey?: boolean;
 }
 
@@ -337,7 +335,8 @@ export async function unsetCodexApp(): Promise<void> {
 
   const authRaw = await readMaybe(authPath);
   const kind = classifyAuthJson(authRaw);
-  if ((await readMaybe(authBackupPath)) !== undefined) {
+  const authIsOurs = kind === "api-key" && record.key !== undefined && authRaw === `${JSON.stringify({ OPENAI_API_KEY: record.key }, null, 2)}\n`;
+  if ((await readMaybe(authBackupPath)) !== undefined && authIsOurs) {
     await rename(authBackupPath, authPath);
     log(`restored the previous login from ${authBackupPath}`);
   } else if (kind === "absent") {
@@ -359,8 +358,24 @@ export async function unsetCodexApp(): Promise<void> {
   log("codex-app wiring removed. Restart the Codex app (and any codex CLI session) to pick up the restored login.");
 }
 
-export async function runCodexApp(options: CodexAppOptions): Promise<void> {
-  if (options.unset) return unsetCodexApp();
+export async function runCodexApp(options: CodexAppOptions, hooks?: CodexTransactionHooks): Promise<void> {
+  if (options.recover && options.unset) throw new Error("Choose --recover or --unset");
+  if (options.dryRun) {
+    if (options.unset || options.recover) throw new Error("--unset and --recover cannot be combined with --dry-run");
+    await assertNoCodexRecovery(codexHome());
+    return runCodexAppSetup(options);
+  }
+  // Retain undo for existing Windows setups without creating recovery payloads
+  // whose ACLs cannot be verified by this POSIX-mode implementation.
+  if (process.platform === "win32" && options.unset) { await assertNoCodexRecovery(codexHome()); return unsetCodexApp(); }
+  return withCodexAppTransaction(codexHome(), authFilePath(), (key) => revokeKey(key.endpointId, key.keyId), async (transaction) => {
+    if (options.recover) { log("Local Codex setup recovery is complete. No new key was created."); return; }
+    if (options.unset) return unsetCodexApp();
+    return runCodexAppSetup(options, transaction);
+  }, hooks);
+}
+
+async function runCodexAppSetup(options: CodexAppOptions, transaction?: CodexAppTransaction): Promise<void> {
 
   const home = codexHome();
   const configPath = path.join(home, "config.toml");
@@ -375,17 +390,24 @@ export async function runCodexApp(options: CodexAppOptions): Promise<void> {
   const baseUrl = catalog.baseUrl;
   const budget = parseBudget(options.budget);
   const expiresIn = iamLaunchExpiry(endpoint, parseExpiry(options.expires), options.expiresExplicit ?? options.expires !== undefined);
-  const stored = await readStoredAuth();
+  const [configSnapshot, authSnapshot, catalogSnapshot, stateSnapshot, authBackupSnapshot, configBackupSnapshot] = await Promise.all([
+    codexFileSnapshot(configPath), codexFileSnapshot(authPath), codexFileSnapshot(path.join(home, "ditto-models.json")),
+    codexFileSnapshot(authFilePath()), codexFileSnapshot(authBackupPath), codexFileSnapshot(configBackupPath),
+  ]);
+  let stored: StoredAuth | undefined;
+  try { stored = stateSnapshot.data === undefined ? undefined : JSON.parse(stateSnapshot.data.toString("utf8")) as StoredAuth; }
+  catch { throw new Error("Ditto's saved configuration is not valid JSON; existing files were left alone"); }
+  if (stored !== undefined && (stored === null || typeof stored !== "object" || Array.isArray(stored))) throw new Error("Ditto's saved configuration must be a JSON object; existing files were left alone");
   const record = stored?.codexApp;
-  const configRaw = await readMaybe(configPath);
+  const configRaw = configSnapshot.data?.toString("utf8");
   if (configRaw !== undefined) {
     try {
       parseToml(configRaw);
-    } catch (err) {
-      throw new Error(`${configPath} does not parse as TOML (${err instanceof Error ? err.message : String(err)}); fix it before wiring the app`);
+    } catch {
+      throw new Error(`${configPath} does not parse as TOML; fix it before wiring the app`);
     }
   }
-  const authRaw = await readMaybe(authPath);
+  const authRaw = authSnapshot.data?.toString("utf8");
   const authKind = classifyAuthJson(authRaw);
 
   // Resolve an initial model from the downloaded picker below. This is a
@@ -413,8 +435,8 @@ export async function runCodexApp(options: CodexAppOptions): Promise<void> {
     if (parsed.openai_base_url !== baseUrl || parsed.forced_login_method !== "api" || parsed.model_provider !== "openai" || parsed.model !== defaultModel) {
       throw new Error("the edited file does not carry the new values");
     }
-  } catch (err) {
-    throw new Error(`refusing to write ${configPath}: the edit does not parse back cleanly (${err instanceof Error ? err.message : String(err)})`);
+  } catch {
+    throw new Error(`refusing to write ${configPath}: the edit does not parse back cleanly`);
   }
 
   if (authKind !== "absent" && !options.dryRun && !options.yes) {
@@ -451,77 +473,67 @@ export async function runCodexApp(options: CodexAppOptions): Promise<void> {
   }
 
   const keyName = options.name?.trim() || `cli:codex-app:${os.hostname()}`;
-  const key = await createKey(endpoint.id, {
-    name: keyName,
-    expiresIn,
-    ...(budget !== undefined ? { spendLimitTokens: budget, spendPeriod: "never" } : {}),
-  });
-  if (!key.key) throw new Error("key creation succeeded but no plaintext key was returned");
+  await transaction!.begin();
+  let key: InferenceKey;
+  try {
+    // Retain a returned ID even when plaintext is absent, so that ordinary
+    // malformed-response failure can revoke the newly-created key too.
+    key = await apiFetch<InferenceKey>(`/api/v5/inference/endpoints/${encodeURIComponent(endpoint.id)}/keys`, {
+      method: "POST", body: { name: keyName, expiresIn, ...(budget !== undefined ? { spendLimitTokens: budget, spendPeriod: "never" } : {}) },
+    });
+  } catch (err) {
+    if (err instanceof ApiError) throw new Error(`Could not create the Codex key (HTTP ${err.status}). Check your router permissions and expiry; temporary session keys require a permitted short expiry.`);
+    throw new Error("Could not confirm Codex key creation. Existing files were left alone; a key may have been created on the server. Inspect endpoint keys before retrying.");
+  }
+  if (!key || typeof key.id !== "string" || !key.id) throw new Error("The router did not return a key ID; existing files were left alone. Inspect endpoint keys before retrying.");
+  await transaction!.trackKey({ endpointId: endpoint.id, keyId: key.id });
+  if (typeof key.key !== "string" || !key.key.trim()) throw new Error("key creation succeeded but no plaintext key was returned");
 
   let modelCatalog: CodexModelCatalog | undefined;
-  try {
-    if (options.models !== false) {
-      modelCatalog = await fetchCodexModels(baseUrl, key.key);
-      const currentModel = topLevelString(configRaw, "model");
-      // Keep a user's choice if it is in the new catalog. An endpoint slug
-      // from an earlier setup must not follow them to a different endpoint.
-      const selectedModel = options.model ?? (currentModel && modelCatalog.models.some((m) => m.slug === currentModel) ? currentModel : endpoint.slug);
-      if (!modelCatalog.models.some((m) => m.slug === selectedModel)) throw new Error(`model "${selectedModel}" is not in this router's picker; your previous Codex setup is unchanged`);
-      newConfig = upsertTopLevelString(newConfig, "model", selectedModel);
-    }
-  } catch (err) {
-    // A failed setup must not leave a new long-lived credential behind.
-    await revokeKey(endpoint.id, key.id).catch(() => log("could not revoke the new setup key; revoke it from the endpoint's Keys page"));
-    throw err;
+  if (options.models !== false) {
+    modelCatalog = await fetchCodexModels(baseUrl, key.key);
+    const currentModel = topLevelString(configRaw, "model");
+    // Keep a user's choice if it is in the new catalog. An endpoint slug
+    // from an earlier setup must not follow them to a different endpoint.
+    const selectedModel = options.model ?? (currentModel && modelCatalog.models.some((m) => m.slug === currentModel) ? currentModel : endpoint.slug);
+    if (!modelCatalog.models.some((m) => m.slug === selectedModel)) throw new Error(`model "${selectedModel}" is not in this router's picker; your previous Codex setup is unchanged`);
+    newConfig = upsertTopLevelString(newConfig, "model", selectedModel);
   }
 
-  await mkdir(home, { recursive: true, mode: 0o700 });
   // Back the login up only when it is not codex-app's own: a re-run must not
   // slide our previous key into the .pre-ditto slot, or --unset would later
   // "restore" the codex-app login instead of removing it.
   const authIsOurs = record !== undefined && authKind === "api-key" && authRaw === `${JSON.stringify({ OPENAI_API_KEY: record.key }, null, 2)}\n`;
-  const authBackupKept = authKind !== "absent" && !authIsOurs ? await backupOnce(authPath, authBackupPath) : false;
-  const configBackupKept = configRaw !== undefined ? await backupOnce(configPath, configBackupPath) : false;
-  if (modelCatalog) {
-    await writeFile(catalogPath, `${JSON.stringify(modelCatalog)}\n`, { mode: 0o600 });
-    await chmod(catalogPath, 0o600);
-  }
-  await writeFile(configPath, newConfig, { mode: 0o600 });
-  await writeFile(authPath, `${JSON.stringify({ OPENAI_API_KEY: key.key }, null, 2)}\n`, { mode: 0o600 });
-  await chmod(authPath, 0o600);
-  await chmod(configPath, 0o600);
+  const authBackupKept = authKind !== "absent" && !authIsOurs && authBackupSnapshot.data === undefined;
+  const configBackupKept = configRaw !== undefined && configBackupSnapshot.data === undefined;
+  const newRecord: NonNullable<StoredAuth["codexApp"]> = {
+    endpointId: endpoint.id,
+    endpointSlug: endpoint.slug,
+    keyId: key.id,
+    keyHint: key.keyHint,
+    key: key.key,
+    baseUrl,
+    forcedLogin: "api",
+    modelProvider: "openai",
+    previousModelProvider,
+    model: topLevelString(newConfig, "model"),
+    previousModel,
+    ...(modelCatalog ? { modelCatalog: catalogPath, previousModelCatalog } : {}),
+    previousBaseUrl,
+    previousForcedLogin,
+    wiredAt: new Date().toISOString(),
+  };
+  const changes: CodexFileChange[] = [];
+  if (authBackupKept) changes.push({ name: "authBackup", before: authBackupSnapshot, contents: authSnapshot.data!, mode: 0o600 });
+  if (configBackupKept) changes.push({ name: "configBackup", before: configBackupSnapshot, contents: configSnapshot.data!, mode: 0o600 });
+  if (modelCatalog) changes.push({ name: "catalog", before: catalogSnapshot, contents: `${JSON.stringify(modelCatalog)}\n`, mode: catalogSnapshot.mode ?? 0o600, validate: (text) => { if (!Array.isArray(JSON.parse(text).models)) throw new Error("Invalid staged model picker"); } });
+  changes.push({ name: "config", before: configSnapshot, contents: newConfig, mode: configSnapshot.mode ?? 0o600, validate: (text) => { parseToml(text); } });
+  changes.push({ name: "auth", before: authSnapshot, contents: `${JSON.stringify({ OPENAI_API_KEY: key.key }, null, 2)}\n`, mode: 0o600, validate: (text) => { if (JSON.parse(text).OPENAI_API_KEY !== key.key) throw new Error("Invalid staged Codex login"); } });
+  changes.push({ name: "state", before: stateSnapshot, contents: `${JSON.stringify({ ...stored, codexApp: newRecord }, null, 2)}\n`, mode: 0o600, validate: (text) => { if (JSON.parse(text).codexApp?.keyId !== key.id) throw new Error("Invalid staged setup record"); } });
+  await transaction!.commit(changes, record?.keyId ? { endpointId: record.endpointId, keyId: record.keyId } : undefined);
+  if (record?.keyId && (record.keyId !== key.id || record.endpointId !== endpoint.id)) log("revoked the previous codex-app key");
   if (authBackupKept) log(`previous login backed up to ${c("bold", authBackupPath)}`);
   if (configBackupKept) log(`previous config backed up to ${c("bold", configBackupPath)}`);
-
-  // Rotate: the previous run's key has no reason to outlive its replacement.
-  if (record?.keyId) {
-    try {
-      await revokeKey(record.endpointId, record.keyId);
-      log(`revoked the previous codex-app key …${record.keyHint}`);
-    } catch {
-      log(`${c("yellow", "could not revoke the previous codex-app key")} …${record.keyHint}; it expires on its own`);
-    }
-  }
-
-  await updateStoredAuth({
-    codexApp: {
-      endpointId: endpoint.id,
-      endpointSlug: endpoint.slug,
-      keyId: key.id,
-      keyHint: key.keyHint,
-      key: key.key,
-      baseUrl,
-      forcedLogin: "api",
-      modelProvider: "openai",
-      previousModelProvider,
-      model: topLevelString(newConfig, "model"),
-      previousModel,
-      ...(modelCatalog ? { modelCatalog: catalogPath, previousModelCatalog } : {}),
-      previousBaseUrl,
-      previousForcedLogin,
-      wiredAt: new Date().toISOString(),
-    },
-  });
 
   log(`${c("green", "Connected")} Codex Desktop to ${c(["bold", "cyan"], endpoint.slug)}${endpoint.companyId ? " (company router)" : " (personal router)"}.`);
   if (modelCatalog) log(`${modelCatalog.models.length} models ready in the app's model picker. Your API key is saved — no copying needed.`);
@@ -551,6 +563,7 @@ export function registerCodexAppCommand(program: Command, addExamples: (c: Comma
       .option("--name <label>", "key name shown in the Ditto app (default: cli:codex-app:<hostname>)")
       .option("--show-key", "print the endpoint key after wiring (for pasting into the app's sign-in screen)")
       .option("--unset", "restore the previous config.toml/auth.json and revoke the key")
+      .option("--recover", "recover an interrupted setup without creating a new key")
       .option("-y, --yes", "replace an existing Codex login without asking")
       .option("--dry-run", "print what would be written without touching anything")
       .action(async (options: CodexAppOptions, command: Command) => {
