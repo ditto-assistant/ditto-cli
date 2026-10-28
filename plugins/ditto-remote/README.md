@@ -102,3 +102,15 @@ actual retention policy; no special automatic deletion period is claimed here.
 Source and issue reports: https://github.com/ditto-assistant/ditto-cli.
 Review/security contact ownership must be confirmed by Peyton before submission;
 do not put credentials or private transcripts in public issues.
+
+## Brand asset provenance
+
+`icon.png` is the unchanged canonical sculptural-D app icon from
+`ditto-assistant/brand-kit`, tag `v2026.09.10`, revision
+`8e79ff354ccf08130b1e00ea095599a78a6254fe`, source
+`kit/png/ditto-app-icon-dark-512.png` (512 × 512). SHA256:
+`22f8c0283b513d40fa7599f789d70bc577a500eeaaf6280047f5441d3a973934`.
+No mark was redrawn.
+The listing owner should approve this icon before the first directory save,
+since the current validator warns the initial listing icon is not replaced by
+later plugin updates.

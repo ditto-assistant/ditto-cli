@@ -18,6 +18,9 @@ No submission terms have been accepted and no Anthropic message has been sent.
   proposed namespace only, not a published or verified marketplace).
 - Source: https://github.com/ditto-assistant/ditto-cli, `plugins/ditto-remote`
   template plus `src/remote/plugin-server.ts` and `channel-server.ts` runtime.
+- Icon: unchanged canonical Ditto app icon, brand-kit `v2026.09.10` revision
+  `8e79ff354ccf08130b1e00ea095599a78a6254fe`; **owner review** before the first
+  portal save because the initial listing icon cannot be casually replaced.
 - License: MIT; runtime dependencies and their licenses ship in the bundle.
 - Product: https://heyditto.ai.
 - Support and vulnerability contact: **owner decision**. Confirm an actively

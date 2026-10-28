@@ -14,7 +14,8 @@ than claiming prior server-adapter tests cover the plugin.
 | Automated channel tests | Local `npm run verify`: 415 tests passed on Node 24.22.1, including notification, explicit model receipt/reply, wrong ID, reply bound, deduplication, expiry and stalled notification handling |
 | Plugin startup tests | Existing launcher identity reuse; standalone native registration; no endpoint/key creation on missing selection |
 | Hook executable test | Homebrew opt symlink must resolve to the same Node as the active Cellar executable; otherwise original executable retained |
-| Manifest validation | `claude plugin validate .tmp/ditto-remote-review-1` passed; Claude Code 2.1.312; optional missing-icon warning and marketplace-install-line advice remain for owner review |
+| Manifest validation | Claude Code 2.1.312 validates the manifest; the versioned build supplies its computed version and vendors the canonical 512px icon. Validate the final clean bundle and its local marketplace separately |
+| Bundled MCP protocol | Clean `bc06e2f` runtime probe passed initialization, actual notification transport, explicit acknowledge and reply; this synthetic MCP client is not a native Claude live test |
 | Live packaged-plugin Browser → Claude → reply | Pending root coordinator's visible live test |
 | Ordinary approved `--channels` | Outstanding external approval / consenting org allowlist gate |
 | Revoked-key and two-account backend negatives | Pending final paired QA evidence |

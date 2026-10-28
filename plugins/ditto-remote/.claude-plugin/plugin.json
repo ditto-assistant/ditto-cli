@@ -17,5 +17,6 @@
       "server": "ditto-remote",
       "displayName": "Ditto Remote"
     }
-  ]
+  ],
+  "icon": "./icon.png"
 }
