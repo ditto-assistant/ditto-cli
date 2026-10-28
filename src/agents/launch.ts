@@ -671,6 +671,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   }
   if (!key) throw new Error("internal: key was not minted");
 
+  const explicitLaunchTitle = options.name?.trim() || record?.explicitLaunchTitle;
   const nextRecord: SessionRecord = {
     id: sessionId,
     harness,
@@ -687,6 +688,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     launches: (record?.launches ?? 0) + 1,
     mcpOnly: options.mcpOnly,
     remoteTransport: options.remoteTransport,
+    ...(explicitLaunchTitle ? { explicitLaunchTitle } : {}),
   };
   await writeSession(nextRecord);
 
@@ -694,7 +696,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   const launchRegistration = {
     sessionId, endpointId: endpoint.id, harness: harness === "claude" ? "claude-code" : harness,
     inference: options.mcpOnly ? "native" : "router", transport: options.remoteTransport ?? "cli",
-    title: options.name?.trim() || `${path.basename(cwd)} · ${sessionId.slice(0, 8)}`,
+    title: explicitLaunchTitle || `${path.basename(cwd)} · ${sessionId.slice(0, 8)}`,
     ...(harness === "claude" && harnessSessionId && isUuid(harnessSessionId) ? { nativeSessionId: harnessSessionId } : {}),
   };
   let exitCode: number | null = null;
@@ -706,7 +708,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
       return undefined;
     }) : undefined;
     if (registration) log(`session: ${appBaseURL()}/chat/${encodeURIComponent(registration.threadId)}${registration.kgID ? `?graph=${encodeURIComponent(registration.kgID)}` : ""}`);
-    if (harness === "claude" && harnessSessionId && !options.name?.trim() && registration?.nativeTitleSync === true && registration.threadId) {
+    if (harness === "claude" && harnessSessionId && !explicitLaunchTitle && registration?.nativeTitleSync === true && registration.threadId) {
       const threadId = registration.threadId;
       titleWatcher = watchClaudeSessionTitle({ nativeSessionId: harnessSessionId, cwd, report: async (title, signal) => {
         const result = await apiFetch<{ titleUpdated?: boolean }>("/api/v5/sessions/register", { method: "POST", signal, body: {

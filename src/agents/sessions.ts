@@ -9,6 +9,8 @@ export interface SessionRecord {
   harness: Harness;
   mcpOnly?: boolean;
   remoteTransport?: "cli" | "channels";
+  /** Explicit --name, retained across resumes so native titles cannot replace it. */
+  explicitLaunchTitle?: string;
   endpointId: string;
   endpointSlug: string;
   /** Last key minted for this session; revoked on exit unless --keep-key. */

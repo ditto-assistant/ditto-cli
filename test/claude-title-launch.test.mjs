@@ -61,7 +61,18 @@ test("wrapper title synchronization uses exact registration identity in Router a
       assert.equal(registrations.length,1);
       assert.equal(registrations[0].body.nativeSessionId,native);
       assert.equal(registrations[0].body.sessionId,rawSession);
-      if(name)assert.equal(registrations[0].body.title,"My chosen launch name");
+      if(name){
+        assert.equal(registrations[0].body.title,"My chosen launch name");
+        const saved=JSON.parse(await readFile(path.join(root,"config","sessions",`${rawSession}.json`),"utf8"));
+        assert.equal(saved.explicitLaunchTitle,"My chosen launch name");
+        calls.length=0;
+        // Resume the persisted record without repeating --name. It remains
+        // user-named, and must send no automatic title traffic.
+        await promisify(execFile)(process.execPath,[cli,"claude","--endpoint","alpha","--resume",rawSession,"--mcp-only"],{cwd,env:{...process.env,PATH:bin+path.delimiter+process.env.PATH,DITTO_CONFIG_DIR:path.join(root,"config"),CLAUDE_CONFIG_DIR:home,DITTO_API_BASE:`http://127.0.0.1:${server.address().port}`,DITTO_API_KEY:"ditto_mcp_synthetic",TITLE_MARKER:marker,TITLE_OBSERVED:observed},timeout:15000});
+        assert.equal(calls.filter(c=>c.body?.titleSource).length,0,"saved explicit name must survive a plain resume");
+        assert.equal(calls.find(c=>c.url==="/api/v5/sessions/register").body.title,"My chosen launch name");
+        assert.equal(JSON.parse(await readFile(path.join(root,"config","sessions",`${rawSession}.json`),"utf8")).explicitLaunchTitle,"My chosen launch name");
+      }
     } finally {server.closeAllConnections();await new Promise(resolve=>server.close(resolve));await rm(root,{recursive:true,force:true});}
   });
 });
