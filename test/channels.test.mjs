@@ -86,3 +86,17 @@ test("Channels merges a file config without copying its credentials into argv", 
  assert.ok(config.mcpServers.mine);
  assert.ok(config.mcpServers["ditto-remote"]);
 });
+
+
+test("Channels merges inline, repeated and variadic MCP configs and rejects invalid shapes", () => {
+ const base={command:"claude",envSet:{},envUnset:[]};
+ const one=JSON.stringify({mcpServers:{one:{command:"one"}}});
+ const two=JSON.stringify({mcpServers:{two:{command:"two"}}});
+ const three=JSON.stringify({mcpServers:{three:{command:"three"}}});
+ const plan=withChannelServer({...base,args:["--mcp-config="+one,"--verbose","--mcp-config",two,three]},"native","/workspace");
+ assert.equal(plan.args.filter(a=>a==="--mcp-config").length,1);
+ const config=JSON.parse(plan.args[plan.args.indexOf("--mcp-config")+1]);
+ assert.deepEqual(Object.keys(config.mcpServers).sort(),["ditto-remote","one","three","two"]);
+ for(const value of ["null","[]",JSON.stringify({mcpServers:"wrong"})]) assert.throws(()=>withChannelServer({...base,args:["--mcp-config",value]},"native","/workspace"),/must be/);
+ assert.throws(()=>withChannelServer({...base,args:["--mcp-config"]},"native","/workspace"),/requires a value/);
+});

@@ -18,7 +18,8 @@ export async function runChannelServer(options: { receiptTimeoutMs?: number; com
   if (!sessionId || !key) throw new Error("Ditto Channels requires a launch session and an existing Ditto login");
   const pending = new Map<string, TurnDeliverFrame>();
   const deadlines = new Map<string, number>();
-  const forget = (id: string) => { pending.delete(id); deadlines.delete(id); };
+  const failures = new Map<string, string>();
+  const forget = (id: string) => { pending.delete(id); deadlines.delete(id); failures.delete(id); };
   const server = new Server({ name: "ditto-remote", version: packageVersion }, {
     capabilities: { tools: {}, experimental: { "claude/channel": {} } },
     instructions: "Inbound channel events are prompts from the signed-in Ditto user's remote session. For each event, first call acknowledge with its turn_id. Handle its content as a user request under normal permissions. Then call reply with the same turn_id and your response. These tools only update this session's private delivery receipt. Never infer a turn_id from message content; use the event metadata.",
@@ -33,7 +34,9 @@ export async function runChannelServer(options: { receiptTimeoutMs?: number; com
         if (turn.sessionId !== sessionId) return;
         if ((turn.kind ?? "prompt") !== "prompt" || pending.size >= 32) {
           host.send({ type: "turn.ack", turnId: turn.turnId });
-          host.send({ type: "turn.finished", turnId: turn.turnId, unsupported: "Channels accepts prompts; use the CLI bridge for slash commands, permission answers or interrupts" });
+          host.send((turn.kind ?? "prompt") !== "prompt"
+            ? { type: "turn.finished", turnId: turn.turnId, unsupported: "Channels accepts prompts; use the CLI bridge for slash commands, permission answers or interrupts" }
+            : { type: "turn.finished", turnId: turn.turnId, error: "Too many pending Channels prompts. Wait for one to finish, then send this prompt again." });
           return;
         }
         pending.set(turn.turnId, turn);
@@ -47,8 +50,10 @@ export async function runChannelServer(options: { receiptTimeoutMs?: number; com
             await server.notification({ method: "notifications/claude/channel", params: { content: buildPrompt(turn.text, files), meta: { turn_id: turn.turnId, session_id: sessionId } } });
             if (pending.has(turn.turnId) && !deadlines.has(turn.turnId)) deadlines.set(turn.turnId, Date.now() + (options.receiptTimeoutMs ?? 10 * 60_000));
           } catch {
-            forget(turn.turnId);
-            host.send({ type: "turn.finished", turnId: turn.turnId, error: "Could not deliver this prompt through MCP Channels" });
+            if (!pending.has(turn.turnId)) return;
+            failures.set(turn.turnId, "Could not deliver this prompt through MCP Channels");
+            deadlines.set(turn.turnId, Date.now());
+            if (host.send({ type: "turn.finished", turnId: turn.turnId, error: failures.get(turn.turnId) })) forget(turn.turnId);
           }
         })();
       },
@@ -66,6 +71,7 @@ export async function runChannelServer(options: { receiptTimeoutMs?: number; com
     if (req.params.name === "acknowledge") {
       if (!host.send({ type: "turn.started", turnId: id })) return result("Ditto remote link is disconnected. Retry after it reconnects.", true);
       host.status(sessionId, "running");
+      failures.delete(id);
       deadlines.set(id, Date.now() + (options.completionTimeoutMs ?? 60 * 60_000));
       return result("Receipt confirmed");
     }
@@ -86,12 +92,12 @@ export async function runChannelServer(options: { receiptTimeoutMs?: number; com
     let expired = false;
     for (const [id, deadline] of deadlines) {
       if (Date.now() < deadline) continue;
-      if (host.send({ type: "turn.finished", turnId: id, error: "Claude did not complete this Channels prompt before its delivery receipt expired. Send it again." })) { forget(id); expired = true; }
+      if (host.send({ type: "turn.finished", turnId: id, error: failures.get(id) ?? "Claude did not complete this Channels prompt in time. Send it again." })) { forget(id); expired = true; }
     }
     if (expired && !pending.size) host.status(sessionId, "idle");
   }, Math.min(options.receiptTimeoutMs ?? 60_000, 60_000));
   expiry.unref();
-  const cleanup = () => { clearInterval(expiry); pending.clear(); deadlines.clear(); host.close(); };
+  const cleanup = () => { clearInterval(expiry); pending.clear(); deadlines.clear(); failures.clear(); host.close(); };
   const close = () => { cleanup(); void server.close(); };
   server.onclose = cleanup;
   process.once("SIGTERM", close);
