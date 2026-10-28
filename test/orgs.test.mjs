@@ -116,7 +116,7 @@ function bearerKeyAccepted(method, url) {
   });
 }
 
-function startStub({ companies = [OMNI, KLYRO], canManage = true, canDecide = true, directorySize = 1 } = {}) {
+function startStub({ companies = [OMNI, KLYRO], canManage = true, canDecide = true, directorySize = 1, allowanceError = false } = {}) {
   const calls = [];
   const connections = [structuredClone(LINEAR), structuredClone(INTERNAL)];
   const approvals = structuredClone(APPROVALS);
@@ -138,6 +138,19 @@ function startStub({ companies = [OMNI, KLYRO], canManage = true, canDecide = tr
       const token = (req.headers.authorization ?? "").replace(/^Bearer\s+/, "");
       if (!token.startsWith("ditto_mcp_")) {
         return json(401, { message: "unauthorized", status: 401 });
+      }
+      if (req.url === "/mcp") {
+        if (req.method !== "POST") return json(405, {});
+        if (parsed.method === "initialize") return json(200, { jsonrpc: "2.0", id: parsed.id,
+          result: { protocolVersion: parsed.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "stub", version: "0" } } });
+        if (parsed.method === "tools/call") {
+          assert.equal(parsed.params.name, "get_org_member_allowance");
+          return json(200, { jsonrpc: "2.0", id: parsed.id, result: {
+            content: [{ type: "text", text: allowanceError ? "Your current role does not permit this action." : JSON.stringify({ exists: true, enabled: true, limit_tokens: 1000, used_tokens: 200 }) }],
+            ...(allowanceError ? { isError: true } : {}),
+          } });
+        }
+        return json(202);
       }
       if (!bearerKeyAccepted(req.method, req.url)) {
         return json(401, { message: "unauthorized", status: 401 });
@@ -589,4 +602,48 @@ test("role confirmations respect text and JSON output",async()=>{
   const changed=await run(stub.base,["orgs","set-role","member-one","member","--org","omni-aura"]);
   assert.equal(changed.status,0,changed.stderr);assert.match(changed.stdout,/Changed.*viewer -> member/);
  }finally{stub.close();}
+});
+
+
+test("orgs allowance resolves the exact member and reads only through MCP", async () => {
+  const stub = await startStub();
+  try {
+    const r = await run(stub.base, ["orgs", "allowance", "teammate@example.com", "--org", "omni-aura", "--output", "json"]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(JSON.parse(r.stdout).limit_tokens, 1000);
+    const call = stub.calls.find(c => c.body?.method === "tools/call");
+    assert.deepEqual(call.body.params.arguments, { org: OMNI.id, member_uid: "user-0" });
+    assert(stub.calls.every(c => c.method === "GET" || c.url === "/mcp"));
+    assert(!stub.calls.some(c => c.url.includes("/credits")));
+  } finally { stub.close(); }
+});
+
+test("orgs allowance defaults to yourself without resolving the directory", async () => {
+  const stub = await startStub();
+  try {
+    const r = await run(stub.base, ["orgs", "allowance", "--org", "omni-aura", "--output", "raw"]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(JSON.parse(r.stdout).content[0].type, "text");
+    assert.deepEqual(stub.calls.find(c => c.body?.method === "tools/call").body.params.arguments, { org: OMNI.id });
+    assert(!stub.calls.some(c => c.url.includes("/members")));
+  } finally { stub.close(); }
+});
+
+test("orgs allowance reports MCP denial with a failing exit code", async () => {
+  const stub = await startStub({ allowanceError: true });
+  try {
+    const r = await run(stub.base, ["orgs", "allowance", "--org", "omni-aura", "--output", "json"]);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /current role does not permit/);
+    assert.equal(r.stdout, "");
+  } finally { stub.close(); }
+});
+
+test("orgs allowance refuses an unresolved member before calling MCP", async () => {
+  const stub = await startStub();
+  try {
+    const r = await run(stub.base, ["orgs", "allowance", "nobody@example.com", "--org", "omni-aura"]);
+    assert.equal(r.status, 1);
+    assert(!stub.calls.some(c => c.url === "/mcp"));
+  } finally { stub.close(); }
 });

@@ -2,6 +2,7 @@ import type { Command, Option } from "commander";
 import {
   approveToolApproval,
   type Company,
+  type CompanyMember,
   createMCPConnection,
   deleteMCPConnection,
   type EndpointTool,
@@ -173,20 +174,12 @@ export async function cmdOrgMembers(options: ScopeOptions): Promise<void> {
   }
 }
 
-export async function cmdOrgMemberRole(
-  member: string,
-  role: string,
-  options: ScopeOptions & { expectedRole?: string; dryRun?: boolean },
-): Promise<void> {
-  if (!["owner", "admin", "member", "viewer"].includes(role)) {
-    throw new Error("role must be owner, admin, member or viewer");
-  }
-  const company = await requireOrg(options);
+async function resolveOrgMember(company: Company, member: string): Promise<CompanyMember> {
   const needle = member.trim().replace(/^@/, "").toLowerCase();
   if (!needle) throw new Error("provide a membership id, user id, email or @handle");
   const members = await listCompanyMembers(company.id);
   if (members.length >= 2000) {
-    throw new Error("directory may be truncated at 2000 members; cannot safely resolve a role change");
+    throw new Error("directory may be truncated at 2000 members; cannot safely resolve a member");
   }
   const matches = members.filter((m) =>
     [m.id, m.userUid, m.email, m.handle].some((v) => v?.toLowerCase() === needle),
@@ -196,7 +189,32 @@ export async function cmdOrgMemberRole(
       ? "ambiguous member; use the exact membership id"
       : "member not found in the visible directory; use orgs members to check the organization");
   }
-  const target = matches[0]!;
+  return matches[0]!;
+}
+
+type OrgToolCaller = (name: string, args: Record<string, unknown>, output?: string) => Promise<void>;
+
+export async function cmdOrgAllowance(
+  member: string | undefined,
+  options: ScopeOptions,
+  callTool: OrgToolCaller,
+): Promise<void> {
+  const company = await requireOrg(options);
+  const args: Record<string, unknown> = { org: company.id };
+  if (member !== undefined) args.member_uid = (await resolveOrgMember(company, member)).userUid;
+  await callTool("get_org_member_allowance", args, options.output);
+}
+
+export async function cmdOrgMemberRole(
+  member: string,
+  role: string,
+  options: ScopeOptions & { expectedRole?: string; dryRun?: boolean },
+): Promise<void> {
+  if (!["owner", "admin", "member", "viewer"].includes(role)) {
+    throw new Error("role must be owner, admin, member or viewer");
+  }
+  const company = await requireOrg(options);
+  const target = await resolveOrgMember(company, member);
   if (options.expectedRole && options.expectedRole !== target.role) {
     throw new Error(`expected role ${options.expectedRole}, found ${target.role}; inspect the membership before retrying`);
   }
@@ -564,6 +582,7 @@ export function registerOrgCommands(
   addExamples: (c: Command, ex: string) => Command,
   outputOption: () => Option,
   orgOption: () => Option,
+  callTool: OrgToolCaller,
 ): void {
   const orgs = program
     .command("orgs")
@@ -592,6 +611,10 @@ export function registerOrgCommands(
 
   orgs.command("members").description("list an organization's member directory")
     .addOption(orgOption()).addOption(outputOption()).action(cmdOrgMembers);
+  orgs.command("allowance").description("inspect your spending allowance, or another member's as an org manager")
+    .argument("[member]", "exact membership id, user id, email or @handle; omit for yourself")
+    .addOption(orgOption()).addOption(outputOption())
+    .action((member: string | undefined, options: ScopeOptions) => cmdOrgAllowance(member, options, callTool));
   orgs.command("set-role").description("change one member's role (server enforces manager and last-owner protections)")
     .argument("<member>", "exact membership id, user id, email or @handle")
     .argument("<role>", "owner, admin, member or viewer")
