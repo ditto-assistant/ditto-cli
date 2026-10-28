@@ -1,4 +1,4 @@
-import { open, readFile, readdir, stat } from "node:fs/promises";
+import { open, readdir, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { canonicalCwd } from "../teleport/harness.js";
@@ -99,6 +99,55 @@ function promptText(message: unknown): string | undefined {
 
 const str = (v: unknown): string | undefined => (typeof v === "string" && v.trim() ? v.trim() : undefined);
 
+export type ClaudeTitleSource = "claude-ai-title" | "claude-custom-title";
+export interface ClaudeSessionTitle {
+  nativeSessionId: string;
+  title: string;
+  titleSource: ClaudeTitleSource;
+}
+
+/** Shared native title precedence for resume display and remote title sync. */
+async function nativeTitle(file: string, id: string, lines: Array<Record<string, unknown>>, strictSidecar = false): Promise<{ title: string; titleSource: ClaudeTitleSource } | undefined> {
+  let customTitle: string | undefined;
+  let aiTitle: string | undefined;
+  for (const line of lines) {
+    // Do not adopt a title line copied from a different native conversation.
+    if (line.sessionId !== undefined && (typeof line.sessionId !== "string" || line.sessionId.toLowerCase() !== id.toLowerCase())) continue;
+    if (line.type === "custom-title") customTitle = str(line.customTitle) ?? customTitle;
+    else if (line.type === "ai-title") aiTitle = str(line.aiTitle) ?? aiTitle;
+  }
+  try {
+    const sidecar = path.join(path.dirname(file), id, "custom-title.json");
+    const info = await stat(sidecar);
+    if (info.size > HEAD_BYTES) throw new Error("Claude title sidecar exceeds its metadata read bound");
+    const data = await readSlice(sidecar, info.size);
+    const parsed = JSON.parse(data.head) as { customTitle?: unknown };
+    customTitle = str(parsed.customTitle) ?? customTitle;
+  } catch (error) {
+    // A partially-written sidecar must not briefly downgrade a custom title.
+    if (strictSidecar && (error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  if (customTitle) return { title: customTitle, titleSource: "claude-custom-title" };
+  if (aiTitle) return { title: aiTitle, titleSource: "claude-ai-title" };
+  return undefined;
+}
+
+/** Reads only a verified native session's title metadata. Head/tail reads are
+ * bounded to 320 KiB; a custom-title sidecar is bounded to 64 KiB. No prompt,
+ * transcript body or local path is returned to the synchronization caller.
+ */
+export async function readClaudeSessionTitle(file: string, nativeSessionId: string): Promise<ClaudeSessionTitle | undefined> {
+  if (!isUuid(nativeSessionId) || path.basename(file) !== `${nativeSessionId}.jsonl`) return undefined;
+  const info = await stat(file);
+  if (!info.isFile()) return undefined;
+  const { head, tail } = await readSlice(file, info.size);
+  // Avoid decoding prompt/assistant JSON unless it could be a title record.
+  const titleLines = (head + "\n" + tail).split("\n").filter(line => line.includes('"ai-title"') || line.includes('"custom-title"')).join("\n");
+  const title = await nativeTitle(file, nativeSessionId, jsonLines(titleLines), true);
+  if (!title || Array.from(title.title).length > 160 || /[\p{Cc}\p{Zl}\p{Zp}]/u.test(title.title)) return undefined;
+  return { nativeSessionId, ...title };
+}
+
 /** Reads one transcript's metadata; undefined when it has no conversation in it. */
 export async function readTranscript(file: string): Promise<ClaudeTranscript | undefined> {
   let info;
@@ -111,8 +160,6 @@ export async function readTranscript(file: string): Promise<ClaudeTranscript | u
   const id = path.basename(file, ".jsonl");
   const { head, tail } = await readSlice(file, info.size);
   const lines = [...jsonLines(head), ...jsonLines(tail)];
-  let customTitle: string | undefined;
-  let aiTitle: string | undefined;
   let lastPrompt: string | undefined;
   let firstPrompt: string | undefined;
   let cwd: string | undefined;
@@ -120,9 +167,7 @@ export async function readTranscript(file: string): Promise<ClaudeTranscript | u
   let gitBranch: string | undefined;
   let spoke = false;
   for (const l of lines) {
-    if (l.type === "custom-title") customTitle = str(l.customTitle) ?? customTitle;
-    else if (l.type === "ai-title") aiTitle = str(l.aiTitle) ?? aiTitle;
-    else if (l.type === "last-prompt") lastPrompt = str(l.lastPrompt) ?? lastPrompt;
+    if (l.type === "last-prompt") lastPrompt = str(l.lastPrompt) ?? lastPrompt;
     else if (l.type === "user" || l.type === "assistant") {
       spoke = true;
       if (l.type === "user" && !firstPrompt) firstPrompt = promptText(l.message);
@@ -131,19 +176,13 @@ export async function readTranscript(file: string): Promise<ClaudeTranscript | u
     entrypoint ??= str(l.entrypoint);
     gitBranch = str(l.gitBranch) ?? gitBranch;
   }
-  // Newer Claude builds also keep the /rename title beside the transcript.
-  try {
-    const sidecar = JSON.parse(await readFile(path.join(path.dirname(file), id, "custom-title.json"), "utf8")) as { customTitle?: unknown };
-    customTitle = str(sidecar.customTitle) ?? customTitle;
-  } catch {
-    /* no sidecar */
-  }
+  const title = await nativeTitle(file, id, lines);
   if (!spoke && !lastPrompt) return undefined;
   return {
     id,
     file,
     cwd,
-    title: customTitle ?? aiTitle,
+    title: title?.title,
     lastPrompt,
     firstPrompt,
     entrypoint,
