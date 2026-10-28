@@ -494,3 +494,13 @@ test("pool show distinguishes unreadable policies without claiming a specific ca
   assert.equal(result.code, 0, result.stderr); assert.equal(JSON.parse(result.stdout).pool, null); assert.match(JSON.parse(result.stdout).note, /invalid or uses/);
   assert.ok(f.calls.every(call => call.method === "GET"));
 });
+
+test("provider commands print canonical lowercase saved UUIDs", async t => {
+  const f = await fixture(t), lower = "abcdefab-cdef-4abc-8def-abcdefabcdef", upper = lower.toUpperCase();
+  const shown = await f.run(["provider-keys", "models", upper, "--personal"]);
+  assert.equal(shown.code, 0, shown.stderr); assert.equal(JSON.parse(shown.stdout).keyId, lower);
+  const removed = await f.run(["provider-keys", "remove", upper, "--personal", "--yes"]);
+  assert.equal(removed.code, 0, removed.stderr); assert.equal(JSON.parse(removed.stdout).removed, lower);
+  assert.ok(f.calls.some(call => call.url.endsWith(`/${lower}/inspect`)));
+  assert.ok(f.calls.some(call => call.method === "DELETE" && call.url.endsWith(`/${lower}`)));
+});

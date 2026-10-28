@@ -26,6 +26,13 @@ test("metadata redaction handles quote and trailing-backslash keys without chang
   }
 });
 
+test("overlapping credentials redact longest-first across every known secret and encoding", () => {
+  for (const keys of [["pass", "password"], ["password", "pass"], ["pass", "password", "password/long"]]) {
+    assert.equal(redactKnownSecrets("password password/long pass", keys), keys.length === 3 ? "[redacted] [redacted] [redacted]" : "[redacted] [redacted]/long [redacted]");
+    assert.equal(redactKnownSecrets("password%2Flong", ["pass", "password/long"]), "[redacted]");
+  }
+});
+
 test("Windows gcloud batch invocation quotes bounded scope tokens and rejects shell expansion", () => {
   const args = ["auth", "list", "--format=json(account,status)", "--account", "qa+test@example.com"];
   const win = gcloudInvocation(args, "win32");

@@ -1,11 +1,12 @@
 /** Redact every exact occurrence, including JSON-escaped and URL-encoded forms. */
 export function redactKnownSecrets(text: string, secrets: Array<string | undefined>): string {
   let safe = text;
+  const forms = new Set<string>();
   for (const secret of secrets) {
     if (!secret) continue;
-    const forms = [secret, JSON.stringify(secret).slice(1, -1), encodeURIComponent(secret)];
-    for (const value of [...new Set(forms)].sort((a, b) => b.length - a.length)) safe = safe.split(value).join("[redacted]");
+    for (const form of [secret, JSON.stringify(secret).slice(1, -1), encodeURIComponent(secret)]) forms.add(form);
   }
+  for (const value of [...forms].sort((a, b) => b.length - a.length)) safe = safe.split(value).join("[redacted]");
   return safe;
 }
 

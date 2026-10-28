@@ -120,7 +120,7 @@ export function registerProviderKeyCommands(program: Command, outputOption: () =
   addScope(keys.command("set").description("enable, disable or reprioritize a saved key; optionally rotate from a local secret reference").argument("<key-id>", "saved key UUID, never the credential"), outputOption)
     .option("--enable", "make this key eligible for existing normal BYOK endpoints using automatic/all-key selection; not limited to private pools").option("--disable", "disable this saved key").option("--priority <number>", "priority, an integer from 1 to 10000").option("--rotate-stdin", "replace the key from piped stdin; never printed").option("--rotate-key-env <name>", "replace the key from an existing local env reference; never print its value")
     .action(async (id: string, options: ScopeOptions & { enable?: boolean; disable?: boolean; priority?: string; rotateStdin?: boolean; rotateKeyEnv?: string }) => {
-      requireProviderKeyId(id);
+      id = requireProviderKeyId(id);
       if (options.enable && options.disable) throw new Error("choose --enable or --disable");
       if (!options.enable && !options.disable && options.priority === undefined && !options.rotateStdin && options.rotateKeyEnv === undefined) throw new Error("set needs --enable, --disable, --priority, --rotate-stdin or --rotate-key-env");
       const { companyId, scope } = await providerKeyScope(options);
@@ -131,7 +131,7 @@ export function registerProviderKeyCommands(program: Command, outputOption: () =
     });
   addScope(keys.command("remove").description("delete a saved provider key; existing routes may stop working").argument("<key-id>", "saved key UUID"), outputOption).option("--yes", "confirm removal without a terminal prompt")
     .action(async (id: string, options: ScopeOptions & { yes?: boolean }) => {
-      requireProviderKeyId(id);
+      id = requireProviderKeyId(id);
       const { companyId, scope } = await providerKeyScope(options);
       if (!options.yes) throw new Error("removing a saved provider key requires --yes; existing routes using it may stop working");
       await removeProviderKey(id, companyId);
@@ -140,7 +140,7 @@ export function registerProviderKeyCommands(program: Command, outputOption: () =
   for (const name of ["inspect", "models", "balance"]) {
     addScope(keys.command(name).description(name === "inspect" ? "check one saved key, model listing and balance without generation" : name === "models" ? "list models advertised for one saved key, without generation" : "check a supported balance API; unsupported is not a zero balance").argument("<key-id>", "saved key UUID"), outputOption)
       .action(async (id: string, options: ScopeOptions) => {
-        requireProviderKeyId(id);
+        id = requireProviderKeyId(id);
         const { companyId, scope } = await providerKeyScope(options);
         const result = await inspectProviderKey(id, companyId);
         print({ scope, ...(name === "inspect" ? result : { keyId: id, [name]: result[name] }) }, options.output);
@@ -158,7 +158,7 @@ export function registerProviderKeyCommands(program: Command, outputOption: () =
     .option("--confirm-spend", "confirm this exact quoted run can incur supplier charges")
     .option("--dry-run", "ask the server to prepare a quote plan; make no generation calls")
     .action(async (id: string, options: ScopeOptions & { model: string[]; requests: string; concurrency: string; requestsPerMinute: string; maxOutputTokens: string; maxCostUsd: string; quoteFile?: string; acceptEstimate?: boolean; confirmSpend?: boolean; dryRun?: boolean }) => {
-      requireProviderKeyId(id);
+      id = requireProviderKeyId(id);
       const requests = boundedInteger(options.requests, "--requests", 1, 20), concurrency = boundedInteger(options.concurrency, "--concurrency", 1, 4), maxOutputTokens = boundedInteger(options.maxOutputTokens, "--max-output-tokens", 1, 32);
       const requestsPerMinute = boundedInteger(options.requestsPerMinute, "--requests-per-minute", 1, 6000);
       const models = [...new Set(options.model.map(id => id.trim()))];
