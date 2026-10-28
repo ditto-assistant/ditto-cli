@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFile, mkdir, mkdtemp, readFile, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, rename, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -179,7 +179,9 @@ test("failed global scans retry on error backoff instead of consuming the scan t
   await assert.rejects(stat(movedFile),{code:"ELOOP"});
   const watcher=watchClaudeSessionTitle({nativeSessionId:native,cwd:f.cwd,intervalMs:10,discoveryIntervalMs:10000,retryBaseMs:10,retryMaxMs:10,report:async value=>{reports.push(value);}});
   t.after(()=>watcher.stop());await sleep(50);assert.equal(reports.length,0);
-  await rm(movedFile);await writeFile(movedFile,line(ai("Recovered moved title")));
+  const replacement=path.join(moved,"replacement.tmp");
+  await writeFile(replacement,line(ai("Recovered moved title")));
+  await rename(replacement,movedFile); // No transient ENOENT scan can consume the throttle.
   await eventually(()=>reports.length===1);
   assert.equal(reports[0].title,"Recovered moved title");
 });
