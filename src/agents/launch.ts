@@ -95,6 +95,13 @@ export interface LaunchOptions {
   remoteTransport?: "cli" | "channels";
 }
 
+/** Explicit flags (or resumed choices) win over repo/cloud launch defaults. */
+export function resolveClaudeLaunchDefaults(options: LaunchOptions, defaults: Record<string, unknown> = {}): LaunchOptions {
+  const mcpOnly = options.mcpOnly ?? (defaults.claude_inference === "native");
+  const remoteTransport = options.remoteTransport ?? (mcpOnly && defaults.claude_remote_transport === "channels" ? "channels" : "cli");
+  return { ...options, mcpOnly, remoteTransport };
+}
+
 const DRY_RUN_KEY = "ditto_inf_<minted-at-launch>";
 
 /**
@@ -492,10 +499,12 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   // It is read from the directory the harness will run in, which a transcript
   // resume or --cwd may have moved away from process.cwd().
   let endpoint: InferenceEndpoint | undefined;
+  let repoLaunchDefaults: Record<string, unknown> | undefined;
   if (!requestedEndpoint?.trim()) {
     const profile = await repoDefaultProfile(cwd);
     if (profile) {
       endpoint = await findProfileEndpoint(profile, catalog.endpoints);
+      repoLaunchDefaults = profile.launchDefaults;
       if (!endpoint) {
         throw new Error(
           `this repository's .ditto profile "${profile.name}" has no endpoint in ${profile.owner.kind === "org" ? `@${profile.owner.org}` : "your account"} yet.\n` +
@@ -506,6 +515,10 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     }
   }
   endpoint ??= await resolveEndpoint(requestedEndpoint, catalog.endpoints, selected);
+  if (harness === "claude") {
+    endpoint = { ...endpoint, providerOptions: { ...endpoint.providerOptions, ...repoLaunchDefaults } };
+    options = resolveClaudeLaunchDefaults(options, endpoint.providerOptions);
+  }
   if (!options.mcpOnly) await assertEndpointActive(endpoint);
   if (options.mcpOnly && (harness !== "claude" || options.mcp === false)) throw new Error("--mcp-only requires Claude Code with MCP tools enabled");
   if (options.remoteTransport === "channels" && (!options.mcpOnly || options.headless || remoteMode(options) === "off" || options.prompt !== undefined)) throw new Error("MCP Channels requires an interactive `heyditto claude --mcp-only` session with remote control enabled");

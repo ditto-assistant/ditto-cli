@@ -1278,3 +1278,22 @@ commands, remote permission answers, interruption and Teleport checkpoints;
 Channels cannot perform those terminal operations. Senders authenticate through
 the same owned-session host bridge as CLI remote control. Redelivery of a turn
 ID does not inject a second prompt.
+
+Claude Code launch defaults can be saved on an endpoint in the developer console
+or in a repository endpoint profile:
+
+```toml
+[settings]
+claude_inference = "native" # native Claude account; "router" uses Ditto Router
+claude_remote_transport = "channels" # "cli" uses the terminal bridge
+```
+
+`heyditto claude` reads the repository's default endpoint profile; `--endpoint`
+selects the cloud profile directly. Repository launch settings override cloud
+settings without requiring `repo apply`; `repo apply` also saves them to the
+cloud. Explicit `--mcp-only`, `--no-mcp-only`, and `--remote-transport` flags
+win for one launch. Resuming retains the previous session's choices. Channels
+requires interactive native Claude Code, an eligible signed-in account and an
+organization that allows Channels. The CLI attaches `ditto-remote` and adds the
+development channel flag in one launch; Claude's experimental-channel
+confirmation still appears. Router inference defaults to the CLI bridge.

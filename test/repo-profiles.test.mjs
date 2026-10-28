@@ -460,3 +460,33 @@ test("a .ditto directory that links out of the repository is refused", async () 
     stub.close();
   }
 });
+
+test("Claude launch defaults: repo overrides cloud, endpoint flag bypasses repo, flags override both", async () => {
+  const stub = await startStub([
+    { id: "ep-org", slug: "ditto-dev", companyId: ORG.id, model: "m", status: "active", providerOptions: { claude_inference: "router", claude_remote_transport: "cli" } },
+    { id: "ep-native", slug: "native", model: "m", status: "active", providerOptions: { claude_inference: "native", claude_remote_transport: "channels" } },
+  ]);
+  const dir = await repo({ ".ditto/config.toml": CONFIG, ".ditto/endpoints/dev.toml": ORG_PROFILE + 'claude_inference = "native"\nclaude_remote_transport = "channels"\n', ".ditto/prompts/claude.md": PROMPT });
+  try {
+    for (const args of [[], ["--endpoint", "native"]]) {
+      const out = await run(["claude", "--dry-run", ...args], stub.base, dir);
+      assert.equal(out.status, 0, out.stderr);
+      const plan = JSON.parse(out.stdout);
+      assert.ok(!plan.env.ANTHROPIC_BASE_URL, "native launch must not route inference");
+      assert.equal(plan.inference, "native");
+      assert.equal(plan.remoteTransport, "channels");
+    }
+    const overridden = await run(["claude", "--dry-run", "--no-mcp-only"], stub.base, dir);
+    assert.equal(overridden.status, 0, overridden.stderr);
+    const plan = JSON.parse(overridden.stdout);
+    assert.ok(plan.env.ANTHROPIC_BASE_URL);
+    assert.ok(!plan.args.includes("--dangerously-load-development-channels"));
+    const cliTransport = await run(["claude", "--dry-run", "--remote-transport", "cli"], stub.base, dir);
+    assert.equal(cliTransport.status, 0, cliTransport.stderr);
+    assert.equal(JSON.parse(cliTransport.stdout).remoteTransport, "cli");
+    const applied = await run(["repo", "apply"], stub.base, dir);
+    assert.equal(applied.status, 0, applied.stderr);
+    assert.equal(stub.writes.at(-1).body.providerOptions.claude_inference, "native");
+    assert.equal(stub.writes.at(-1).body.providerOptions.claude_remote_transport, "channels");
+  } finally { stub.close(); }
+});

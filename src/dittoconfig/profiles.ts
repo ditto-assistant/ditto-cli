@@ -166,11 +166,18 @@ export async function profileBody(decl: EndpointDecl, profileDir: string): Promi
     if (v !== "mcp" && v !== "router") throw new ProfileError(`endpoints.${decl.name}.settings.claude_tool_surface must be "mcp" or "router"`);
     options.claude_tool_surface = v;
   }
+  for (const [key, choices] of Object.entries({ claude_inference: ["router", "native"], claude_remote_transport: ["cli", "channels"] })) {
+    const value = settings[key];
+    delete settings[key];
+    if (value === undefined) continue;
+    if (typeof value !== "string" || !choices.includes(value)) throw new ProfileError(`endpoints.${decl.name}.settings.${key} must be ${choices.join(" or ")}`);
+    options[key] = value;
+  }
   for (const [key, value] of Object.entries(settings)) {
     const field = SETTING_FIELDS[key];
     if (!field) {
       throw new ProfileError(
-        `endpoints.${decl.name}.settings.${key}: unknown setting. Known: owner, claude_prompt, codex_prompt, claude_native_tool_blocks, claude_tool_surface, ${Object.keys(SETTING_FIELDS).join(", ")}`,
+        `endpoints.${decl.name}.settings.${key}: unknown setting. Known: owner, claude_prompt, codex_prompt, claude_native_tool_blocks, claude_tool_surface, claude_inference, claude_remote_transport, ${Object.keys(SETTING_FIELDS).join(", ")}`,
       );
     }
     body[field] = field === "toolDeny" ? denyRules(decl.name, value) : value;
@@ -311,6 +318,7 @@ export interface RepoProfile {
   slug: string;
   owner: ProfileOwner;
   repoDir: string;
+  launchDefaults?: Record<string, unknown>;
 }
 
 /**
@@ -329,7 +337,7 @@ export async function repoDefaultProfile(startDir: string): Promise<RepoProfile 
       if (!wanted) return undefined;
       const decl = eff.endpoints[wanted];
       if (!decl) return { name: wanted, slug: wanted, owner: { kind: "personal" }, repoDir: dir };
-      return { name: decl.name, slug: decl.slug ?? decl.name, owner: parseOwner((decl.settings as Record<string, unknown> | undefined)?.owner, decl.name), repoDir: dir };
+      return { name: decl.name, slug: decl.slug ?? decl.name, owner: parseOwner((decl.settings as Record<string, unknown> | undefined)?.owner, decl.name), repoDir: dir, launchDefaults: claudeLaunchDefaults(decl) };
     } catch (e) {
       if (!(e instanceof DittoConfigNotFound)) throw e;
     }
@@ -345,4 +353,16 @@ export async function findProfileEndpoint(profile: RepoProfile, endpoints: Infer
   const org = (await listCompanies()).find((c) => c.slug === profile.owner.org || c.id === profile.owner.org);
   if (!org) throw new ProfileError(`this repository's profile ${profile.name} requires organization @${profile.owner.org}, and you are not a member of it. Pass --endpoint to use another.`);
   return endpoints.find((e) => e.slug === profile.slug && e.companyId === org.id);
+}
+
+/** Read only launch settings; launching must not require reading prompt files or applying the profile. */
+function claudeLaunchDefaults(decl: EndpointDecl): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, choices] of Object.entries({ claude_inference: ["router", "native"], claude_remote_transport: ["cli", "channels"], claude_tool_surface: ["router", "mcp"] })) {
+    const value = (decl.settings as Record<string, unknown> | undefined)?.[key];
+    if (value === undefined) continue;
+    if (typeof value !== "string" || !choices.includes(value)) throw new ProfileError(`endpoints.${decl.name}.settings.${key} must be ${choices.join(" or ")}`);
+    out[key] = value;
+  }
+  return out;
 }

@@ -1441,6 +1441,7 @@ export function registerHarnessCommands(program: Command, addExamples: (c: Comma
       cmd.option("--mcp", "attach the endpoint's tools as Claude Code MCP servers, one per app (default unless the endpoint sets claude_tool_surface = \"router\")");
       cmd.option("--no-mcp", "keep the endpoint's tools on the router for this session (Code Mode / injected tools)");
       cmd.option("--mcp-only", "use your native Claude Code account for inference; Ditto supplies only selected MCP tools and remote control");
+      cmd.option("--no-mcp-only", "use Ditto Router inference for this launch, overriding the saved native-account default");
       cmd.addOption(new Option("--remote-transport <transport>", "remote prompt delivery: CLI terminal bridge (default) or MCP Channels (native account only, research preview)").choices(["cli", "channels"]));
     }
     cmd.action(async (args: string[], options) => {
