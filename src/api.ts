@@ -64,7 +64,7 @@ export async function apiFetch<T>(
       response.status === 401
         ? " (is the saved key valid? run `heyditto login`)"
         : response.status === 403
-          ? " (the key is not allowed to manage inference endpoints)"
+          ? " (your account or key is not allowed to perform this action)"
           : "";
     throw new ApiError(
       `${init.method ?? "GET"} ${path} failed: HTTP ${response.status}${detail ? ` - ${detail.slice(0, 300)}` : ""}${hint}`,
@@ -833,6 +833,28 @@ export interface Company {
 export async function listCompanies(): Promise<Company[]> {
   const out = await apiFetch<{ companies?: Company[] }>("/api/v5/companies");
   return out.companies ?? [];
+}
+
+export interface CompanyMember {
+  id: string;
+  userUid: string;
+  email?: string;
+  name?: string;
+  handle?: string;
+  role: string;
+  status: string;
+}
+
+export async function listCompanyMembers(companyId: string): Promise<CompanyMember[]> {
+  // The API caps this directory at 2000; callers must treat a full page as possibly incomplete.
+  const out = await apiFetch<{ members: CompanyMember[] }>(`/api/v5/companies/${encodeURIComponent(companyId)}/members?limit=2000`);
+  return out.members;
+}
+
+export function setCompanyMemberRole(companyId: string, memberId: string, role: string): Promise<CompanyMember> {
+  return apiFetch(`/api/v5/companies/${encodeURIComponent(companyId)}/members/${encodeURIComponent(memberId)}`, {
+    method: "PATCH", body: { role },
+  });
 }
 
 /**

@@ -6,6 +6,8 @@ import {
   deleteMCPConnection,
   type EndpointTool,
   listCompanies,
+  listCompanyMembers,
+  setCompanyMemberRole,
   listEndpointTools,
   listMCPConnections,
   listToolApprovals,
@@ -153,6 +155,65 @@ export async function cmdOrgClear(options: ScopeOptions): Promise<void> {
     return;
   }
   process.stderr.write("Cleared the default organization.\n");
+}
+
+export async function cmdOrgMembers(options: ScopeOptions): Promise<void> {
+  const company = await requireOrg(options);
+  const members = await listCompanyMembers(company.id);
+  if (isJSON(options)) {
+    writeJSON({ company: company.slug, members, possiblyTruncated: members.length >= 2000 });
+    return;
+  }
+  printTable(
+    ["ID", "HANDLE", "EMAIL", "ROLE", "STATUS"],
+    members.map((m) => [m.id, m.handle ?? "", m.email ?? "", m.role, m.status]),
+  );
+  if (members.length >= 2000) {
+    process.stderr.write("Directory may be truncated at 2000 members.\n");
+  }
+}
+
+export async function cmdOrgMemberRole(
+  member: string,
+  role: string,
+  options: ScopeOptions & { expectedRole?: string; dryRun?: boolean },
+): Promise<void> {
+  if (!["owner", "admin", "member", "viewer"].includes(role)) {
+    throw new Error("role must be owner, admin, member or viewer");
+  }
+  const company = await requireOrg(options);
+  const needle = member.trim().replace(/^@/, "").toLowerCase();
+  if (!needle) throw new Error("provide a membership id, user id, email or @handle");
+  const members = await listCompanyMembers(company.id);
+  if (members.length >= 2000) {
+    throw new Error("directory may be truncated at 2000 members; cannot safely resolve a role change");
+  }
+  const matches = members.filter((m) =>
+    [m.id, m.userUid, m.email, m.handle].some((v) => v?.toLowerCase() === needle),
+  );
+  if (matches.length !== 1) {
+    throw new Error(matches.length
+      ? "ambiguous member; use the exact membership id"
+      : "member not found in the visible directory; use orgs members to check the organization");
+  }
+  const target = matches[0]!;
+  if (options.expectedRole && options.expectedRole !== target.role) {
+    throw new Error(`expected role ${options.expectedRole}, found ${target.role}; inspect the membership before retrying`);
+  }
+  if (options.dryRun) {
+    if (isJSON(options)) {
+      writeJSON({ company: company.slug, member: target, newRole: role, dryRun: true });
+    } else {
+      process.stdout.write(`Would change ${member} in ${company.slug}: ${target.role} -> ${role}.\n`);
+    }
+    return;
+  }
+  const updated = await setCompanyMemberRole(company.id, target.id, role);
+  if (isJSON(options)) {
+    writeJSON({ company: company.slug, previousRole: target.role, member: updated });
+  } else {
+    process.stdout.write(`Changed ${member} in ${company.slug}: ${target.role} -> ${updated.role}.\n`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -528,6 +589,15 @@ export function registerOrgCommands(
     .description("forget the default organization")
     .addOption(outputOption())
     .action(cmdOrgClear);
+
+  orgs.command("members").description("list an organization's member directory")
+    .addOption(orgOption()).addOption(outputOption()).action(cmdOrgMembers);
+  orgs.command("set-role").description("change one member's role (server enforces manager and last-owner protections)")
+    .argument("<member>", "exact membership id, user id, email or @handle")
+    .argument("<role>", "owner, admin, member or viewer")
+    .option("--expected-role <role>", "refuse if the observed role differs (client preflight)")
+    .option("--dry-run", "show the proposed change without writing")
+    .addOption(orgOption()).addOption(outputOption()).action(cmdOrgMemberRole);
 
   const mcp = program
     .command("mcp")

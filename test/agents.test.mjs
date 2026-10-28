@@ -358,12 +358,12 @@ test("endpoints lists and sets a default", async () => {
   writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ apiKey: "ditto_mcp_test", agentMode: true }));
   try {
     const env = { DITTO_API_BASE: stub.base, DITTO_CONFIG_DIR: configDir };
-    const list = await runAsync(["endpoints"], env);
+    const list = await runAsync(["endpoints"], env, configDir);
     assert.equal(list.status, 0, list.stderr);
     assert.match(list.stdout, /alpha\s+openai\/gpt-5\.6-luna\s+25,000 \/ 1,000,000 monthly\s+traces/);
     assert.match(list.stdout, /beta\s+anthropic\/claude-sonnet-5\s+0 \/ ∞/);
 
-    const set = await runAsync(["endpoints", "--set-default", "beta", "--output", "json"], env);
+    const set = await runAsync(["endpoints", "--set-default", "beta", "--output", "json"], env, configDir);
     assert.equal(set.status, 0, set.stderr);
     assert.equal(JSON.parse(set.stdout).defaultEndpoint, "beta");
     const stored = JSON.parse(readFileSync(path.join(configDir, "config.json"), "utf8"));
@@ -371,7 +371,7 @@ test("endpoints lists and sets a default", async () => {
     assert.equal(stored.agentMode, true, "merge must keep existing fields");
 
     // The default is honored when --endpoint is omitted.
-    const plan = await runAsync(["codex", "--dry-run"], env);
+    const plan = await runAsync(["codex", "--dry-run"], env, configDir);
     assert.equal(plan.status, 0, plan.stderr);
     assert.equal(JSON.parse(plan.stdout).endpoint.slug, "beta");
   } finally {

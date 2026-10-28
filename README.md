@@ -1299,3 +1299,15 @@ development channel flag in one launch; Claude's experimental-channel
 confirmation still appears. Router inference defaults to the CLI bridge.
 
 Channel distribution and approval: [Claude Code channel approval plan](docs/claude-channel-approval.md).
+
+### Organization member access
+
+Use explicit organization scope when inspecting or changing access:
+
+```sh
+heyditto orgs members --org your-team --output json
+heyditto orgs set-role @teammate member --org your-team --expected-role viewer --dry-run
+heyditto orgs set-role @teammate member --org your-team --expected-role viewer
+```
+
+`set-role` resolves exactly one member, sends only the role, and reports the previous role. `--expected-role` is a client preflight, not an atomic compare-and-set. Owner/admin authorization and last-owner/last-manager protections are enforced by the backend. Reverting a role uses the same command with the reported previous role and current authorization. Directory listing is capped at 2000 rows and reports possible truncation. Role changes refuse a directory at that cap, since an exact name lookup cannot be guaranteed complete. These commands need a full account CLI key and a backend that admits the member routes; narrowed space/tool/thread keys are refused.
