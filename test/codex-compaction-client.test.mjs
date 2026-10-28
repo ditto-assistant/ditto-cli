@@ -95,12 +95,15 @@ function rpc(child) {
         if (process.platform === "win32") {
           // Kill the still-live wrapper's whole test-owned process tree,
           // then await taskkill AND wrapper exit before removing codex.exe.
-          const taskkill = path.join(process.env.SystemRoot, "System32", "taskkill.exe");
-          await new Promise((resolve, reject) => {
+          const taskkill = process.env.SystemRoot ? path.join(process.env.SystemRoot, "System32", "taskkill.exe") : "taskkill.exe";
+          const taskkillError = await new Promise(resolve => {
             const killer = spawn(taskkill, ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true, timeout: 2000 });
-            killer.once("error", reject);
-            killer.once("exit", code => code === 0 || child.exitCode !== null || child.signalCode !== null ? resolve() : reject(new Error(`taskkill exited ${code}`)));
+            killer.once("error", error => resolve(error));
+            killer.once("exit", code => resolve(code === 0 ? null : new Error(`taskkill exited ${code}`)));
           });
+          // OS termination can precede Node delivering the wrapper's exit
+          // event. A taskkill race is harmless once that exit is observed.
+          if (taskkillError && !await waitForExit(1000)) throw taskkillError;
         } else {
           // start() created this process group in the fixture's own cwd.
           terminateGroup("SIGTERM");
@@ -108,7 +111,6 @@ function rpc(child) {
         }
       }
       await exited;
-      if (process.platform !== "win32") terminateGroup("SIGKILL");
 
     },
   };
