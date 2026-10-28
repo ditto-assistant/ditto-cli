@@ -1335,10 +1335,13 @@ Offline hints may name other providers, such as Engy. They are display-only and
 never populate the explicit four-provider network shortlist automatically.
 
 ```bash
+# Offline hints read the local key and make no network requests.
 heyditto provider-keys identify --key-env EXISTING_PROVIDER_KEY
-# No key is read and no request is sent by this dry run.
+
+# Dry run reads no key and sends no requests.
 heyditto provider-keys identify --try-provider openrouter --try-provider gm --dry-run
-# Explicitly send this key only to those two fixed read-only APIs.
+
+# Explicit consent sends the key only to the two named read-only APIs.
 heyditto provider-keys identify --key-env EXISTING_PROVIDER_KEY \
   --try-provider openrouter --try-provider gm --confirm-key-sharing
 ```

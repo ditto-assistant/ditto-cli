@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { constants as osConstants, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Delivery, SecretStore } from "./types.js";
 import { writePrivateKey } from "./local-file.js";
@@ -14,6 +14,9 @@ import { redactKnownSecrets } from "../secret-redaction.js";
 
 export interface RunResult {
   status: number | null;
+  /** OS-controlled termination metadata, never child-supplied diagnostics. */
+  signal?: NodeJS.Signals;
+  errorCode?: string;
   stdout: string;
   stderr: string;
   /** The binary is not on PATH. */
@@ -41,8 +44,11 @@ export function run(bin: string, args: string[], input?: string): RunResult {
     stdio: ["pipe", "pipe", "pipe"],
     env: { ...process.env, ...QUIET_ENV },
   });
-  const missing = res.error !== undefined && (res.error as NodeJS.ErrnoException).code === "ENOENT";
-  return { status: res.status, stdout: res.stdout ?? "", stderr: res.stderr ?? "", missing };
+  const code = (res.error as NodeJS.ErrnoException | undefined)?.code;
+  const errorCode = typeof code === "string" && Object.hasOwn(osConstants.errno, code) ? code : undefined;
+  const signal = res.signal && Object.hasOwn(osConstants.signals, res.signal) ? res.signal : undefined;
+  const missing = code === "ENOENT";
+  return { status: res.status, signal, errorCode, stdout: res.stdout ?? "", stderr: res.stderr ?? "", missing };
 }
 
 /** Last few stderr lines, clamped — platform CLIs can be very chatty on failure. */
@@ -119,9 +125,9 @@ function substitute(args: string[], path: string): string[] {
 }
 
 /**
- * Hands `value` to the store's CLI, trying each attempt in order. Throws with
- * every attempt's own last stderr lines when all of them fail, so the caller
- * can revoke the key it just minted and the operator can see why.
+ * Hands `value` to the store's CLI, trying each attempt in order. Failure copy
+ * includes only exit status and allowlisted OS metadata so the caller can revoke
+ * its newly minted key without exposing credential-bearing child diagnostics.
  *
  * `path` delivery uses `/dev/stdin` wherever it exists, keeping the plaintext
  * off disk. Only on Windows does it fall back to a 0600 file in a private
@@ -147,7 +153,8 @@ export function deliver(store: SecretStore, name: string, attempts: Delivery[], 
     if (res.status === 0) return;
     // The child has just received a credential. Its stdout/stderr may echo it
     // or encode it in arbitrary ways, so suppress those diagnostics entirely.
-    failures.push(`${attempt.note}: exit ${res.status}; credential-bearing subprocess diagnostics suppressed`);
+    const reason = [res.signal ? `terminated by ${res.signal}` : undefined, res.errorCode ? `OS error ${res.errorCode}` : undefined].filter(Boolean).join(", ") || (res.status === null ? "ended without an exit status" : `exit ${res.status}`);
+    failures.push(`${attempt.note}: ${reason}; credential-bearing subprocess diagnostics suppressed`);
   }
   throw new Error(`${store.id === "file" ? store.label : store.bin} could not store ${name} — ${failures.join("; ")}`);
 }
