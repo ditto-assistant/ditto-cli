@@ -81,16 +81,35 @@ function rpc(child) {
       if (child.exitCode !== null || child.signalCode !== null) return;
       child.stdin.end();
       const exited = new Promise(resolve => child.once("exit", resolve));
-      const terminate = signal => {
-        try {
-          // start() creates this process group in the fixture's own cwd.
-          if (process.platform !== "win32") process.kill(-child.pid, signal);
-          else child.kill(signal);
-        } catch (error) { if (error.code !== "ESRCH") throw error; }
+      const waitForExit = async ms => {
+        let timer;
+        const timeout = new Promise(resolve => { timer = setTimeout(() => resolve(false), ms); });
+        const ended = await Promise.race([exited.then(() => true), timeout]);
+        clearTimeout(timer); return ended;
       };
-      const timer = setTimeout(() => terminate("SIGTERM"), 1000);
-      const killTimer = setTimeout(() => terminate("SIGKILL"), 2000);
-      await exited; clearTimeout(timer); clearTimeout(killTimer);
+      const terminateGroup = signal => {
+        try { process.kill(-child.pid, signal); }
+        catch (error) { if (error.code !== "ESRCH") throw error; }
+      };
+      if (!await waitForExit(1000)) {
+        if (process.platform === "win32") {
+          // Kill the still-live wrapper's whole test-owned process tree,
+          // then await taskkill AND wrapper exit before removing codex.exe.
+          const taskkill = path.join(process.env.SystemRoot, "System32", "taskkill.exe");
+          await new Promise((resolve, reject) => {
+            const killer = spawn(taskkill, ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true, timeout: 2000 });
+            killer.once("error", reject);
+            killer.once("exit", code => code === 0 || child.exitCode !== null || child.signalCode !== null ? resolve() : reject(new Error(`taskkill exited ${code}`)));
+          });
+        } else {
+          // start() created this process group in the fixture's own cwd.
+          terminateGroup("SIGTERM");
+          if (!await waitForExit(1000)) terminateGroup("SIGKILL");
+        }
+      }
+      await exited;
+      if (process.platform !== "win32") terminateGroup("SIGKILL");
+
     },
   };
 }
