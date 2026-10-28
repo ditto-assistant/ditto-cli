@@ -5,6 +5,7 @@ import { addProviderKey, BALANCE_PROVIDERS, inspectProviderKey, listProviderKeys
 import { boundedInteger, parseProviderProtocol, providerKeyHints, providerURLInput, publicProviderParams } from "./provider-key-input.js";
 import { readOperatorQuote } from "./provider-probe-quote.js";
 import { importGCloudProviderSecret, readProviderSecret } from "./provider-secrets.js";
+import { checkIdentificationProvider, identificationPlan, localProviderHints } from "./provider-key-identify.js";
 
 interface ScopeOptions { org?: string; personal?: boolean; output?: string }
 interface AddOptions extends ScopeOptions {
@@ -73,7 +74,25 @@ function addScope(command: Command, outputOption: () => Option): Command {
 }
 
 export function registerProviderKeyCommands(program: Command, outputOption: () => Option): void {
-  const keys = program.command("provider-keys").description("manage provider credentials without exposing their values; designed for agents").showHelpAfterError().addHelpText("after", "\nSecrets enter through a local --key-env reference, hidden paste, --stdin, or Secret Manager import. Never pass raw keys as arguments or MCP tool inputs. Prefixes are hints; validation uses one confirmed destination. JSON output contains metadata only.\n");
+  const keys = program.command("provider-keys").description("manage provider credentials without exposing their values; designed for agents").showHelpAfterError().addHelpText("after", "\nSecrets enter through a local --key-env reference, hidden paste, --stdin, or Secret Manager import. Never pass raw keys as arguments or MCP tool inputs. Prefixes are hints; identification is offline unless you explicitly confirm a fixed provider shortlist. JSON output contains metadata only.\n");
+  keys.command("identify").alias("detect").description("identify local prefix hints offline; optionally check an explicit read-only provider shortlist")
+    .option("--stdin", "read a piped key without echo; omit for hidden TTY paste")
+    .option("--key-env <name>", "read an existing local environment variable internally; never print its value")
+    .option("--try-provider <id>", "explicit read-only destination: openai, anthropic, openrouter or gm (repeat, maximum four)", collect)
+    .option("--confirm-key-sharing", "send this key to every explicitly named provider; no generation or storage")
+    .option("--dry-run", "display exact fixed GET destinations without reading a key or making requests")
+    .addOption(outputOption())
+    .addHelpText("after", "\nOffline hints never prove ownership. Network checks send the same key to your explicit shortlist, without guessing more destinations. Models advertised by a catalog do not prove key acceptance. Accepted read-only responses do not prove generation access or available spend. Multiple accepted responses never select or store a provider. Agents should normally use an explicit provider with a local secret reference.\n")
+    .action(async (options: { stdin?: boolean; keyEnv?: string; tryProvider?: string[]; confirmKeySharing?: boolean; dryRun?: boolean }) => {
+      const plan = identificationPlan(options.tryProvider ?? [], options.confirmKeySharing === true, options.dryRun === true);
+      if (options.dryRun) { print({ destinations: plan, networkRequestsMade: 0, keyRead: false, generationCallsMade: 0 }); return; }
+      let key = await readProviderSecret(options);
+      try {
+        const hints = localProviderHints(key), checks = [];
+        for (const entry of plan) checks.push(await checkIdentificationProvider(entry.provider, key));
+        print({ hints, ownershipConfirmed: false, checks, networkRequestsMade: checks.length, generationCallsMade: 0, stored: false, selectedProvider: null });
+      } finally { key = ""; }
+    });
   addScope(keys.command("list").description("list saved key metadata; never retrieve credentials"), outputOption).action(async (options: ScopeOptions) => {
     const { companyId, scope } = await providerKeyScope(options);
     print({ scope, ...await listProviderKeys(companyId) });

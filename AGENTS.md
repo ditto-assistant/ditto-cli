@@ -13,9 +13,13 @@ guarantee.
 
 Provider-key commands return allowlisted metadata only. Do not add a reveal or
 fetch-secret operation. Do not pass through arbitrary provider or subprocess
-errors. Prefix detection is local and advisory; a key may be sent only to one
-confirmed destination. Never try a credential against a list of providers to
-guess its owner.
+errors. Prefix detection is local and advisory. Add/import use one confirmed
+destination. Offline `provider-keys identify` must never fetch a catalog or make
+network requests. Its optional network checks require an explicit shortlist
+(at most four fixed documented providers) and `--confirm-key-sharing`. Never
+infer or extend that shortlist, choose a provider automatically, follow redirects,
+or use generation to identify a key. Keep catalogs distinct from proof of key
+acceptance, and read-only acceptance distinct from paid inference access.
 
 Model catalogs and balance checks must not silently run generation. Paid model
 or throughput probes require an explicit model shortlist, request/output/time

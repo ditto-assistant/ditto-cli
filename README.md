@@ -1324,6 +1324,42 @@ prints the credential, writes it to disk, or accepts it as a command argument.
 Use saved key UUIDs for later operations. MCP can manage the same metadata and
 routing policies; secret bytes enter through the local CLI, not a tool argument.
 
+For an unfamiliar key, `provider-keys identify` (alias `detect`) reads a local
+secret reference or hidden paste and reports prefix hints without contacting
+Ditto or any provider. Strong prefixes are hints, not proof of ownership. Agents
+that know the provider should normally supply it explicitly when adding a key.
+
+```bash
+heyditto provider-keys identify --key-env EXISTING_PROVIDER_KEY
+# No key is read and no request is sent by this dry run.
+heyditto provider-keys identify --try-provider openrouter --try-provider gm --dry-run
+# Explicitly send this key only to those two fixed read-only APIs.
+heyditto provider-keys identify --key-env EXISTING_PROVIDER_KEY \
+  --try-provider openrouter --try-provider gm --confirm-key-sharing
+```
+
+The optional shortlist supports at most four distinct providers. It sends GET
+requests only to the following documented endpoints, with a five-second deadline
+and a 64 KiB response limit per provider. It rejects redirects and never guesses
+another destination, runs generation, saves a key, activates routing, or chooses
+among accepted providers. `--dry-run` shows these exact destinations without
+reading a secret. No custom URLs or Impala guesses are supported.
+
+| Provider | Fixed destination | Documentation |
+| --- | --- | --- |
+| OpenAI | `https://api.openai.com/v1/models` | [List models](https://developers.openai.com/api/reference/resources/models/methods/list) |
+| Anthropic | `https://api.anthropic.com/v1/models` | [List models](https://platform.claude.com/docs/en/api/models/list) |
+| OpenRouter | `https://openrouter.ai/api/v1/key` | [Current key](https://openrouter.ai/docs/api/api-reference/api-keys/get-current-api-key) |
+| GM | `https://api.saygm.com/v1/credits` | [API overview](https://docs.saygm.com/api/overview/) |
+
+Output contains fixed provider/destination identifiers, numeric HTTP status and
+status enums only. A model catalog returns `models_advertised`; it does not
+confirm key acceptance. A typed key or balance response can return
+`accepted_read_only`, which does not prove ownership, generation access or
+available spend. Permission errors, malformed bodies, redirects and transport
+failures remain `unknown`; 401 means `rejected`, and 429 means `rate_limited`.
+No provider response text, model names, account identity or balance is printed.
+
 ```bash
 heyditto provider-keys providers
 heyditto provider-keys list --org omniaura
@@ -1451,7 +1487,10 @@ Provider-reported costs are not settled receipts. Omitted costs and cache counts
 stay unknown. Input accounting distinguishes fresh input excluding cached tokens
 from totals including cached tokens; no cache ratio is inferred without that
 denominator. Attempted calls, HTTP responses and successful generations remain
-separate counts. Observed throughput is not a capacity guarantee.
+separate counts. `tokensPerSecondBasis: end_to_end_output_tokens` means output
+tokens divided by the entire request duration, including reasoning time; it is
+not a decode-only rate. An omitted basis remains unknown. Observed throughput
+is not a capacity guarantee.
 
 Private pools use saved organization or personal key UUIDs. For example,
 `pool.json` can contain:
