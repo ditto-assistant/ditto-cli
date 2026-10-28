@@ -1444,8 +1444,8 @@ export function registerHarnessCommands(program: Command, addExamples: (c: Comma
       cmd.option("--no-mcp-only", "use Ditto Router inference for this launch, overriding the saved native-account default");
       cmd.addOption(new Option("--remote-transport <transport>", "remote prompt delivery: CLI terminal bridge (default) or MCP Channels (native account only, research preview)").choices(["cli", "channels"]));
     }
-    cmd.action(async (args: string[], options) => {
-      await launchHarness(harness, args, options);
+    cmd.action(async (args: string[], options, command: Command) => {
+      await launchHarness(harness, args, { ...options, expiresExplicit: command.getOptionValueSource("expires") === "cli" });
     });
     addExamples(
       cmd,

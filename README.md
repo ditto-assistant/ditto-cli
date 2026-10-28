@@ -676,33 +676,47 @@ How the wiring works:
 
 ### `codex-app`
 
-`heyditto codex-app` wires the **Codex desktop app** (ChatGPT.app) to one of
-your inference endpoints, so its models — GLM Flash and friends — work in the
-app behind its own **"Sign in with an API key"** screen. Unlike the CLI, the
-app cannot be handed environment variables (a Dock-launched app inherits
-none), so the wiring is file-based in the `~/.codex` directory the app shares
-with the CLI:
-
-- `openai_base_url` in `~/.codex/config.toml` repoints the built-in `openai`
-  provider (the Responses wire the gateway speaks) at your endpoint;
-- the minted endpoint key lands in `~/.codex/auth.json` as the API-key login,
-  the same place the app's sign-in screen writes.
+Use Codex Desktop (ChatGPT.app) with your Ditto Router key and choose models
+in the app, including Claude, OpenAI and open models from Ditto's catalog.
+Quit Desktop, then run:
 
 ```bash
-heyditto codex-app                          # sign in, pick an endpoint, wire the app
-heyditto codex-app --endpoint my-endpoint   # route through a specific endpoint
-heyditto codex-app --model glm-5.3-flash    # pin the app's model
-heyditto codex-app --dry-run                # show what would be written
-heyditto codex-app --unset                  # restore the previous wiring, revoke the key
+heyditto codex-app
+# Or connect directly to your team's router:
+heyditto codex-app --endpoint ditto-dev
 ```
 
-The command also enables the endpoint's model picker (`--codex-models on`),
-so the app's model picker lists the endpoint's models. A previous login
-(especially a ChatGPT-plan one) is backed up to `auth.json.pre-ditto` and
-confirmed before it is replaced; `--unset` restores it. The key is long-lived
-(unlike `heyditto codex`'s per-session keys) and is revoked by `--unset` or
-rotated on the next run. Both files are shared with the Codex CLI, so a bare
-`codex` run routes through Ditto too; `heyditto codex` is unaffected.
+Sign in and choose a router if prompted. Setup saves the API key and loads
+the complete model picker automatically; no model flag, pasted key or config
+edit is needed. Reopen Desktop and start a new chat, then choose your model
+in the app. The initial selection uses the endpoint's routing; selecting a
+provider model still follows that endpoint's routing and billing policy.
+
+Setup works for company members without changing the shared endpoint's
+settings. It also replaces a previously selected custom provider locally.
+The picker is a local snapshot: rerun the command to refresh it or switch
+routers. Catalog reads are paginated so the full list is loaded without
+making an unbounded gateway response.
+
+```bash
+heyditto codex-app --dry-run                # preview without creating a key or writing files
+heyditto codex-app --unset                  # restore the previous login and settings
+```
+
+A previous login is backed up and confirmed before replacement. Setup uses
+`~/.codex/config.toml` and `~/.codex/auth.json`, shared by Desktop and the
+Codex CLI, so a bare `codex` run uses the same router. `heyditto codex` keeps
+its own per-session connection. The app key is rotated on setup and revoked
+by `--unset`; `--budget` and `--expires` remain available for explicit limits.
+
+`--model` sets an optional initial selection; it does not lock the picker.
+`--no-models` skips downloading the local catalog. Setup never prints the key
+unless explicitly asked with `--show-key`.
+
+`codex app` can open Desktop after setup. It opens the app rather than
+forwarding a CLI session's provider overrides, so the saved configuration is
+what makes a Dock launch work too. Desktop also shares the CLI's MCP settings;
+connecting the model router preserves those existing tool connections.
 
 ### `endpoints`
 
@@ -1314,3 +1328,28 @@ heyditto orgs set-role @teammate member --org your-team --expected-role viewer
 `allowance` reads your own allowance when the member is omitted. Current org managers can inspect another member by exact id, email or handle. It uses Ditto MCP, exposes no company balance or purchase history, and changes no budget. MCP refusals exit with an error.
 
 `set-role` resolves exactly one member, sends only the role, and reports the previous role. `--expected-role` is a client preflight, not an atomic compare-and-set. Owner/admin authorization and last-owner/last-manager protections are enforced by the backend. Reverting a role uses the same command with the reported previous role and current authorization. Directory listing is capped at 2000 rows and reports possible truncation. Role changes refuse a directory at that cap, since an exact name lookup cannot be guaranteed complete. These commands need a full account CLI key and a backend that admits the member routes; narrowed space/tool/thread keys are refused.
+
+
+### IAM roles and scoped permissions
+
+Use `heyditto iam catalog --org your-team` to inspect the server's permission
+names and managed roles, then `iam roles put --file role.json --org your-team`
+and `iam bindings put --file binding.json --org your-team` to create a custom
+role and bind its exact version to a user or service account on an explicit
+resource. Read `iam roles list` and `iam bindings list` before edits; writes
+require current revisions. The server validates scope and delegation, and
+records policy changes. Editing a role does not expand existing bindings.
+
+`iam explain --file check.json --org your-team` uses the same authorization
+engine as enforcement; omit the principal to inspect yourself. Inspecting
+another principal needs a separate permission. Policy files use canonical
+snake_case fields. `--file -` reads stdin; policy bodies never belong in shell
+arguments. IAM commands fail on API refusals and never substitute a different
+identity or raise a spending allowance.
+
+`iam mode get --org your-team` reads rollout state for the inference domain.
+`iam mode set shadow --revision 0 --dry-run --org your-team` validates a change
+without applying it. Enforcement requires an explicit mode change after
+review; these commands do not activate it implicitly. Only domains supported
+by the server can be activated. IAM permissions and existing credential,
+spending, membership and entitlement restrictions all apply.

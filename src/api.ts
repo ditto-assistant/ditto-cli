@@ -95,6 +95,8 @@ export interface EndpointActivation {
 export interface RouterFailover { enabled: boolean; model: string; maxCostUsd: number }
 
 export interface InferenceEndpoint {
+  /** Server-resolved rights; never inferred from membership role names. */
+  access?: { level?: string; use?: boolean; mint?: boolean; manage?: boolean; iamEnforced?: boolean; createSession?: boolean; createKey?: boolean; maxSessionSeconds?: number };
   failover?: RouterFailover;
   id: string;
   slug: string;

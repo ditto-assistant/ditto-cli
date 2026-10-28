@@ -27,6 +27,7 @@ import {
 import { type ActiveSession, markSessionUsed, resolveActiveSession, sessionHeaders } from "./mcp-session.js";
 import { NO_KEY_MESSAGE } from "./api.js";
 import { openInBrowser } from "./browser.js";
+import { registerIAMCommands } from "./iam-commands.js";
 import { registerOrgCommands } from "./org-commands.js";
 import { registerReviewCommands } from "./review-commands.js";
 import { registerTeleportCommands } from "./teleport/commands.js";
@@ -1249,6 +1250,7 @@ your own workspace or an app workspace.`,
   registerAppCommands(program, addExamples, outputOption);
   registerOrgCommands(program, addExamples, outputOption, orgOption,
     (name, args, output) => callAndPrint(name, args, parseOutputFormat(output), true));
+  registerIAMCommands(program, outputOption, orgOption);
   registerReviewCommands(program, addExamples, outputOption, orgOption);
   registerSelfUpdateCommands(program, outputOption);
   registerHarnessCommands(program, addExamples);
