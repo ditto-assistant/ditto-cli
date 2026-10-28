@@ -127,11 +127,11 @@ inbound Channels.
 | Installable versioned plugin | `npm run plugin:build` produces a local installable review bundle; `BUILD.json` binds source revision and dependency-lock SHA256 |
 | Runnable public distribution | **Not published**; approve a complete release bundle and a runnable GitHub source location before directory ingestion; the checked-in template alone is insufficient |
 | Source and runtime | Reuses the CLI channel implementation; Node provided by the host, dependencies bundled from committed lock; no startup download |
-| Manifest validation | Record exact Claude version and successful `claude plugin validate` result for the final clean source bundle |
-| Native live demo | Record a unique Browser prompt visibly arriving in the **packaged plugin** and explicit reply returning; prior server-adapter tests do not satisfy this row |
+| Manifest validation | Clean `4a2debc` plugin manifest and local-review marketplace both passed without warnings on Claude Code 2.1.312; runtime artifact remains pinned independently of documentation-only updates |
+| Native live demo | **Passed October 28, 2026**: clean runtime artifact `4a2debc3aa478e981c59c225bb10e9fac5be8867`, Claude Code 2.1.312 displaying Opus 5.5 / Claude Max, unique Browser prompt visibly received through the packaged plugin, explicit acknowledge/reply completed and matching response returned to Ditto. Development override only; run IDs and screenshot originals in `evidence.md` |
 | CLI live demo | Record separately; CLI terminal transport is not plugin admission evidence |
-| Sender isolation | Two-account session ownership negative test; attach the exact backend head/result, not just client-session-ID filtering |
-| Revoked credentials | Revoke a disposable QA key; prove disconnection/rejection and no new delivery; do not revoke a user's shared key |
+| Sender isolation | **Outstanding**: two-account session ownership negative test; attach the exact backend head/result, not just client-session-ID filtering |
+| Revoked credentials | **Outstanding**: revoke a disposable QA key; prove disconnection/rejection and no new delivery; do not revoke a user's shared key |
 | Policy denial | Show omitted/denied channel identity does not deliver or get reported as model receipt |
 | Restart / reconnect / duplicate | Exercise bounded deduplication and expiry; do not promise cross-restart exactly-once behavior |
 | Normal `--channels` | **Outstanding external admission gate**; test with exact org-allowed or official identity and no development override |
