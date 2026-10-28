@@ -706,7 +706,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
       return undefined;
     }) : undefined;
     if (registration) log(`session: ${appBaseURL()}/chat/${encodeURIComponent(registration.threadId)}${registration.kgID ? `?graph=${encodeURIComponent(registration.kgID)}` : ""}`);
-    if (harness === "claude" && harnessSessionId && registration?.nativeTitleSync === true && registration.threadId) {
+    if (harness === "claude" && harnessSessionId && !options.name?.trim() && registration?.nativeTitleSync === true && registration.threadId) {
       const threadId = registration.threadId;
       titleWatcher = watchClaudeSessionTitle({ nativeSessionId: harnessSessionId, cwd, report: async (title, signal) => {
         const result = await apiFetch<{ titleUpdated?: boolean }>("/api/v5/sessions/register", { method: "POST", signal, body: {
