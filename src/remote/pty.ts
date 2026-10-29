@@ -87,7 +87,7 @@ export interface PtyOptions {
   attachTerminal?: boolean;
   /** Enables Claude-specific owned paste cancellation; physical Stop is separate. */
   harness?: Harness;
-  /** Paste-to-submit delay; default120ms. Owned PTY tests use a longer window. */
+  /** Paste-to-submit delay; defaults to 120ms. Owned PTY tests use a longer window. */
   pasteDelayMs?: number;
   onOutput?: (data: string) => void;
 }

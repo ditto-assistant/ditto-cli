@@ -1330,7 +1330,7 @@ heyditto orgs set-role @teammate member --org your-team --expected-role viewer
 
 
 Stop also covers a steering command that races its server enqueue. Unknown
-cancellation IDs are retained for5minutes (at most256 entries) in the current
+cancellation IDs are retained for 5 minutes (at most 256 entries) in the current
 CLI session and cancel only the matching later steer. They do not cancel normal
 queued prompts or interrupt unrelated current turns. Repeated exact Stop frames
 send one physical interrupt. This intent does not survive a fresh CLI process;
