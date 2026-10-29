@@ -222,7 +222,7 @@ test("canceled owned paste never undoes an intervening local stdin edit", { time
     process.once("SIGTERM", () => pty?.kill());
     try {
       const chunks = [];
-      pty = await spawnInPty(process.execPath, ["--input-type=module", "-e", ${JSON.stringify(echo)}], { cwd: process.cwd(), env: process.env, harness: "claude", onOutput: data => chunks.push(data) });
+      pty = await spawnInPty(process.execPath, ["--input-type=module", "-e", ${JSON.stringify(echo)}], { cwd: process.cwd(), env: process.env, harness: "claude", pasteDelayMs: 2000, onOutput: data => chunks.push(data) });
       const deadline = Date.now() + 2000;
       while (!chunks.join("").includes("READY") && Date.now() < deadline) await sleep(5);
       if (!chunks.join("").includes("READY")) throw new Error("owned PTY did not become ready");

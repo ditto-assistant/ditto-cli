@@ -87,6 +87,8 @@ export interface PtyOptions {
   attachTerminal?: boolean;
   /** Enables Claude-specific owned paste cancellation; physical Stop is separate. */
   harness?: Harness;
+  /** Paste-to-submit delay; default120ms. Owned PTY tests use a longer window. */
+  pasteDelayMs?: number;
   onOutput?: (data: string) => void;
 }
 
@@ -163,7 +165,7 @@ export async function spawnInPty(command: string, args: string[], options: PtyOp
       try {
         child.write(`\u001b[200~${prompt}\u001b[201~`);
         pasted = prompt.length > 0;
-        await sleep(120);
+        await sleep(options.pasteDelayMs ?? 120);
         if (signal?.aborted) return;
         pasted = false;
         // Observed from native Claude Code 2.1.312 in a real terminal. Stop
