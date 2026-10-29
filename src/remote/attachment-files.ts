@@ -102,7 +102,7 @@ export async function downloadAttachments(
     }
     if (!/^[a-fA-F0-9]{64}$/.test(attachment.sha256)) throw new Error("invalid attachment sha256");
   }
-  const turnDirectory = turnId.includes(":") ? `turn-${createHash("sha256").update(turnId).digest("hex")}` : turnId;
+  const turnDirectory = safeAttachmentName(turnId) !== turnId ? `turn-${createHash("sha256").update(turnId).digest("hex")}` : turnId;
   let dir = cwd;
   for (const segment of [...ATTACHMENTS_DIR.split(path.sep), turnDirectory]) {
     dir = path.join(dir, segment);

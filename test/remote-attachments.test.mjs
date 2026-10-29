@@ -140,3 +140,21 @@ test("nested repository sessions exclude their own attachment directory", async 
     assert.equal(await ensureTmpExcluded(nested),false);
   } finally { await rm(cwd,{recursive:true,force:true}); }
 });
+
+
+test("reserved and trailing-dot turn identifiers use distinct portable directories", async () => {
+  const cwd=await mkdtemp(path.join(os.tmpdir(),"ditto-portable-turn-"));
+  try {
+    const directories=[];
+    for (const id of ["con","CON.txt","aux","LPT9.log","ordinary."]) {
+      const [file]=await downloadAttachments(cwd,id,[attachment()],async()=>bytes);
+      const directory=path.basename(path.dirname(file.absPath));
+      assert.match(directory,/^turn-[a-f0-9]{64}$/);
+      assert.deepEqual(await readFile(file.absPath),bytes);
+      directories.push(directory);
+    }
+    assert.equal(new Set(directories).size,directories.length);
+    const [ordinary]=await downloadAttachments(cwd,"ordinary",[attachment()],async()=>bytes);
+    assert.equal(path.basename(path.dirname(ordinary.absPath)),"ordinary");
+  } finally { await rm(cwd,{recursive:true,force:true}); }
+});
