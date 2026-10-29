@@ -375,7 +375,10 @@ test("controller refuses queued paste after an aborted owned paste preserves for
   w.events.emit("hook", { source: "claude", event: "Notification", payload: { notification_type: "permission_prompt", message: "Synthetic permission" } });
   const pending = await w.stub.waitFor(f => f.type === "prompt.request");
   const beforeAnswer = hex();
+  const answerFrom = w.stub.frames.length;
   w.stub.send({ type: "prompt.answer", sessionId: "owned-session", promptId: pending.promptId, value: "1" });
+  w.stub.send({ type: "prompt.answer", sessionId: "owned-session", promptId: pending.promptId, value: "1" });
+  w.stub.send({ type: "ping" }); await w.stub.waitFor(f => f.type === "pong", { from: answerFrom });
   await until(() => hex().length > beforeAnswer.length, "actual controller answer reached PTY public write");
   const answeredAt = Date.now();
   w.send("queued-after-cancel");
@@ -389,6 +392,7 @@ test("controller refuses queued paste after an aborted owned paste preserves for
   assert.ok(hex().includes(beforeAnswer + "31"));
   await sleep(Math.max(0, answeredAt + 250 - Date.now()));
   assert.equal(hex().includes("0d"), false, "a delayed confirmation cannot submit the uncertain canceled editor");
+  assert.equal(hex(), beforeAnswer + "31" + "1b", "duplicate same-ID answers produce exactly one PTY keypress and independent Stop");
   assert.equal(hex().includes(Buffer.from("queued-after-cancel").toString("hex")), false);
   assert.equal(hex().includes("1f"), false, "the foreign edit is never undone");
   const beforeStop = hex();
@@ -400,6 +404,13 @@ test("controller refuses queued paste after an aborted owned paste preserves for
   w.send("steer-while-blocked", { deliveryMode: "steer" });
   assert.match((await w.finished("steer-while-blocked")).error, /terminal.*draft/i);
   assert.equal(hex().includes(Buffer.from("steer-while-blocked").toString("hex")), false);
+  w.events.emit("hook", { source: "claude", event: "Notification", payload: { notification_type: "permission_prompt", message: "Synthetic successor" } });
+  const successor = await w.stub.waitFor(f => f.type === "prompt.request" && f.promptId !== pending.promptId);
+  const staleFrom = w.stub.frames.length; const beforeStale = hex();
+  w.stub.send({ type: "prompt.answer", sessionId: "owned-session", promptId: pending.promptId, value: "1" });
+  w.stub.send({ type: "ping" }); await w.stub.waitFor(f => f.type === "pong", { from: staleFrom });
+  assert.equal(w.session.pending?.promptId, successor.promptId, "duplicate old answer cannot consume a successor");
+  assert.equal(hex(), beforeStale, "old-ID replay writes no bytes into the successor dialog");
 });
 
 
