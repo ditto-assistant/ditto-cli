@@ -80,7 +80,7 @@ async function world(t) {
   const permission = async id => { await pre(id); hook("PermissionRequest", payload(id)); hook("Notification", { notification_type: "permission_prompt" }); return stub.waitFor(frame => frame.type === "prompt.request"); };
   const send = (id, deliveryMode) => stub.send({ type: "turn.deliver", sessionId: native, turnId: id, text: "synthetic input", ...(deliveryMode ? { deliveryMode } : {}) });
   const started = id => stub.waitFor(frame => frame.type === "turn.started" && frame.turnId === id);
-  return { ...f, stub, hook, pre, payload, permission, send, started, quiet: () => { quiet = Infinity; }, busy: () => { quiet = 0; }, interrupts: () => interrupts };
+  return { ...f, session, stub, hook, pre, payload, permission, send, started, quiet: () => { quiet = Infinity; }, busy: () => { quiet = 0; }, interrupts: () => interrupts };
 }
 
 test("observed native 2.1.312 builtin lifecycle without UserPromptSubmit does not hold FIFO", { timeout: 3000 }, async t => {
@@ -159,4 +159,23 @@ test("incomplete AskUserQuestion cannot discard an existing answerable permissio
   w.stub.send({ type: "prompt.answer", sessionId: native, promptId: pending.promptId, value: "1" });
   await w.started("queued");
   assert.ok(w.stub.frames.some(f => f.resolvedPromptId === pending.promptId));
+});
+
+test("a usable replacement prompt is sent without inventing resolution of the old dialog", { timeout: 6000 }, async t => {
+  const w = await world(t); w.hook("UserPromptSubmit");
+  const first = await w.permission("original-permission");
+  w.hook("PreToolUse", {
+    ...w.payload("replacement-question"), tool_name: "AskUserQuestion",
+    tool_input: { questions: [{ header: "Synthetic choice", question: "Which fixture?", options: [{ label: "Next" }] }] },
+  });
+  const next = await w.stub.waitFor(f => f.type === "prompt.request" && f.promptId !== first.promptId);
+  assert.equal(next.kind, "choice"); assert.equal(next.text, "Synthetic choice: Which fixture?");
+  assert.equal(next.options[0].label, "Next");
+  assert.equal(w.stub.frames.some(f => f.resolvedPromptId === first.promptId), false, "a replacement is not an authoritative tool outcome");
+  w.stub.send({ type: "prompt.answer", sessionId: native, promptId: first.promptId, value: "1" });
+  w.stub.send({ type: "ping" }); await w.stub.waitFor(f => f.type === "pong");
+  assert.equal(w.session.pending?.promptId, next.promptId, "answer to the old ID cannot consume the current question");
+  w.stub.send({ type: "prompt.answer", sessionId: native, promptId: next.promptId, value: "1" });
+  await w.stub.waitFor(f => f.resolvedPromptId === next.promptId);
+  assert.equal(w.stub.frames.some(f => f.resolvedPromptId === first.promptId), false);
 });
