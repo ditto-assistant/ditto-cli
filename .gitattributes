@@ -1,0 +1,2 @@
+# Keep the legacy attachment source reviewable despite historical control bytes.
+src/remote/attachments.ts text diff
