@@ -8,7 +8,7 @@ import { ALPHA, MINTED_PLAINTEXT, listEndpointsStubHandler } from "./stub-api.mj
  * needs, the host bridge WebSocket at /api/v5/hosts/ws (bearer-checked), and
  * presigned-style attachment downloads at /attachments/<id>.
  */
-export function startHostStub({ apiKey = "ditto_mcp_test", endpoints = [ALPHA] } = {}) {
+export function startHostStub({ apiKey = "ditto_mcp_test", endpoints = [ALPHA], remoteRegistration = false } = {}) {
   const calls = [];
   const frames = [];
   const sockets = [];
@@ -36,6 +36,9 @@ export function startHostStub({ apiKey = "ditto_mcp_test", endpoints = [ALPHA] }
         res.statusCode = status;
         res.end(payload === undefined ? "" : JSON.stringify(payload));
       };
+      if (remoteRegistration && req.url === "/api/v5/sessions/register" && req.method === "POST") {
+        return json(200, {threadId: "native-plugin-thread"});
+      }
       if (req.url === "/api/v5/inference/endpoints" && req.method === "GET") {
         return json(200, { baseUrl: "https://api.example.test/v1", endpoints, limit: 5, used: endpoints.length });
       }

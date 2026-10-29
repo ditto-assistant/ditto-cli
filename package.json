@@ -17,6 +17,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json && node scripts/build-update-lock.mjs",
+    "plugin:build": "npm run build && node scripts/build-remote-plugin.mjs",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "node --test",
     "prepack": "npm run build",
