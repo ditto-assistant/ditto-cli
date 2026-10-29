@@ -198,6 +198,19 @@ test("Stop before delivery cancels only a later matching steer, never its unrela
   w.events.emit("hook", { source: "claude", event: "Stop" }); await w.finished("ordinary");
 });
 
+test("invalid steering IDs cannot bypass pre-delivery cancellation bounds", { timeout: 3000 }, async (t) => {
+  const w = await world(t);
+  for (const id of ["", "x".repeat(257)]) {
+    w.stub.send({ type: "turn.interrupt", turnId: id });
+    w.send(id, { deliveryMode: "steer" });
+    await w.stub.waitFor(f => f.type === "turn.ack" && f.turnId === id);
+    assert.equal(w.calls.length, 0, "an unrememberable steering ID must not reach native injection");
+    assert.match((await w.finished(id)).error, /Invalid steering turn ID/);
+  }
+  assert.equal(w.calls.length, 0);
+  assert.equal(w.interrupts(), 0, "invalid unknown IDs must never interrupt the current native session");
+});
+
 test("paired pending-steer and predecessor Stop frames send one independent physical interrupt", { timeout: 6000 }, async (t) => {
   let release;
   const gate = new Promise(resolve => { release = resolve; });

@@ -189,6 +189,10 @@ export class RemoteSession {
       return;
     }
     if (frame.deliveryMode === "steer") {
+      if (typeof frame.turnId !== "string" || frame.turnId.length === 0 || frame.turnId.length > 256) {
+        this.finish(frame.turnId, { error: "Invalid steering turn ID" });
+        return;
+      }
       if (this.ctx.harness !== "claude" || this.ctx.mode !== "tui" || !this.pty) {
         this.finish(frame.turnId, { unsupported: "Send now requires a Claude Code terminal without a pending permission or question" });
         return;
