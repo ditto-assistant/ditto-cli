@@ -117,13 +117,17 @@ export async function spawnInPty(command: string, args: string[], options: PtyOp
     options.onOutput?.(data);
   });
 
+  let localInputRevision = 0;
   const cleanups: Array<() => void> = [];
   if (options.attachTerminal !== false) {
     const stdin = process.stdin;
     const wasRaw = stdin.isTTY ? stdin.isRaw : false;
     if (stdin.isTTY) stdin.setRawMode(true);
     stdin.resume();
-    const onInput = (data: Buffer | string) => child.write(typeof data === "string" ? data : data.toString("utf8"));
+    const onInput = (data: Buffer | string) => {
+      localInputRevision++;
+      child.write(typeof data === "string" ? data : data.toString("utf8"));
+    };
     stdin.on("data", onInput);
     const onResize = () => child.resize(process.stdout.columns || cols, process.stdout.rows || rows);
     process.stdout.on("resize", onResize);
@@ -148,10 +152,12 @@ export async function spawnInPty(command: string, args: string[], options: PtyOp
     inject: async (prompt, mode = "queue", signal) => {
       if (signal?.aborted) return;
       let pasted = false;
-      // Only this owned, nonempty paste is eligible for editor cancellation.
+      const pasteInputRevision = localInputRevision;
+      // Undo only this owned, nonempty paste, preserving its prior native draft.
+      // Do not undo an intervening local edit. Native undo also checks input mode.
       // The caller still sends Escape independently to stop native execution.
       const cancelPaste = () => {
-        if (pasted && options.harness === "claude") child.write("\u0003");
+        if (pasted && options.harness === "claude" && localInputRevision === pasteInputRevision) child.write("\u001f");
       };
       signal?.addEventListener("abort", cancelPaste, { once: true });
       try {

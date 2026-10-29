@@ -204,5 +204,5 @@ test("actual PTY submits Enter and observed Ctrl+Enter bytes while Stop remains 
   const injecting = pty.inject("cancelled\nline two\nline three", "steer", stop.signal);
   stop.abort(); await injecting; await sleep(30);
   const cancelled = [...chunks.slice(before).join("").matchAll(/HEX:([0-9a-f]+)/g)].map((m) => m[1]).join("");
-  assert.equal(cancelled, Buffer.from("\u001b[200~cancelled\nline two\nline three\u001b[201~\u0003").toString("hex"), "only an owned unsubmitted paste is cleared before independent Stop");
+  assert.equal(cancelled, Buffer.from("\u001b[200~cancelled\nline two\nline three\u001b[201~\u001f").toString("hex"), "only an owned unsubmitted paste is cleared before independent Stop");
 });
