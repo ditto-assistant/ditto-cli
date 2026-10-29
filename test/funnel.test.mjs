@@ -664,7 +664,8 @@ test("endpoints keys create revokes the minted key when gh secret set fails", as
     assert.equal(failed.status, 1);
     assert.equal(keyPosts(stub).length, 1);
     assert.equal(gh.secretStdin(), MINTED_PLAINTEXT);
-    assert.match(failed.stderr, /gh could not store DITTO_KEY — gh secret set: HTTP 403/);
+    assert.match(failed.stderr, /gh could not store DITTO_KEY — gh secret set: exit 1; credential-bearing subprocess diagnostics suppressed/);
+    assert.doesNotMatch(failed.stderr, /HTTP 403/);
     assert.match(failed.stderr, /was revoked again/);
     assert.ok(stub.calls.some((c) => c.method === "DELETE" && c.url === `/api/v5/inference/endpoints/${ALPHA.id}/keys/key-2`), "must revoke the minted key");
     assert.doesNotMatch(failed.stdout + failed.stderr, /PLAINTEXT/);

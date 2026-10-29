@@ -1,5 +1,43 @@
 # Agent Instructions
 
+## Agent-friendly secret handling is the first priority
+
+Provider credentials must never appear in command arguments, terminal output,
+logs, exception bodies, fixtures with live values, MCP tool arguments, or saved
+configuration. Use an existing local environment reference (`--key-env NAME`), hidden terminal
+input, piped stdin, or the built-in Secret Manager import. Never expand or print
+the environment value in an agent tool call. Import captures the platform CLI's output in process memory and
+sends the credential directly to Ditto; do not print or materialize it as a
+shell variable or temporary file. Process-memory strings are not a secure erase
+guarantee.
+
+Provider-key commands return allowlisted metadata only. Do not add a reveal or
+fetch-secret operation. Do not pass through arbitrary provider or subprocess
+errors. Prefix detection is local and advisory. Add/import use one confirmed
+destination. Offline `provider-keys identify` must never fetch a catalog or make
+network requests. Its optional network checks require an explicit shortlist
+(at most four fixed documented providers) and `--confirm-key-sharing`. Never
+infer or extend that shortlist, choose a provider automatically, follow redirects,
+or use generation to identify a key. Keep catalogs distinct from proof of key
+acceptance, and read-only acceptance distinct from paid inference access.
+
+Model catalogs and balance checks must not silently run generation. Paid model
+or throughput probes require an explicit model shortlist, request/output/time
+bounds, a current operator price quote, acceptance of its estimate and spend
+confirmation. Default estimates stay within $0.10 and 20 calls; unknown prices
+stop generation and the budget never escalates automatically. A small probe does not establish capacity. An
+unknown supplier price cannot establish a dollar ceiling; preserve unknown
+receipt and cache values rather than converting them to zero. Pool changes must
+not silently alter billing, provider-key selection, or failover consent.
+
+Store new keys disabled by default. Immediate `--enable` is explicit consent for
+eligibility in existing normal BYOK automatic/all-key selection, not just private
+pools. Add/import are create-only; never retry a duplicate as rotation.
+Never add then disable: dormant creation must be atomic on the server.
+
+Exercise these boundaries with synthetic credentials, local API stubs and fake
+platform CLIs. Never use live keys to test redaction.
+
 This repo publishes [`@heyditto/cli`](https://www.npmjs.com/package/@heyditto/cli) to npm via [semantic-release](https://github.com/semantic-release/semantic-release) on every push to `main`. The conventions below are non-negotiable — break them and the release silently won't fire.
 
 ## Conventional commits (required)

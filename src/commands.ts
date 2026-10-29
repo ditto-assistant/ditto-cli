@@ -65,6 +65,8 @@ import {
   useSession,
 } from "./mcp-session.js";
 import { readStoredAuth, updateStoredAuth } from "./store.js";
+import { registerRouterPoolCommands } from "./router-pool-commands.js";
+import { secretSafeError, secretSafeMetadata } from "./secret-redaction.js";
 
 interface EndpointsOptions {
   output?: string;
@@ -989,15 +991,16 @@ export async function cmdEndpointKeysCreate(ref: string, options: KeysCreateOpti
   });
   // Split the plaintext off immediately; only `plaintext` may reach the
   // platform CLI's stdin.
-  const { key: plaintext, ...key } = minted;
+  const { key: plaintext, ...metadata } = minted;
+  const key = secretSafeMetadata(metadata, [plaintext]);
   try {
     deliver(store, secretName, store.deliveries(secretName, target), plaintext ?? "");
   } catch (err) {
-    const reason = err instanceof Error ? err.message : String(err);
+    const reason = secretSafeError(err, [plaintext]);
     try {
       await revokeKey(endpoint.id, key.id);
     } catch (revokeErr) {
-      const detail = revokeErr instanceof Error ? revokeErr.message : String(revokeErr);
+      const detail = secretSafeError(revokeErr, [plaintext]);
       throw new Error(
         `${reason}\nMinted key ${key.id} (…${key.keyHint}) on ${endpoint.slug} could NOT be revoked (${detail}). Revoke it now: heyditto endpoints keys revoke ${endpoint.slug} ${key.id} --yes, or at ${endpointURL(endpoint.id)}`,
       );
@@ -1103,6 +1106,7 @@ spend-limit increases ask you to type the slug back (or pass --yes).
 'keys create' mints a key straight into a secret manager via its own CLI
 through the gh CLI; the plaintext never reaches your terminal.`,
     );
+  registerRouterPoolCommands(endpoints, outputOption);
   addExamples(
     endpoints
       .command("list", { isDefault: true })

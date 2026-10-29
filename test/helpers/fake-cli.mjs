@@ -27,10 +27,13 @@ try {
 appendFileSync(process.env.FAKE_CLI_LOG, \`\${JSON.stringify({ bin, args, stdin })}\\n\`);
 const fail = process.env.FAKE_CLI_FAIL;
 if (fail && args.join(" ").includes(fail)) {
-  process.stderr.write(\`\${bin}: refusing "\${fail}" (fake failure)\\n\`);
-  process.exit(1);
-}
-process.exit(0);
+  const diagnostic = \`\${bin}: refusing "\${fail}" (fake failure)\\n\`;
+  if (process.env.FAKE_CLI_ECHO_STDIN && stdin) {
+    process.stdout.write(stdin + stdin, () => {
+      process.stderr.write(stdin + encodeURIComponent(stdin) + stdin + diagnostic, () => process.exit(1));
+    });
+  } else process.stderr.write(diagnostic, () => process.exit(1));
+} else process.exit(0);
 `;
 
 export function createFakeCLIs(bins) {

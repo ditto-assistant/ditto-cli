@@ -38,13 +38,13 @@ function run(args, env = {}) {
 }
 
 /** One `keys create` run against the API stub with only fake platform CLIs on PATH. */
-async function mint(args, { bins = BINS, fail } = {}) {
+async function mint(args, { bins = BINS, fail, echoSecret = false } = {}) {
   const stub = await startStub();
   const fakes = createFakeCLIs(bins);
   try {
     const result = await run(["endpoints", "keys", "create", "alpha", ...args, "--yes"], {
       DITTO_API_BASE: stub.base,
-      ...fakes.env(fail ? { FAKE_CLI_FAIL: fail } : {}),
+      ...fakes.env({ ...(fail ? { FAKE_CLI_FAIL: fail } : {}), ...(echoSecret ? { FAKE_CLI_ECHO_STDIN: "1" } : {}) }),
     });
     return { result, stub, fakes };
   } finally {
@@ -213,6 +213,15 @@ test("revokes the key when every attempt fails", async () => {
   assert.equal(stub.revocations().length, 1, "the unusable key must be revoked again");
   assert.ok(!result.stderr.includes(MINTED_PLAINTEXT));
   assert.ok(storeCall(fakes));
+});
+
+test("a failing platform CLI can echo the credential repeatedly without leaking it", async () => {
+  const { result, stub } = await mint(["--gh-secret", "DITTO_KEY", "--repo", "acme/app"], { fail: "secret set", echoSecret: true });
+  assert.equal(result.status, 1);
+  assert.ok(!`${result.stdout}${result.stderr}`.includes(MINTED_PLAINTEXT));
+  assert.ok(!`${result.stdout}${result.stderr}`.includes(encodeURIComponent(MINTED_PLAINTEXT)));
+  assert.match(result.stderr, /diagnostics suppressed/);
+  assert.equal(stub.revocations().length, 1);
 });
 
 test("a missing platform CLI fails before any key is minted", async () => {

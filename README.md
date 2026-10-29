@@ -155,8 +155,9 @@ heyditto login
 
 This prints a short code, opens `https://heyditto.ai/device` (pre-filled with the
 code), and saves the resulting key to your CLI config directory once you approve
-it. Pass a key as an argument (`heyditto login ditto_mcp_…`), pipe it with
-`--stdin`, or use `--paste` for the older copy-a-key page.
+it. Pipe an existing key with `heyditto login --stdin`, or use `--paste` for
+hidden input from the older copy-a-key page. Raw key arguments are refused so
+they cannot enter process listings or shell history.
 
 Agents can self-provision without a browser, email, or OTP:
 
@@ -206,11 +207,11 @@ npx @heyditto/cli@latest claude --yolo --worktree
 ```
 
 You can still paste a key from **https://app.heyditto.ai/mcp/newkey**
-(`heyditto login <key>`, `--paste`, or `--stdin`), or set it in the environment:
+(`heyditto login --paste` for hidden input, or `--stdin`), or configure a private
+runtime environment containing `DITTO_API_KEY` without printing it:
 
 ```bash
-export DITTO_API_KEY=ditto_mcp_…
-# add to ~/.zshrc / ~/.bashrc to persist
+# Prefer browser login or --stdin; never paste key values into shell history.
 ```
 
 ## Commands
@@ -242,7 +243,7 @@ heyditto graphs remove <@username>
 heyditto graphs subscribers
 heyditto graphs sharing (--enable|--disable) [--title <t>] [--description <d>]
 heyditto init [--name <name>] [--subscribe <@graph>]... [<@graph>...] [--json]
-heyditto login [<key>] [--paste] [--stdin]
+heyditto login [--paste] [--stdin]
 heyditto endpoints [--set-default <slug>] [--clear-default]
 heyditto apps list [--company <id>]
 heyditto apps create <name> [--gh-secret NAME --repo o/r | --gcp-secret NAME | …]
@@ -1314,3 +1315,249 @@ heyditto orgs set-role @teammate member --org your-team --expected-role viewer
 `allowance` reads your own allowance when the member is omitted. Current org managers can inspect another member by exact id, email or handle. It uses Ditto MCP, exposes no company balance or purchase history, and changes no budget. MCP refusals exit with an error.
 
 `set-role` resolves exactly one member, sends only the role, and reports the previous role. `--expected-role` is a client preflight, not an atomic compare-and-set. Owner/admin authorization and last-owner/last-manager protections are enforced by the backend. Reverting a role uses the same command with the reported previous role and current authorization. Directory listing is capped at 2000 rows and reports possible truncation. Role changes refuse a directory at that cap, since an exact name lookup cannot be guaranteed complete. These commands need a full account CLI key and a backend that admits the member routes; narrowed space/tool/thread keys are refused.
+
+## Provider keys and private BYOK pools
+
+Provider-key management is designed for agents. The CLI accepts credentials from
+a local `--key-env NAME` reference, hidden terminal paste, `--stdin`, or Google Secret Manager import. It never
+prints the credential, writes it to disk, or accepts it as a command argument.
+Use saved key UUIDs for later operations. MCP can manage the same metadata and
+routing policies; secret bytes enter through the local CLI, not a tool argument.
+Provider-key and pool commands default to JSON. Explicit `--output text` renders
+the same allowed metadata as readable text; `--output markdown` wraps that text
+in a code block, and `--output raw` retains JSON.
+
+For an unfamiliar key, `provider-keys identify` (alias `detect`) reads a local
+secret reference or hidden paste and reports prefix hints without contacting
+Ditto or any provider. Strong prefixes are hints, not proof of ownership. Agents
+that know the provider should normally supply it explicitly when adding a key.
+Offline hints may name other providers, such as Engy. They are display-only and
+never populate the explicit four-provider network shortlist automatically.
+
+```bash
+# Offline hints read the local key and make no network requests.
+heyditto provider-keys identify --key-env EXISTING_PROVIDER_KEY
+
+# Dry run reads no key and sends no requests.
+heyditto provider-keys identify --try-provider openrouter --try-provider gm --dry-run
+
+# Explicit consent sends the key only to the two named read-only APIs.
+heyditto provider-keys identify --key-env EXISTING_PROVIDER_KEY \
+  --try-provider openrouter --try-provider gm --confirm-key-sharing
+```
+
+The optional shortlist supports at most four distinct providers. It sends GET
+requests only to the following documented endpoints, with a five-second deadline
+and a 64 KiB response limit per provider. It rejects redirects and never guesses
+another destination, runs generation, saves a key, activates routing, or chooses
+among accepted providers. `--dry-run` shows these exact destinations without
+reading a secret. No custom URLs or Impala guesses are supported.
+
+| Provider | Fixed destination | Documentation |
+| --- | --- | --- |
+| OpenAI | `https://api.openai.com/v1/models` | [List models](https://developers.openai.com/api/reference/resources/models/methods/list) |
+| Anthropic | `https://api.anthropic.com/v1/models` | [List models](https://platform.claude.com/docs/en/api/models/list) |
+| OpenRouter | `https://openrouter.ai/api/v1/key` | [Current key](https://openrouter.ai/docs/api/api-reference/api-keys/get-current-api-key) |
+| GM | `https://api.saygm.com/v1/credits` | [API overview](https://docs.saygm.com/api/overview/) |
+
+Output contains fixed provider/destination identifiers, numeric HTTP status and
+status enums only. A model catalog returns `models_advertised`; it does not
+confirm key acceptance. A typed key or balance response can return
+`accepted_read_only`, which does not prove ownership, generation access or
+available spend. Permission errors, malformed bodies, redirects and transport
+failures remain `unknown`; 401 means `rejected`, and 429 means `rate_limited`.
+No provider response text, model names, account identity or balance is printed.
+
+```bash
+heyditto provider-keys providers
+heyditto provider-keys list --org omniaura
+# The variable must already exist locally. The agent supplies only its name.
+heyditto provider-keys add --org omniaura --provider openai --key-env OPENAI_API_KEY
+heyditto provider-keys add --org omniaura --provider custom \
+  --protocol openai --base-url https://inference.example.com/v1
+heyditto provider-keys import --org omniaura --from gcloud \
+  --secret impala-review --project my-gcp-project --account me@example.com \
+  --provider custom --protocol openai --base-url https://inference.example.com/v1
+heyditto provider-keys inspect <saved-key-uuid> --org omniaura
+heyditto provider-keys models <saved-key-uuid> --org omniaura
+heyditto provider-keys balance <saved-key-uuid> --org omniaura
+heyditto provider-keys set <saved-key-uuid> --org omniaura --disable
+```
+
+`--key-env` reads an existing environment variable inside the CLI. It cannot be
+combined with `--stdin`; import uses its own Secret Manager source. Do not read
+or expand the variable in an agent tool call. Rotation supports
+`set <saved-key-uuid> --rotate-key-env NAME` or `--rotate-stdin`.
+
+`--org` selects an organization. Without it the saved `orgs use` organization
+applies; `--personal` overrides that selection. Import verifies a signed-in
+gcloud account and requires an explicit project or a full Secret Manager
+resource. It changes no global cloud defaults and suppresses subprocess
+diagnostics, which could contain secret values. It needs Secret Manager access,
+not Application Default Credentials. Keep the provider key out of shell
+variables, command substitutions and agent transcripts by using this import
+instead of running `gcloud secrets versions access` yourself.
+
+Unique provider prefixes can suggest a provider locally. Ambiguous or unknown
+keys require `--provider`; a custom API key also needs a URL and an OpenAI or
+Anthropic protocol. Base URLs and full chat/messages URLs are accepted. Custom
+path prefixes remain intact. URLs containing embedded credentials or query
+parameters are rejected. No key is tried against several companies to guess its
+owner. Provider-key management accepts the production Ditto API or an explicit
+loopback test API; an arbitrary `DITTO_API_BASE` override is refused.
+Providers that need public account or gateway identifiers expose those settings
+in `provider-keys providers`. Supply them with repeatable `--param name=value`.
+Only declared public settings are accepted; credentials never belong in these
+arguments. Use `--base-url` for URLs.
+
+New keys are stored disabled by default in one atomic operation. Inspection and
+explicitly confirmed bounded probes can use them while dormant. Add/import
+`--enable` only when you want the key eligible for existing normal BYOK endpoints
+that use automatic/all-key selection. Activation is not confined to the private
+pool. You can activate later with `provider-keys set <saved-key-uuid> --enable`.
+
+Add/import create a new entry for the provider and label; they never rotate an
+existing entry. A duplicate returns HTTP 409 without changing the saved key.
+Choose another label or explicitly rotate its saved UUID with `provider-keys set`.
+
+Saving a key performs a no-generation inspection unless `--no-inspect` is set.
+The result distinguishes advertised models, valid/rejected/unknown credentials,
+and reported/unsupported/unknown balance checks. Not every provider offers a
+balance API. A missing balance is not zero, and a listed model is not proof that
+the account can run it. Native OpenRouter, GM and Vercel keys use their known
+balance API automatically when no base URL override is configured. An explicit
+`--balance-provider` association allows balance inspection with the matching
+named provider; `--balance-provider impala` supports either custom protocol.
+Inspection sends the saved key to the selected provider's fixed API:
+
+| Provider | Balance API | Meaning |
+| --- | --- | --- |
+| Impala | `https://api.platform.getimpala.ai/v1/account` | PAYG wallet, separate from the inference origin |
+| OpenRouter | `https://openrouter.ai/api/v1/key` | Remaining key limit, not necessarily the organization wallet |
+| GM | `https://api.saygm.com/v1/credits` | Account wallet |
+| Vercel AI Gateway | `https://ai-gateway.vercel.sh/v1/credits` | Account wallet |
+
+For Impala, this explicitly transmits the custom key to its separate billing
+origin, `https://api.platform.getimpala.ai`. A custom inference URL cannot
+redirect a balance check to another host. Reported negative wallet balances
+remain negative; unsupported or unknown balances remain distinct from zero.
+
+Paid probing requires a current price estimate for the saved destination and
+exact model shortlist. Discovery and balance inspection never generate tokens.
+The default plan allows at most $0.10 in quoted estimates and 20 calls. A higher
+budget requires an explicit `--max-cost-usd`; the CLI never raises it on retry.
+
+Create a nonsensitive `quote.json` with the provider's current prices. All four
+rates must be decimal strings, including explicit zero request fees. This shape
+uses placeholders, not vendor prices:
+
+```json
+{
+  "checkedAt": "<current RFC3339 time>",
+  "models": [{
+    "model": "provider/model",
+    "inputPerMillionUsd": "<USD per million input tokens>",
+    "outputPerMillionUsd": "<USD per million output tokens>",
+    "perRequestUsd": "<USD fee per request>",
+    "minimumRequestUsd": "<minimum USD per request>"
+  }]
+}
+```
+
+The quote must be no more than 24 hours old. Do not reuse another provider's
+prices. Prepare a plan without generation, then remove `--dry-run` and add `--confirm-spend` to the same command to execute
+it:
+
+```bash
+heyditto provider-keys probe <saved-key-uuid> --org omniaura \
+  --model provider/model --requests 3 --concurrency 1 \
+  --max-output-tokens 8 --quote-file quote.json --accept-estimate --dry-run
+```
+
+`--dry-run` contacts Ditto to prepare the plan and makes no generation calls.
+Without a quote it reports why generation is blocked. Every paid run requires
+`--quote-file`, `--accept-estimate` and `--confirm-spend`. Unknown prices cannot
+bypass these requirements; `--allow-unknown-cost` refuses execution.
+
+The server reserves the whole quoted plan before dispatch. Quotes include input
+bytes plus an estimated 512 framing tokens, output/reasoning allowance, request
+fees and minimum fees. This is an operator estimate, not a supplier bill ceiling:
+`costBoundAvailable` remains false. `quotedBudgetAvailable` reports whether that
+estimated plan fits the local quote limit. Provider billing can differ. The
+server stops remaining calls if observed costs or usage exceed the quote.
+
+Every run is limited to 20 calls, four concurrent requests, 32 output tokens per
+call and 30 seconds. `--requests-per-minute` defaults to 60 and is capped at
+6,000; a stricter existing shared credential limit still applies. This probe
+rate does not change the live pool configuration. Service tier is the account's
+default; the CLI does not invent tier selections a provider cannot accept.
+Provider-reported costs are not settled receipts. Omitted costs and cache counts
+stay unknown. Input accounting distinguishes fresh input excluding cached tokens
+from totals including cached tokens; no cache ratio is inferred without that
+denominator. Attempted calls, HTTP responses and successful generations remain
+separate counts. `tokensPerSecondBasis: end_to_end_output_tokens` means output
+tokens divided by the entire request duration, including reasoning time; it is
+not a decode-only rate. An omitted basis remains unknown. Observed throughput
+is not a capacity guarantee.
+
+Private pools use saved organization or personal key UUIDs. For example,
+`pool.json` can contain:
+
+```json
+{
+  "enabled": true,
+  "routes": [
+    { "keyId": "11111111-1111-1111-1111-111111111111", "weight": 70, "requestsPerMinute": 75 },
+    { "keyId": "22222222-2222-2222-2222-222222222222", "weight": 30 }
+  ]
+}
+```
+
+```bash
+heyditto endpoints pool show ditto-review
+heyditto endpoints pool set ditto-review --file pool.json --dry-run
+heyditto endpoints pool set ditto-review --file pool.json
+heyditto endpoints pool disable ditto-review --dry-run
+```
+
+Pool writes change only `privateUpstreamRouting`. They do not change billing,
+selected key UUIDs, or failover. Enabling requires full BYOK and
+server-controlled feature access, initially enabled only for the pilot owner.
+Platform Impala credentials remain separately restricted. Weights divide new sessions; session affinity preserves caches.
+Rate limits are manual admission caps. Switching to another provider still
+requires explicit failover policy. `disable` atomically changes only the enabled flag, preserving all route sets,
+the policy version and stored provider credentials. This custom-key pool is separate from the
+private Impala source used for Ditto-funded reviews.
+
+
+Version 2 pools configure separate Standard and Fast route sets. For example,
+`modes.json` can contain:
+
+```json
+{
+  "version": 2,
+  "enabled": true,
+  "modes": {
+    "standard": { "routes": [
+      { "keyId": "11111111-1111-1111-1111-111111111111", "weight": 100, "requestsPerMinute": 60 }
+    ] },
+    "fast": { "routes": [
+      { "keyId": "22222222-2222-2222-2222-222222222222", "weight": 100, "requestsPerMinute": 60 }
+    ] }
+  }
+}
+```
+
+Both mode objects and route arrays are required. Each enabled mode needs 1–16
+routes; disabled policies may have empty arrays. V1 files retain their original
+shape. Once a V2 policy exists, V1 files cannot replace it, even to disable it.
+Use `endpoints pool disable` to preserve both mode configurations atomically.
+Whole-file `set` operations deliberately replace the policy and do not promise
+compare-and-swap protection against another editor.
+
+Trusted Review context selects Standard or Fast. This CLI does not offer a
+request header to override that decision. A missing or unavailable Fast route
+does not silently use Standard. The mode belongs to the session affinity scope;
+weight edits do not repin active sessions. Limits on one credential are shared
+across modes. These are routing choices, not supplier service-tier parameters,
+and a route's label does not establish that its infrastructure is faster.
