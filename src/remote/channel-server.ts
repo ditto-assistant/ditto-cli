@@ -33,7 +33,7 @@ export async function runChannelServer(options: { receiptTimeoutMs?: number; com
     handlers: {
       onTurn: (turn) => {
         if (turn.sessionId !== sessionId) return;
-        if (turn.deliveryMode !== undefined && (turn.deliveryMode !== "queue" || (turn.kind ?? "prompt") !== "prompt")) {
+        if (turn.deliveryMode !== undefined && turn.deliveryMode !== "queue") {
           host.send({ type: "turn.ack", turnId: turn.turnId });
           host.send({ type: "turn.finished", turnId: turn.turnId, unsupported: "MCP Channels cannot force Send now or interrupt Claude Code. Normal notifications are scheduled by Claude." });
           return;

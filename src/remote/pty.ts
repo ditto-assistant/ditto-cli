@@ -85,6 +85,8 @@ export interface PtyOptions {
   env: NodeJS.ProcessEnv;
   /** Mirror to the real terminal (raw mode, resize). Tests can turn it off. */
   attachTerminal?: boolean;
+  /** Enables Claude-specific owned paste cancellation; physical Stop is separate. */
+  harness?: Harness;
   onOutput?: (data: string) => void;
 }
 
@@ -145,12 +147,26 @@ export async function spawnInPty(command: string, args: string[], options: PtyOp
     write: (data) => child.write(data),
     inject: async (prompt, mode = "queue", signal) => {
       if (signal?.aborted) return;
-      child.write(`\u001b[200~${prompt}\u001b[201~`);
-      await sleep(120);
-      if (signal?.aborted) return;
-      // Observed from native Claude Code 2.1.312 in a real terminal. Stop
-      // remains a separate Escape key; steering does not emulate Stop.
-      child.write(mode === "steer" ? "\u001b[13;5u" : "\r");
+      let pasted = false;
+      // Only this owned, nonempty paste is eligible for editor cancellation.
+      // The caller still sends Escape independently to stop native execution.
+      const cancelPaste = () => {
+        if (pasted && options.harness === "claude") child.write("\u0003");
+      };
+      signal?.addEventListener("abort", cancelPaste, { once: true });
+      try {
+        child.write(`\u001b[200~${prompt}\u001b[201~`);
+        pasted = prompt.length > 0;
+        await sleep(120);
+        if (signal?.aborted) return;
+        pasted = false;
+        // Observed from native Claude Code 2.1.312 in a real terminal. Stop
+        // remains a separate Escape key; steering does not emulate Stop.
+        child.write(mode === "steer" ? "\u001b[13;5u" : "\r");
+      } finally {
+        pasted = false;
+        signal?.removeEventListener("abort", cancelPaste);
+      }
     },
     interrupt: (harness) => child.write(harness === "claude" ? "\u001b" : "\u0003"),
     quietFor: () => Date.now() - lastOutput,

@@ -26,7 +26,7 @@ async function world(t, { harness = "claude", mode = "tui", inject } = {}) {
   const send = (turnId, extra = {}) => stub.send({ type: "turn.deliver", sessionId: "owned-session", turnId, text: turnId, ...extra });
   const started = (id) => stub.waitFor((f) => f.type === "turn.started" && f.turnId === id);
   const finished = (id) => stub.waitFor((f) => f.type === "turn.finished" && f.turnId === id);
-  return { stub, events, calls, session, send, started, finished, interrupts: () => interrupts, quiet: () => { quiet = Infinity; } };
+  return { stub, events, calls, session, send, started, finished, interrupts: () => interrupts, quiet: () => { quiet = Infinity; }, busy: () => { quiet = 0; } };
 }
 
 test("Claude normal FIFO survives immediate steering and stale Stop cannot finish its replacement", async (t) => {
@@ -68,6 +68,41 @@ test("a locally typed native prompt holds remote FIFO until its Stop hook", asyn
   assert.equal(w.calls[0][0], "after-local");
   w.events.emit("hook", { source: "claude", event: "Stop" });
   await w.finished("after-local");
+});
+
+test("late steered Stop cannot finish its normal successor after fallback", { timeout: 6000 }, async (t) => {
+  const w = await world(t);
+  w.send("steered", { deliveryMode: "steer" }); await w.started("steered");
+  w.send("successor"); w.quiet(); await w.finished("steered");
+  await w.started("successor"); w.busy();
+  w.events.emit("hook", { source: "claude", event: "Stop" });
+  await sleep(70);
+  assert.equal(w.stub.frames.some((f) => f.type === "turn.finished" && f.turnId === "successor"), false, "late steered hook must not finish the successor");
+  w.stub.send({ type: "turn.interrupt", turnId: "successor" });
+  await sleep(20); assert.equal(w.interrupts(), 1, "physical Stop remains independent after hook distrust");
+  w.quiet(); assert.equal((await w.finished("successor")).interrupted, true);
+});
+
+test("post-steer local keyboard activity drains queued input through bounded fallback", { timeout: 6000 }, async (t) => {
+  const w = await world(t);
+  w.send("steered", { deliveryMode: "steer" }); await w.started("steered");
+  w.quiet(); await w.finished("steered"); w.busy();
+  w.events.emit("hook", { source: "claude", event: "UserPromptSubmit", payload: { prompt: "local successor" } });
+  w.send("after-local");
+  await sleep(50); assert.equal(w.calls.length, 1);
+  w.events.emit("hook", { source: "claude", event: "Stop" });
+  await sleep(30); assert.equal(w.calls.length, 1, "unscoped hook cannot release the local hold");
+  w.quiet(); await w.started("after-local"); await w.finished("after-local");
+});
+
+test("failed steering injection restores only an unsettled predecessor", { timeout: 6000 }, async (t) => {
+  const w = await world(t, { inject: async (_text, mode) => { if (mode === "steer") throw new Error("synthetic write rejection"); } });
+  w.send("prior"); await w.started("prior");
+  w.send("rejected", { deliveryMode: "steer" });
+  assert.match((await w.finished("rejected")).error, /synthetic write rejection/);
+  w.events.emit("hook", { source: "claude", event: "Stop" });
+  await w.finished("prior");
+  assert.equal(w.stub.frames.find((f) => f.type === "turn.finished" && f.turnId === "prior").interrupted, undefined);
 });
 
 test("unsupported mode, non-prompt steering and pending permission never inject", async (t) => {
@@ -127,11 +162,29 @@ test("Stop targeting the prior active receipt cancels a steering paste before Ct
   assert.equal(w.stub.frames.some((f) => f.type === "turn.started" && f.turnId === "new-paste"), false);
 });
 
+test("Stop cancels a delivered steer waiting for the input lock before activation", { timeout: 6000 }, async (t) => {
+  let release;
+  const writing = new Promise((resolve) => { release = resolve; });
+  const w = await world(t, { inject: async () => writing });
+  w.send("first-paste");
+  const deadline = Date.now() + 2000;
+  while (!w.calls.length && Date.now() < deadline) await sleep(5);
+  assert.equal(w.calls.length, 1);
+  w.send("pending-steer", { deliveryMode: "steer" });
+  await w.stub.waitFor((f) => f.type === "turn.ack" && f.turnId === "pending-steer");
+  w.stub.send({ type: "turn.interrupt", turnId: "pending-steer" });
+  await sleep(30); assert.equal(w.interrupts(), 1);
+  release();
+  assert.equal((await w.finished("pending-steer")).interrupted, true);
+  assert.equal((await w.finished("first-paste")).interrupted, true);
+  assert.equal(w.calls.length, 1, "cancelled pending steer must never paste or submit later");
+});
+
 test("actual PTY submits Enter and observed Ctrl+Enter bytes while Stop remains Escape", async (t) => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), "ditto-send-keys-"));
   const chunks = [];
   const script = String.raw`process.stdin.setRawMode(true);process.stdin.resume();process.stdout.write("READY\n");process.stdin.on("data",b=>process.stdout.write("HEX:"+b.toString("hex")+"\n"));`;
-  const pty = await spawnInPty(process.execPath, ["--input-type=module", "-e", script], { cwd, env: process.env, attachTerminal: false, onOutput: (data) => chunks.push(data) });
+  const pty = await spawnInPty(process.execPath, ["--input-type=module", "-e", script], { cwd, env: process.env, harness: "claude", attachTerminal: false, onOutput: (data) => chunks.push(data) });
   t.after(async () => { pty.kill(); await pty.exit; await rm(cwd, { recursive: true, force: true }); });
   const deadline = Date.now() + 2000;
   while (!/(?:^|[\r\n])READY[\r\n]/.test(chunks.join("")) && Date.now() < deadline) await sleep(5);
@@ -140,10 +193,16 @@ test("actual PTY submits Enter and observed Ctrl+Enter bytes while Stop remains 
   await sleep(60);
   const hex = [...chunks.join("").matchAll(/HEX:([0-9a-f]+)/g)].map((m) => m[1]).join("");
   assert.equal(hex, Buffer.from("\u001b[200~normal\u001b[201~\r\u001b[200~immediate\u001b[201~\u001b[13;5u\u001b").toString("hex"));
+  const afterSubmit = new AbortController();
+  await pty.inject("already submitted", "queue", afterSubmit.signal);
+  await sleep(30);
+  const submittedEnd = chunks.length;
+  afterSubmit.abort(); await sleep(30);
+  assert.equal(chunks.length, submittedEnd, "late abort must not clear a later native draft");
   const before = chunks.length;
   const stop = new AbortController();
-  const injecting = pty.inject("cancelled", "steer", stop.signal);
+  const injecting = pty.inject("cancelled\nline two\nline three", "steer", stop.signal);
   stop.abort(); await injecting; await sleep(30);
   const cancelled = [...chunks.slice(before).join("").matchAll(/HEX:([0-9a-f]+)/g)].map((m) => m[1]).join("");
-  assert.equal(cancelled, Buffer.from("\u001b[200~cancelled\u001b[201~").toString("hex"), "cancelled paste must not submit after Stop");
+  assert.equal(cancelled, Buffer.from("\u001b[200~cancelled\nline two\nline three\u001b[201~\u0003").toString("hex"), "only an owned unsubmitted paste is cleared before independent Stop");
 });

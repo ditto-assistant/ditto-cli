@@ -876,6 +876,7 @@ async function runInTerminalWithRemote(harness: Harness, plan: HarnessPlan, ctx:
     pty = await spawnInPty(plan.command, withHookArgs(harness, plan.args, hookArgs(harness, hooks)), {
       cwd: ctx.cwd,
       env: childEnv(plan, process.env),
+      harness,
     });
   } catch (err) {
     await hooks.close();

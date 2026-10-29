@@ -976,9 +976,10 @@ How it works:
   observed through Claude hooks also holds that FIFO until its Stop hook. Explicit `deliveryMode:
   "steer"` bypasses that FIFO and submits the prompt with native Ctrl+Enter;
   queued prompts remain queued. Escape still performs the independent Stop.
-  A steered turn ignores unscoped native Stop hooks because they have no remote
-  turn identity, so its completion receipt uses the existing quiet fallback
-  (eight seconds by default). Physical cancellation and receipt timing are
+  After the first successful steer, Claude Stop hooks remain uncorrelated for
+  the rest of that session. Remote receipts and later local keyboard activity
+  therefore use the existing quiet fallback (eight seconds by default), which
+  can delay completion receipts and queue draining. Physical cancellation and receipt timing are
   separate. Headless and other harnesses reject steering. MCP Channels also
   rejects forced steering and interruption; Claude schedules its notifications,
   which does not establish a host FIFO or immediate-delivery guarantee.

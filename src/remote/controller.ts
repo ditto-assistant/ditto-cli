@@ -55,6 +55,7 @@ interface ActiveTurn {
   headless?: HeadlessTurn;
   done: () => void;
   settled: Promise<void>;
+  settledFlag: boolean;
   /** Stop hooks carry no remote turn identity, so a late old Stop is unsafe. */
   ignoreStopHook: boolean;
   injection: AbortController;
@@ -78,7 +79,11 @@ export class RemoteSession {
   private current?: ActiveTurn;
   private inputReady: Promise<void> = Promise.resolve();
   private steering?: Promise<void>;
+  private readonly pendingSteers = new Map<string, AbortController>();
   private nativeBusy = false;
+  private stopHooksUncorrelated = false;
+  private nativeEpoch = 0;
+  private nativeIdleTimer?: NodeJS.Timeout;
   private readonly idleWaiters = new Set<() => void>();
   private draining = false;
   private stopped = false;
@@ -141,6 +146,7 @@ export class RemoteSession {
 
   stop(): void {
     this.stopped = true;
+    for (const pending of this.pendingSteers.values()) pending.abort();
     this.nativeIdle();
     this.stopWatching?.();
     this.host.close();
@@ -183,9 +189,12 @@ export class RemoteSession {
         this.finish(frame.turnId, { unsupported: "Send now requires a Claude Code terminal without a pending permission or question" });
         return;
       }
-      const steering = this.runTurn(frame);
+      const injection = new AbortController();
+      this.pendingSteers.set(frame.turnId, injection);
+      const steering = this.runTurn(frame, injection);
       this.steering = steering;
       void steering.finally(() => {
+        if (this.pendingSteers.get(frame.turnId) === injection) this.pendingSteers.delete(frame.turnId);
         if (this.steering === steering) this.steering = undefined;
       });
       return;
@@ -201,7 +210,15 @@ export class RemoteSession {
 
   private onInterrupt(turnId: string): void {
     const current = this.current;
-    if (!current || (current.turnId !== turnId && !(current.superseded?.turnId === turnId && !current.submitted))) return;
+    if (!current || (current.turnId !== turnId && !(current.superseded?.turnId === turnId && !current.submitted))) {
+      const pending = this.pendingSteers.get(turnId);
+      if (pending) {
+        pending.abort();
+        if (current) this.onInterrupt(current.turnId);
+        else if (this.nativeBusy) this.pty?.interrupt(this.ctx.harness);
+      }
+      return;
+    }
     current.interrupted = true;
     current.injection.abort();
     if (current.superseded) {
@@ -239,6 +256,7 @@ export class RemoteSession {
           // phone or the keyboard.
           this.clearPending();
           this.nativeBusy = true;
+          this.watchLocalQuietFallback();
           this.host.status(this.ctx.sessionId, "running");
           return;
         case "Notification":
@@ -286,7 +304,7 @@ export class RemoteSession {
     if (/turn-complete|turn-ended|agent-turn/.test(event.event)) this.turnEnded();
   }
   private turnEnded(): void {
-    if (this.current?.ignoreStopHook) return;
+    if (this.stopHooksUncorrelated || this.current?.ignoreStopHook) return;
     this.nativeIdle();
     this.clearPending();
     if (!this.current) this.host.status(this.ctx.sessionId, "idle");
@@ -294,9 +312,38 @@ export class RemoteSession {
   }
 
   private nativeIdle(): void {
+    this.nativeEpoch++;
+    clearInterval(this.nativeIdleTimer);
+    this.nativeIdleTimer = undefined;
     this.nativeBusy = false;
     for (const resolve of this.idleWaiters) resolve();
     this.idleWaiters.clear();
+  }
+
+  /** After steering, unscoped Stop hooks remain ambiguous even for successors.
+   * Local keyboard activity has no receipt to await, so bound its FIFO hold by
+   * the same quiet fallback instead of waiting forever for a trusted hook.
+   */
+  private watchLocalQuietFallback(): void {
+    const epoch = ++this.nativeEpoch;
+    clearInterval(this.nativeIdleTimer);
+    this.nativeIdleTimer = undefined;
+    if (!this.stopHooksUncorrelated || this.current) return;
+    const started = Date.now();
+    const limit = this.ctx.quietFallbackMs ?? 8000;
+    const timer = setInterval(() => {
+      if (epoch !== this.nativeEpoch || this.stopped || this.current || !this.nativeBusy) {
+        clearInterval(timer);
+        if (this.nativeIdleTimer === timer) this.nativeIdleTimer = undefined;
+        return;
+      }
+      if (!this.pending && this.pty && Date.now() - started > Math.min(2000, limit) && this.pty.quietFor() >= limit) {
+        this.nativeIdle();
+        this.host.status(this.ctx.sessionId, "idle");
+      }
+    }, 250);
+    this.nativeIdleTimer = timer;
+    timer.unref();
   }
 
   private requestQuestion(toolInput: unknown): void {
@@ -398,7 +445,7 @@ export class RemoteSession {
     return { text: buildPrompt(invocation, attachments, promptOptions), entry };
   }
 
-  private async runTurn(frame: TurnDeliverFrame): Promise<void> {
+  private async runTurn(frame: TurnDeliverFrame, injection?: AbortController): Promise<void> {
     const { turnId } = frame;
     const steer = frame.deliveryMode === "steer";
     // Reserve input order before asynchronous downloads. Only preparation and
@@ -410,10 +457,19 @@ export class RemoteSession {
     let released = false;
     const release = () => { if (!released) { released = true; releaseInput(); } };
     let active: ActiveTurn | undefined;
+    let previous: ActiveTurn | undefined;
     let settle: () => void = () => undefined;
     try {
       if (this.stopped) return;
+      if (injection?.signal.aborted) {
+        this.finish(turnId, { exitCode: 0, interrupted: true });
+        return;
+      }
       const resolved = await this.resolveText(frame);
+      if (injection?.signal.aborted) {
+        this.finish(turnId, { exitCode: 0, interrupted: true });
+        return;
+      }
       if ("unsupported" in resolved) {
         this.finish(turnId, { exitCode: 0, unsupported: resolved.unsupported });
         return;
@@ -427,15 +483,19 @@ export class RemoteSession {
       let finish: () => void = () => undefined;
       const finished = new Promise<void>((resolve) => { finish = resolve; });
       const settled = new Promise<void>((resolve) => { settle = resolve; });
-      const previous = this.current;
-      active = { turnId, interrupted: false, done: finish, settled, ignoreStopHook: steer, injection: new AbortController(), submitted: false, ...(steer && previous ? { superseded: previous } : {}) };
+      previous = this.current;
+      active = { turnId, interrupted: false, done: finish, settled, settledFlag: false, ignoreStopHook: steer, injection: injection ?? new AbortController(), submitted: false, ...(steer && previous ? { superseded: previous } : {}) };
       this.current = active;
       this.host.status(this.ctx.sessionId, "running");
       if (this.pty) {
         this.ctx.log(`remote control: ${entry ? `command ${text.split("\n")[0]}` : steer ? "Send now prompt" : "prompt"} received from the app (turn ${turnId.slice(0, 8)})`);
         await this.pty.inject(text, frame.deliveryMode, active.injection.signal);
         if (active.interrupted) active.done();
-        else { active.submitted = true; this.host.send({ type: "turn.started", turnId }); }
+        else {
+          active.submitted = true;
+          if (steer) this.stopHooksUncorrelated = true;
+          this.host.send({ type: "turn.started", turnId });
+        }
         // Ctrl+Enter itself performs native steering. Do not use Escape here.
         // Supersede only after submission, and keep normal queued prompts.
         if (steer && previous && !active.interrupted) {
@@ -457,9 +517,13 @@ export class RemoteSession {
         this.finish(turnId, { error: "no harness attached" });
       }
     } catch (err) {
+      if (steer && active && !active.submitted && !active.interrupted && this.current === active && previous && !previous.settledFlag) {
+        this.current = previous;
+      }
       this.finish(turnId, { error: err instanceof Error ? err.message : String(err) });
     } finally {
       release();
+      if (active) active.settledFlag = true;
       // The superseded run may finish after its replacement starts. Its
       // cleanup and Stop receipt must never clear the replacement's state.
       if (active && this.current === active) {

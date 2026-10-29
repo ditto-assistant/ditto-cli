@@ -23,7 +23,7 @@ test("Channels advertises native scheduling and refuses steering without emittin
     for (const [turnId, extra] of [["steer", { deliveryMode: "steer" }], ["unknown", { deliveryMode: "invented" }], ["command", { kind: "command", deliveryMode: "queue" }]]) {
       stub.send({ type: "turn.deliver", sessionId: "channel-session", turnId, text: "synthetic input", ...extra });
       const receipt = await stub.waitFor((f) => f.type === "turn.finished" && f.turnId === turnId);
-      assert.match(receipt.unsupported, /cannot force Send now/);
+      assert.match(receipt.unsupported, turnId === "command" ? /Channels accepts prompts.*CLI bridge/ : /cannot force Send now/);
     }
     assert.equal(events.length, 0, "refused modes must not become ordinary notifications");
     stub.send({ type: "turn.deliver", sessionId: "channel-session", turnId: "normal", text: "normal native scheduling", deliveryMode: "queue" });
