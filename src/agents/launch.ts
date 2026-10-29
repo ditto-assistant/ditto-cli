@@ -29,7 +29,8 @@ import { claudeDittoDenyRules } from "./claude-deny.js";
 import { type ClaudeMcpAttachment, claudeMcpAttachment, fetchMcpCatalog, mcpApprovalNote } from "./claude-mcp.js";
 import { liftResumeFlags, planClaude } from "./claude.js";
 import { resolveClaudeResume, transcriptCwd } from "./claude-resume.js";
-import { type ClaudeTranscript, findTranscriptById, listTranscriptsIn } from "./claude-transcripts.js";
+import { type ClaudeTranscript, findTranscriptById, isUuid, listTranscriptsIn } from "./claude-transcripts.js";
+import { watchClaudeSessionTitle } from "./claude-title-sync.js";
 import { planCodex } from "./codex.js";
 import { ensureGrokHome, planGrok } from "./grok.js";
 import { type SessionRecord, latestSession, readSession, sessionForHarnessId, writeSession } from "./sessions.js";
@@ -670,6 +671,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   }
   if (!key) throw new Error("internal: key was not minted");
 
+  const explicitLaunchTitle = options.name?.trim() || record?.explicitLaunchTitle;
   const nextRecord: SessionRecord = {
     id: sessionId,
     harness,
@@ -686,18 +688,35 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     launches: (record?.launches ?? 0) + 1,
     mcpOnly: options.mcpOnly,
     remoteTransport: options.remoteTransport,
+    ...(explicitLaunchTitle ? { explicitLaunchTitle } : {}),
   };
   await writeSession(nextRecord);
 
   const remote: RemoteMode = remoteMode(options);
+  const launchRegistration = {
+    sessionId, endpointId: endpoint.id, harness: harness === "claude" ? "claude-code" : harness,
+    inference: options.mcpOnly ? "native" : "router", transport: options.remoteTransport ?? "cli",
+    title: explicitLaunchTitle || `${path.basename(cwd)} · ${sessionId.slice(0, 8)}`,
+    ...(harness === "claude" && harnessSessionId && isUuid(harnessSessionId) ? { nativeSessionId: harnessSessionId } : {}),
+  };
   let exitCode: number | null = null;
+  let titleWatcher: { stop(): void } | undefined;
   try {
-    const registration = remote !== "off" ? await apiFetch<{ threadId: string; kgID: string }>("/api/v5/sessions/register", { method: "POST", body: { sessionId, endpointId: endpoint.id, harness: harness === "claude" ? "claude-code" : harness, inference: options.mcpOnly ? "native" : "router", transport: options.remoteTransport ?? "cli", title: options.name?.trim() || `${path.basename(cwd)} · ${sessionId.slice(0,8)}` } }).catch((err) => {
+    const registration = remote !== "off" ? await apiFetch<{ threadId: string; kgID: string; nativeTitleSync?: boolean }>("/api/v5/sessions/register", { method: "POST", body: launchRegistration }).catch((err) => {
       if (options.mcpOnly) throw err;
       log("session link unavailable; the CLI bridge will still announce this launch");
       return undefined;
     }) : undefined;
     if (registration) log(`session: ${appBaseURL()}/chat/${encodeURIComponent(registration.threadId)}${registration.kgID ? `?graph=${encodeURIComponent(registration.kgID)}` : ""}`);
+    if (harness === "claude" && harnessSessionId && !explicitLaunchTitle && registration?.nativeTitleSync === true && registration.threadId) {
+      const threadId = registration.threadId;
+      titleWatcher = watchClaudeSessionTitle({ nativeSessionId: harnessSessionId, cwd, report: async (title, signal) => {
+        const result = await apiFetch<{ titleUpdated?: boolean }>("/api/v5/sessions/register", { method: "POST", signal, body: {
+          ...launchRegistration, threadId, ...title,
+        } });
+        if (typeof result.titleUpdated !== "boolean") throw new Error("Backend did not acknowledge native title synchronization");
+      } });
+    }
     if (options.remoteTransport === "channels") {
       const { withChannelServer } = await import("../remote/channels-plan.js");
       const channelPlan = withChannelServer(plan, sessionId, cwd);
@@ -723,6 +742,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
       exitCode = await runInTerminal(plan, cwd);
     }
   } finally {
+    titleWatcher?.stop();
     process.stderr.write("\n");
     if (key.expiresAt && Date.parse(key.expiresAt) <= Date.now()) {
       // The gateway answers an expired key with a 401 the harness shows, not us;
