@@ -145,3 +145,18 @@ test("ambiguous parallel tool inputs fail closed until an explicit answer", { ti
   assert.equal(w.stub.frames.some(f => f.type === "turn.started" && f.turnId === "queued"), false);
   w.stub.send({ type: "prompt.answer", sessionId: native, promptId: pending.promptId, value: "1" }); await w.started("queued");
 });
+
+
+test("incomplete AskUserQuestion cannot discard an existing answerable permission token", { timeout: 6000 }, async t => {
+  const w = await world(t); w.send("steer", "steer"); await w.started("steer"); w.hook("UserPromptSubmit");
+  // Ambiguous metadata requires the original explicit answer to release FIFO.
+  await w.pre("one"); await w.pre("two");
+  w.hook("PermissionRequest", w.payload("one"));
+  w.hook("Notification", { notification_type: "permission_prompt" });
+  const pending = await w.stub.waitFor(f => f.type === "prompt.request");
+  w.send("queued"); w.quiet();
+  w.hook("PreToolUse", { tool_name: "AskUserQuestion", tool_input: {} });
+  w.stub.send({ type: "prompt.answer", sessionId: native, promptId: pending.promptId, value: "1" });
+  await w.started("queued");
+  assert.ok(w.stub.frames.some(f => f.resolvedPromptId === pending.promptId));
+});

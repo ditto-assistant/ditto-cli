@@ -117,7 +117,7 @@ test("attachments: names are confined to the turn folder and the prompt lists re
   assert.equal(safeAttachmentName(".env"), "env");
   assert.equal(safeAttachmentName("C:\\Users\\me\\report.pdf"), "report.pdf");
   const prompt = buildPrompt("look at this\r\n", [{ relPath: ".tmp/ditto/attachments/t1/a.png" }, { relPath: ".tmp/ditto/attachments/t1/b.txt" }]);
-  assert.equal(prompt, "look at this\n\nAttached files:\n- .tmp/ditto/attachments/t1/a.png\n- .tmp/ditto/attachments/t1/b.txt");
+  assert.equal(prompt, "look at this\r\n\n\nAttached files:\n- .tmp/ditto/attachments/t1/a.png\n- .tmp/ditto/attachments/t1/b.txt");
   assert.equal(buildPrompt("plain", []), "plain");
 });
 

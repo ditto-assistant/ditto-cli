@@ -112,7 +112,7 @@ export class RemoteSession {
         attachments: true,
         headless: true,
         teleport: Boolean(ctx.checkpoint),
-        promptDelivery: { queue: true, steer: ctx.harness === "claude" && ctx.mode === "tui", interrupt: true },
+        promptDelivery: { queue: true, steer: ctx.harness === "claude" && ctx.mode === "tui", interrupt: true, promptResolution: ctx.harness === "claude" && ctx.mode === "tui" },
       },
       log: ctx.log,
       handlers: {
@@ -313,7 +313,7 @@ export class RemoteSession {
           return;
         case "PreToolUse":
           this.claudePermissions.preTool(payload);
-          if (payload.tool_name === "AskUserQuestion") {
+          if (payload.tool_name === "AskUserQuestion" && this.hasQuestion(payload.tool_input)) {
             const token = this.claudePermissions.question(payload);
             this.requestQuestion(payload.tool_input);
             this.pendingPermission = token;
@@ -400,6 +400,11 @@ export class RemoteSession {
     }, 250);
     this.nativeIdleTimer = timer;
     timer.unref();
+  }
+
+  private hasQuestion(toolInput: unknown): boolean {
+    const input = toolInput as { questions?: unknown[] } | null | undefined;
+    return Boolean(input && Array.isArray(input.questions) && input.questions[0]);
   }
 
   private requestQuestion(toolInput: unknown): void {

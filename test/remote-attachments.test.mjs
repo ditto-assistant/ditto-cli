@@ -172,3 +172,15 @@ test("literal hash-shaped turn IDs cannot alias another turn's downloaded files"
     assert.deepEqual(await readFile(second.absPath),other);
   } finally { await rm(cwd,{recursive:true,force:true}); }
 });
+
+
+test("attachment references preserve exact user text including edge spaces and CRLF", () => {
+  const files = [{ relPath: ".tmp/ditto/attachments/turn/fixture.png" }];
+  const text = "  BEGIN\r\n" + "x".repeat(65500) + "\r\nEND  ";
+  assert.equal(buildPrompt(text, []), text);
+  for (const nativeFileReferences of [false, true]) {
+    const rendered = buildPrompt(text, files, { nativeFileReferences });
+    assert.equal(rendered.slice(0, text.length), text);
+    assert.equal(rendered.slice(text.length, text.length + 20), "\n\nAttached files:\n- ");
+  }
+});

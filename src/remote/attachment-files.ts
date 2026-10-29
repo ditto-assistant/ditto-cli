@@ -159,7 +159,7 @@ export async function downloadAttachments(
 
 /** The prompt handed to the harness: the user's text plus the attachment paths it can open. */
 export function buildPrompt(text: string, downloaded: DownloadedAttachment[], options: { nativeFileReferences?: boolean } = {}): string {
-  const body = text.replace(/\r\n/g, "\n").replace(/\s+$/, "");
+  const body = text;
   if (downloaded.length === 0) return body;
   const list = downloaded.map((d) => `- ${options.nativeFileReferences ? `@${JSON.stringify(d.relPath)}` : d.relPath}`).join("\n");
   // Trailing newlines close Claude's @file completion before the submit key.

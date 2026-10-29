@@ -21,6 +21,8 @@ export interface PromptDeliveryCapabilities {
   interrupt: boolean;
   /** Notifications are scheduled by the native client, without a queue guarantee. */
   nativeScheduling?: boolean;
+  /** Pending dialogs clear only on this socket’s exact resolvedPromptId. */
+  promptResolution?: boolean;
 }
 
 export interface HostCapabilities {

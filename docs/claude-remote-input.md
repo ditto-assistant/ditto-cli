@@ -81,3 +81,18 @@ The latest resolution is replayed after a same-process reconnect; stale IDs
 cannot clear a newer prompt. Older backends ignore this additive field and may
 retain stale permission UI until updated. Existing running Claude processes need
 a normal relaunch/resume to load the added native hooks.
+
+
+New Claude TUI hosts advertise `capabilities.promptDelivery.promptResolution`.
+Only the exact socket that receives a remote answer may declare that capability.
+The paired API then leaves the dialog pending until the host sends its matching
+`resolvedPromptId`; legacy sockets retain API-driven clearing. A sequential API
+retry with an already-recorded answer sends no second keypress. Concurrent API
+requests are not promised exactly once: the existing answer ledger is recorded
+after socket delivery. The host itself ignores an answer after its pending ID
+has cleared. Reconnect reads the new socket declaration, never the physical
+host's last capabilities. API success alone does not prove native acceptance.
+
+Attachment rendering preserves the supplied text, including leading/trailing
+spaces and CRLF, before appending the separate native file-reference block.
+Native editor normalization remains the native client's behavior.

@@ -33,7 +33,7 @@ async function world(t, { harness = "claude", mode = "tui", inject } = {}) {
 test("Claude normal FIFO survives immediate steering and stale Stop cannot finish its replacement", async (t) => {
   const w = await world(t);
   const hello = w.stub.frames.find((f) => f.type === "hello");
-  assert.deepEqual(hello.capabilities.promptDelivery, { queue: true, steer: true, interrupt: true });
+  assert.deepEqual(hello.capabilities.promptDelivery, { queue: true, steer: true, interrupt: true, promptResolution: true });
   w.send("first"); await w.started("first");
   w.send("queued"); await w.stub.waitFor((f) => f.type === "turn.ack" && f.turnId === "queued");
   assert.equal(w.calls.length, 1, "normal busy prompt stays in the host FIFO");
