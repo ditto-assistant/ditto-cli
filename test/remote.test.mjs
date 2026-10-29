@@ -198,7 +198,7 @@ test("tui: default launch announces, sends the catalog, and runs prompt / comman
     // The fake harness got the hook settings and is on screen.
     await waitUntil(() => run.output().includes("fake claude ready"), { what: "fake claude banner" });
     const launch = fakes.entries().find((e) => e.mode === "tui");
-    assert.deepEqual(launch.hooks.sort(), ["Notification", "PreToolUse", "Stop", "UserPromptSubmit"]);
+    assert.deepEqual(launch.hooks.sort(), ["Notification", "PermissionDenied", "PermissionRequest", "PostToolUse", "PostToolUseFailure", "PreToolUse", "Stop", "UserPromptSubmit"]);
 
     // 1. Prompt with an attachment.
     const bytes = Buffer.from("notes from the phone\n");

@@ -62,6 +62,8 @@ export interface SessionStatusFrame {
   type: "session.status";
   sessionId: string;
   status: SessionStatus;
+  /** Exact dialog resolved by native metadata or an explicit answer. */
+  resolvedPromptId?: string;
 }
 
 export interface SessionClosedFrame {

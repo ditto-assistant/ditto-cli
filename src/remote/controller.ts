@@ -6,6 +6,7 @@ import type { HeadlessTurn } from "./headless.js";
 import { HostClient, type HostClientOptions } from "./host.js";
 import type { HookEvent, HookServer } from "./hooks.js";
 import type { PtySession } from "./pty.js";
+import { ClaudePermissionTracker, type ClaudePermissionToken } from "./claude-permissions.js";
 import type {
   CheckpointRequestFrame,
   CommandEntry,
@@ -93,10 +94,16 @@ export class RemoteSession {
   private catalog: CommandEntry[] = [];
   private stopWatching?: () => void;
   private pending?: PendingPrompt;
+  private pendingPermission?: ClaudePermissionToken;
+  private readonly claudePermissions: ClaudePermissionTracker;
 
   constructor(ctx: RemoteSessionContext, hooks?: HookServer) {
     this.ctx = ctx;
     this.hooks = hooks;
+    this.claudePermissions = new ClaudePermissionTracker(token => {
+      if (this.pendingPermission === token) this.clearPending();
+      if (!this.current && this.nativeBusy) this.watchLocalQuietFallback(true);
+    });
     this.host = new HostClient({
       baseUrl: ctx.baseUrl,
       apiKey: ctx.apiKey,
@@ -149,6 +156,7 @@ export class RemoteSession {
 
   stop(): void {
     this.stopped = true;
+    this.claudePermissions.reset();
     for (const pending of this.pendingSteers.values()) pending.abort();
     this.nativeIdle();
     this.canceledSteers.clear();
@@ -202,7 +210,7 @@ export class RemoteSession {
         this.finish(frame.turnId, { exitCode: 0, interrupted: true });
         return;
       }
-      if (this.pending) {
+      if (this.pending || this.claudePermissions.pending) {
         this.finish(frame.turnId, { unsupported: "Answer the pending permission or question before Send now" });
         return;
       }
@@ -285,22 +293,39 @@ export class RemoteSession {
           // the app sees the same state whether the prompt came from the
           // phone or the keyboard.
           this.clearPending();
+          this.claudePermissions.reset();
           this.nativeBusy = true;
           this.watchLocalQuietFallback();
           this.host.status(this.ctx.sessionId, "running");
           return;
         case "Notification":
           if (payload.notification_type === "permission_prompt") {
+            const token = this.claudePermissions.notification(payload);
+            if (token?.resolved) return;
             this.requestPrompt({
               kind: "permission",
               text: String(payload.message ?? payload.title ?? "Claude Code is asking for permission"),
               options: CLAUDE_PERMISSION_OPTIONS,
               default: "1",
             });
+            this.pendingPermission = token;
           }
           return;
         case "PreToolUse":
-          if (payload.tool_name === "AskUserQuestion") this.requestQuestion(payload.tool_input);
+          this.claudePermissions.preTool(payload);
+          if (payload.tool_name === "AskUserQuestion") {
+            const token = this.claudePermissions.question(payload);
+            this.requestQuestion(payload.tool_input);
+            this.pendingPermission = token;
+          }
+          return;
+        case "PermissionRequest":
+          this.claudePermissions.permissionRequest(payload);
+          return;
+        case "PostToolUse":
+        case "PostToolUseFailure":
+        case "PermissionDenied":
+          this.claudePermissions.toolFinished(payload);
           return;
         case "Stop":
           this.turnEnded();
@@ -337,6 +362,7 @@ export class RemoteSession {
     if (this.stopHooksUncorrelated || this.current?.ignoreStopHook) return;
     this.nativeIdle();
     this.clearPending();
+    this.claudePermissions.reset();
     if (!this.current) this.host.status(this.ctx.sessionId, "idle");
     this.current?.done();
   }
@@ -354,11 +380,11 @@ export class RemoteSession {
    * Local keyboard activity has no receipt to await, so bound its FIFO hold by
    * the same quiet fallback instead of waiting forever for a trusted hook.
    */
-  private watchLocalQuietFallback(): void {
+  private watchLocalQuietFallback(confirmedPermissionCompletion = false): void {
     const epoch = ++this.nativeEpoch;
     clearInterval(this.nativeIdleTimer);
     this.nativeIdleTimer = undefined;
-    if (!this.stopHooksUncorrelated || this.current) return;
+    if ((!this.stopHooksUncorrelated && !confirmedPermissionCompletion) || this.current) return;
     const started = Date.now();
     const limit = this.ctx.quietFallbackMs ?? 8000;
     const timer = setInterval(() => {
@@ -367,7 +393,7 @@ export class RemoteSession {
         if (this.nativeIdleTimer === timer) this.nativeIdleTimer = undefined;
         return;
       }
-      if (!this.pending && this.pty && Date.now() - started > Math.min(2000, limit) && this.pty.quietFor() >= limit) {
+      if (!this.pending && !this.claudePermissions.pending && !this.claudePermissions.toolBusy && this.pty && Date.now() - started > Math.min(2000, limit) && this.pty.quietFor() >= limit) {
         this.nativeIdle();
         this.host.status(this.ctx.sessionId, "idle");
       }
@@ -396,7 +422,10 @@ export class RemoteSession {
   }
 
   private clearPending(): void {
+    const id = this.pending?.promptId;
     this.pending = undefined;
+    this.pendingPermission = undefined;
+    if (id) this.host.status(this.ctx.sessionId, this.current || this.nativeBusy ? "running" : "idle", id);
   }
 
   /** `prompt.answer` frame: inject the keystrokes for the pending prompt. */
@@ -410,7 +439,8 @@ export class RemoteSession {
     // A digit hotkey confirms on its own in Claude Code; the extra Enter is a
     // no-op there and submits typed text everywhere else.
     setTimeout(() => this.pty?.write("\r"), 150).unref?.();
-    this.pending = undefined;
+    this.claudePermissions.answered(this.pendingPermission);
+    this.clearPending();
     return true;
   }
 
@@ -504,7 +534,7 @@ export class RemoteSession {
         this.finish(turnId, { exitCode: 0, unsupported: resolved.unsupported });
         return;
       }
-      if (steer && this.pending) {
+      if (steer && (this.pending || this.claudePermissions.pending)) {
         this.finish(turnId, { unsupported: "Answer the pending permission or question before Send now" });
         return;
       }
@@ -560,6 +590,7 @@ export class RemoteSession {
         this.current = undefined;
         this.nativeIdle();
         this.clearPending();
+        this.claudePermissions.reset();
         this.host.status(this.ctx.sessionId, "idle");
       }
       settle();
@@ -584,7 +615,7 @@ export class RemoteSession {
       const timer = setInterval(() => {
         if (settled) return clearInterval(timer);
         const pty = this.pty;
-        if (!pty || this.pending) return;
+        if (!pty || this.pending || this.claudePermissions.pending) return;
         if (Date.now() - started > Math.min(2000, limit) && pty.quietFor() >= limit) {
           clearInterval(timer);
           resolve();

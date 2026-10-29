@@ -53,3 +53,31 @@ Stop with queued input; failed uploads/downloads; and reconnect/redelivery.
 Use the portable backend `scripts/harness-probe` tools with synthetic fixtures.
 Preserve evidence separately for transport receipt, native receipt, and final
 response. Unit tests using a fake harness are not native behavior evidence.
+
+
+Terminal permission answers after steering are correlated by native session,
+input epoch, unique tool/input fingerprint and exact tool-use ID. A matching
+PostToolUse/Failure can resolve the dialog; native No in observed2.1.312 emits
+neither completion hook, but writes the exact user/tool_result with is_error.
+The CLI polls only that active main-session UUID file, anchored before the tool
+outcome by offset, file identity and a capture-boundary hash. Reads are limited
+to256KiB of complete appended rows. It never scans session inventories or returns
+raw tool content. Replaced/truncated files, wrong session/ID/role, sidechains,
+ambiguous matches and oversized missing rows fail closed. An explicit answer or
+new native prompt remains the recovery for unconfirmed metadata.
+
+A local completed permission with no remote turn can rearm the existing quiet
+fallback even before the first steer. Still-live dialogs, subsequent outstanding
+tools and terminal activity hold it. Quiet is a heuristic rather than an exact
+native model-busy guarantee. Uncorrelated Stop never resolves a live dialog;
+Escape remains independent and does not await the metadata reader to interrupt.
+The observed2.1.312 /model and/clear commands emit no UserPromptSubmit, so their
+builtin behavior does not justify a blanket local fallback change.
+
+Authoritative dialog resolution emits an optional resolvedPromptId on existing
+session.status, with current status rather than a fabricated idle event. The
+paired backend clears only that exact pending ID for the owner/current socket.
+The latest resolution is replayed after a same-process reconnect; stale IDs
+cannot clear a newer prompt. Older backends ignore this additive field and may
+retain stale permission UI until updated. Existing running Claude processes need
+a normal relaunch/resume to load the added native hooks.
