@@ -129,14 +129,19 @@ test("headless and other harnesses explicitly refuse steering without downgradin
   }
 });
 
-test("Stop during paste aborts submission and does not report a started turn", async (t) => {
+test("Stop during paste aborts submission and does not report a started turn", { timeout: 6000 }, async (t) => {
   let release;
   const pasted = new Promise((resolve) => { release = resolve; });
+  t.after(() => release());
   const w = await world(t, { inject: async () => pasted });
   w.send("paste", { deliveryMode: "steer" });
-  while (!w.calls.length) await sleep(5);
+  const injectDeadline = Date.now() + 2000;
+  while (!w.calls.length && Date.now() < injectDeadline) await sleep(5);
+  assert.equal(w.calls.length, 1, "paste injection should begin before the deadline");
   w.stub.send({ type: "turn.interrupt", turnId: "paste" });
-  while (!w.interrupts()) await sleep(5);
+  const interruptDeadline = Date.now() + 2000;
+  while (!w.interrupts() && Date.now() < interruptDeadline) await sleep(5);
+  assert.equal(w.interrupts(), 1, "interrupt should be delivered before the deadline");
   assert.equal(w.calls[0][2].aborted, true);
   release();
   assert.equal((await w.finished("paste")).interrupted, true);
@@ -218,7 +223,9 @@ test("paired pending-steer and predecessor Stop frames send one independent phys
   const w = await world(t, { inject: async (_text, mode) => { if (mode === "steer") await gate; } });
   w.send("predecessor"); await w.started("predecessor");
   w.send("preparing", { deliveryMode: "steer" });
-  while (w.calls.length < 2) await sleep(5);
+  const injectDeadline = Date.now() + 2000;
+  while (w.calls.length < 2 && Date.now() < injectDeadline) await sleep(5);
+  assert.equal(w.calls.length, 2, "steering injection should begin before the deadline");
   w.stub.send({ type: "turn.interrupt", turnId: "preparing" });
   w.stub.send({ type: "turn.interrupt", turnId: "predecessor" });
   w.send("normal-barrier");
