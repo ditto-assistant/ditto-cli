@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -205,4 +206,52 @@ test("actual PTY submits Enter and observed Ctrl+Enter bytes while Stop remains 
   stop.abort(); await injecting; await sleep(30);
   const cancelled = [...chunks.slice(before).join("").matchAll(/HEX:([0-9a-f]+)/g)].map((m) => m[1]).join("");
   assert.equal(cancelled, Buffer.from("\u001b[200~cancelled\nline two\nline three\u001b[201~\u001f").toString("hex"), "only an owned unsubmitted paste is cleared before independent Stop");
+});
+
+
+test("canceled owned paste never undoes an intervening local stdin edit", { timeout: 8000 }, async (t) => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "ditto-local-input-"));
+  const ptyURL = new URL("../dist/remote/pty.js", import.meta.url).href;
+  const echo = String.raw`process.stdin.setRawMode(true);process.stdin.resume();process.stdout.write("READY\n");process.stdin.on("data",b=>process.stdout.write("HEX:"+b.toString("hex")+"\n"));`;
+  // A separate Node process owns stdin forwarding, so this test never changes
+  // the test runner's terminal/raw-mode state or forwards real user input.
+  const script = String.raw`
+    import { spawnInPty } from ${JSON.stringify(ptyURL)};
+    const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+    let pty;
+    process.once("SIGTERM", () => pty?.kill());
+    try {
+      const chunks = [];
+      pty = await spawnInPty(process.execPath, ["--input-type=module", "-e", ${JSON.stringify(echo)}], { cwd: process.cwd(), env: process.env, harness: "claude", onOutput: data => chunks.push(data) });
+      const deadline = Date.now() + 2000;
+      while (!chunks.join("").includes("READY") && Date.now() < deadline) await sleep(5);
+      if (!chunks.join("").includes("READY")) throw new Error("owned PTY did not become ready");
+      const localInput = new Promise(resolve => process.stdin.once("data", resolve));
+      const stop = new AbortController();
+      const injecting = pty.inject("owned paste", "steer", stop.signal);
+      process.stdout.write("PASTE_PENDING\n");
+      await localInput;
+      stop.abort();
+      await injecting;
+      await sleep(40);
+      const hex = [...chunks.join("").matchAll(/HEX:([0-9a-f]+)/g)].map(m => m[1]).join("");
+      process.stdout.write("REPORT:" + JSON.stringify({ hex }) + "\n");
+    } finally {
+      pty?.kill();
+      await pty?.exit;
+    }
+  `;
+  const runner = spawn(process.execPath, ["--input-type=module", "-e", script], { cwd, stdio: ["pipe", "pipe", "pipe"] });
+  let output = "", errors = "", sent = false;
+  const exited = new Promise(resolve => runner.once("exit", resolve));
+  runner.stdout.on("data", data => {
+    output += data;
+    if (!sent && output.includes("PASTE_PENDING")) { sent = true; runner.stdin.end("local-edit"); }
+  });
+  runner.stderr.on("data", data => { errors += data; });
+  t.after(async () => { if (runner.exitCode === null) runner.kill(); await exited; await rm(cwd, { recursive: true, force: true }); });
+  assert.equal(await exited, 0, errors);
+  const report = output.match(/REPORT:([^\r\n]+)/);
+  assert.ok(report, output);
+  assert.equal(JSON.parse(report[1]).hex, Buffer.from("\u001b[200~owned paste\u001b[201~local-edit").toString("hex"), "intervening local edit must suppress undo without submitting the canceled paste");
 });
