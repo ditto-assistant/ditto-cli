@@ -47,7 +47,7 @@ export async function runChannelServer(options: { receiptTimeoutMs?: number; com
             const files = await downloadAttachments(cwd, turn.turnId, turn.attachments ?? []);
             if (!pending.has(turn.turnId)) return;
             await server.notification({ method: "notifications/claude/channel", params: {
-              content: turn.text || "Inspect the attached files.",
+              content: turn.text || (files.length ? "Inspect the attached files." : ""),
               meta: {
                 turn_id: turn.turnId, session_id: sessionId,
                 ...(files.length ? { attachment_paths: JSON.stringify(files.map((file) => file.absPath)) } : {}),

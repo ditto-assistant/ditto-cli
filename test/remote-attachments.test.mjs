@@ -2,10 +2,11 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import http from "node:http";
+import { execFileSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { buildPrompt, downloadAttachments } from "../dist/remote/attachments.js";
+import { buildPrompt, downloadAttachments, ensureTmpExcluded, safeAttachmentName } from "../dist/remote/attachments.js";
 
 const bytes = Buffer.from("attachment fixture");
 const attachment = (overrides = {}) => ({
@@ -92,4 +93,50 @@ test("attachment writes cannot follow existing repository symlinks or overwrite 
     await rm(cwd, { recursive: true, force: true });
     await rm(outside, { recursive: true, force: true });
   }
+});
+
+
+test("attachment names and colon turn identifiers are portable", async () => {
+  for (const name of ["nul.txt", "CON", "lpt9.log", "conin$.txt"]) assert.ok(safeAttachmentName(name).startsWith("_"));
+  assert.equal(safeAttachmentName('screen:shot?.png. '), "screen_shot_.png");
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "ditto-attachment-"));
+  try {
+    const files = await downloadAttachments(cwd, "channel:turn", [attachment({name:"A.txt"}), attachment({name:"a.txt"})], async () => bytes);
+    assert.ok(!files[0].relPath.includes(":"));
+    assert.notEqual(files[0].absPath.toLowerCase(), files[1].absPath.toLowerCase());
+  } finally { await rm(cwd, {recursive:true,force:true}); }
+});
+
+test("attachment integrity requires a complete digest before any network request", async () => {
+  let requests=0;
+  for (const sha256 of ["", "0".repeat(63), "z".repeat(64)]) {
+    await assert.rejects(downloadAttachments(os.tmpdir(), "invalid-digest", [attachment({sha256})], async () => {requests++;return bytes;}), /invalid attachment sha256/);
+  }
+  assert.equal(requests,0);
+});
+
+test("redelivery reuses identical regular files and refuses changed files", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "ditto-attachment-"));
+  try {
+    const first = await downloadAttachments(cwd,"redelivered",[attachment()],async()=>bytes);
+    const second = await downloadAttachments(cwd,"redelivered",[attachment()],async()=>bytes);
+    assert.equal(first[0].absPath,second[0].absPath);
+    await writeFile(first[0].absPath,Buffer.alloc(bytes.length,65));
+    await assert.rejects(downloadAttachments(cwd,"redelivered",[attachment()],async()=>bytes),/EEXIST/);
+    assert.deepEqual(await readFile(first[0].absPath),Buffer.alloc(bytes.length,65));
+  } finally { await rm(cwd,{recursive:true,force:true}); }
+});
+
+test("nested repository sessions exclude their own attachment directory", async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "ditto-attachment-git-"));
+  try {
+    execFileSync("git",["init","-q",cwd]);
+    await writeFile(path.join(cwd,".gitignore"),"/.tmp/\n");
+    await mkdir(path.join(cwd,".tmp"));
+    const nested=path.join(cwd,"nested");
+    await mkdir(path.join(nested,".tmp"),{recursive:true});
+    assert.equal(await ensureTmpExcluded(nested),true);
+    assert.equal(execFileSync("git",["check-ignore","nested/.tmp"],{cwd,encoding:"utf8"}).trim(),"nested/.tmp");
+    assert.equal(await ensureTmpExcluded(nested),false);
+  } finally { await rm(cwd,{recursive:true,force:true}); }
 });

@@ -8,10 +8,13 @@ not a claim that the complete input matrix is supported or released.
 
 The backend resolves authenticated thread attachment IDs to expiring presigned
 GET URLs. The CLI downloads each attachment with a single GET, verifies its
-declared size and optional SHA-256, and writes it to the session's attachment
+declared size and required SHA-256, and writes it to the session's attachment
 directory. Redirects, invalid sizes, mismatched bytes, repository symlinks, and
-existing destination files fail delivery. Duplicate names receive distinct
-filenames. Download failures must not be reported as Claude receiving an image.
+existing destination files with different bytes fail delivery. An identical
+regular file may be reused after reconnect; symlinks are always refused.
+Duplicate names receive distinct filenames, including case-only differences.
+Names are sanitized for Windows, and colon-bearing turn IDs use a hashed
+directory component. Git exclusion checks use the actual session subdirectory. Download failures must not be reported as Claude receiving an image.
 
 For custom Channels, the original prompt is kept verbatim, including long
 multiline text and trailing whitespace. Absolute downloaded paths are carried

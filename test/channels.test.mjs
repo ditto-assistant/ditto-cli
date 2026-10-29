@@ -39,10 +39,11 @@ test("Channels delivers notifications and requires a model receipt before runnin
   await client.connect(transport);
   assert.deepEqual(client.getServerCapabilities().experimental,{"claude/channel":{}});
   await stub.waitFor(frame=>frame.type==="session.announce");
-  const turn={type:"turn.deliver",sessionId:"native-1",turnId:"turn-1",text:"VISIBLE CHANNEL PROMPT",attachments:[]};
+  const turn={type:"turn.deliver",sessionId:"native-1",turnId:"turn-1",text:"",attachments:[]};
   stub.send(turn);
   const event=await Promise.race([received,new Promise((_,reject)=>setTimeout(()=>reject(new Error("no channel event")),5000))]);
-  assert.equal(event.params.content,"VISIBLE CHANNEL PROMPT");
+  assert.equal(event.params.content,"");
+  assert.equal(event.params.meta.attachment_paths,undefined);
   assert.equal(event.params.meta.turn_id,"turn-1");
   assert.equal(stub.frames.some(f=>f.type==="turn.started"||f.type==="turn.finished"),false);
   const wrong=await client.callTool({name:"reply",arguments:{turn_id:"another-session-turn",text:"no"}});

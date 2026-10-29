@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
-import { appendFile, lstat, mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, lstat, mkdir, open, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { constants } from "node:fs";
+import { promisify } from "node:util";
 import type { Attachment } from "./protocol.js";
 
 /** Repo-relative directory attachments land in, one folder per turn. */
@@ -11,14 +13,18 @@ const MAX_ATTACHMENT_BYTES = 512 * 1024 * 1024;
 
 /** A file name that cannot escape the turn's folder or hide as a dotfile. */
 export function safeAttachmentName(name: string): string {
-  const base = path.basename(name.replace(/\\/g, "/")).replace(/[\u0000-\u001f]/g, "");
-  const cleaned = base.replace(/^\.+/, "").trim();
+  const base = path.basename(name.replace(/\\/g, "/")).replace(/[\u0000-\u001f<>:"|?*]/g, "_");
+  let cleaned = base.replace(/^\.+/, "").trim().replace(/[. ]+$/, "");
+  if (/^(con|prn|aux|nul|conin\$|conout\$|com[1-9¹²³]|lpt[1-9¹²³])(?:[. ]|$)/i.test(cleaned)) cleaned = `_${cleaned}`;
   return cleaned || "attachment";
 }
 
-function git(args: string[], cwd: string): { ok: boolean; out: string } {
-  const r = spawnSync("git", args, { cwd, encoding: "utf8" });
-  return { ok: r.status === 0, out: (r.stdout ?? "").trim() };
+const runFile = promisify(execFile);
+async function git(args: string[], cwd: string): Promise<{ ok: boolean; out: string }> {
+  try {
+    const r = await runFile("git", args, { cwd, encoding: "utf8", timeout: 10_000 });
+    return { ok: true, out: r.stdout.trim() };
+  } catch { return { ok: false, out: "" }; }
 }
 
 /**
@@ -27,10 +33,11 @@ function git(args: string[], cwd: string): { ok: boolean; out: string } {
  * committed). No-op outside a repository or when `.tmp` is already ignored.
  */
 export async function ensureTmpExcluded(cwd: string): Promise<boolean> {
-  const top = git(["rev-parse", "--show-toplevel"], cwd);
+  const top = await git(["rev-parse", "--show-toplevel"], cwd);
   if (!top.ok || !top.out) return false;
-  if (git(["check-ignore", "-q", ".tmp"], top.out).ok) return false;
-  const gitDir = git(["rev-parse", "--git-common-dir"], top.out);
+  const target = path.relative(top.out, path.join(cwd, ".tmp")) || ".tmp";
+  if ((await git(["check-ignore", "-q", target], top.out)).ok) return false;
+  const gitDir = await git(["rev-parse", "--git-common-dir"], top.out);
   const excludeFile = path.resolve(top.out, gitDir.ok && gitDir.out ? gitDir.out : ".git", "info", "exclude");
   let current = "";
   try {
@@ -38,7 +45,7 @@ export async function ensureTmpExcluded(cwd: string): Promise<boolean> {
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
   }
-  if (current.split(/\r?\n/).some((l) => l.trim() === ".tmp/" || l.trim() === ".tmp" || l.trim() === "/.tmp/")) return false;
+  if (current.split(/\r?\n/).some((l) => l.trim() === ".tmp/" || l.trim() === ".tmp")) return false;
   await mkdir(path.dirname(excludeFile), { recursive: true });
   const prefix = current.length > 0 && !current.endsWith("\n") ? "\n" : "";
   await appendFile(excludeFile, `${prefix}# Remote Control attachments downloaded by heyditto\n.tmp/\n`);
@@ -93,9 +100,11 @@ export async function downloadAttachments(
     if (!Number.isSafeInteger(attachment.size) || attachment.size < 0 || attachment.size > MAX_ATTACHMENT_BYTES) {
       throw new Error("invalid attachment size");
     }
+    if (!/^[a-fA-F0-9]{64}$/.test(attachment.sha256)) throw new Error("invalid attachment sha256");
   }
+  const turnDirectory = turnId.includes(":") ? `turn-${createHash("sha256").update(turnId).digest("hex")}` : turnId;
   let dir = cwd;
-  for (const segment of [...ATTACHMENTS_DIR.split(path.sep), turnId]) {
+  for (const segment of [...ATTACHMENTS_DIR.split(path.sep), turnDirectory]) {
     dir = path.join(dir, segment);
     await mkdir(dir, { mode: 0o700 }).catch((err: NodeJS.ErrnoException) => {
       if (err.code !== "EEXIST") throw err;
@@ -110,18 +119,39 @@ export async function downloadAttachments(
     let name = safeAttachmentName(attachment.name);
     const ext = path.extname(name);
     const stem = path.basename(name, ext);
-    for (let suffix = 2; used.has(name); suffix++) {
+    for (let suffix = 2; used.has(name.toLowerCase()); suffix++) {
       name = `${stem}-${suffix}${ext}`;
     }
-    used.add(name);
+    used.add(name.toLowerCase());
     const bytes = await fetchImpl(attachment.url, attachment.size);
     if (bytes.length !== attachment.size) throw new Error("download size mismatch");
     const digest = createHash("sha256").update(bytes).digest("hex");
-    if (attachment.sha256 && digest !== attachment.sha256.toLowerCase()) {
+    if (digest !== attachment.sha256.toLowerCase()) {
       throw new Error(`attachment ${attachment.name}: sha256 mismatch`);
     }
     const absPath = path.join(dir, name);
-    await writeFile(absPath, bytes, { mode: 0o600, flag: "wx" });
+    try {
+      await writeFile(absPath, bytes, { mode: 0o600, flag: "wx" });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      // A reconnect may redeliver this turn. Reuse only the identical regular
+      // file; never overwrite an existing file or follow a repository symlink.
+      const entry = await lstat(absPath);
+      if (!entry.isFile() || entry.isSymbolicLink()) throw err;
+      const file = await open(absPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+      try {
+        const stat = await file.stat();
+        if (!stat.isFile() || stat.size !== bytes.length) throw err;
+        const existingHash = createHash("sha256");
+        let size = 0;
+        for await (const chunk of file.createReadStream({ autoClose: false })) {
+          size += chunk.length;
+          if (size > bytes.length) throw err;
+          existingHash.update(chunk);
+        }
+        if (size !== bytes.length || existingHash.digest("hex") !== digest) throw err;
+      } finally { await file.close(); }
+    }
     result.push({ attachment, absPath, relPath: path.relative(cwd, absPath).split(path.sep).join("/") });
   }
   return result;
