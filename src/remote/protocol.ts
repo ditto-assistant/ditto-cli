@@ -11,12 +11,24 @@ export type HostKind = "cli" | "desktop";
 export type SessionMode = "tui" | "headless";
 export type SessionStatus = "idle" | "running";
 export type HarnessName = "claude-code" | "codex" | "grok";
+export type PromptDeliveryMode = "queue" | "steer";
+
+export interface PromptDeliveryCapabilities {
+  /** The host retains busy prompts in its own FIFO. */
+  queue: boolean;
+  /** The host can force immediate native prompt submission while busy. */
+  steer: boolean;
+  interrupt: boolean;
+  /** Notifications are scheduled by the native client, without a queue guarantee. */
+  nativeScheduling?: boolean;
+}
 
 export interface HostCapabilities {
   harnesses: HarnessName[];
   attachments: true;
   headless: boolean;
   teleport: boolean;
+  promptDelivery?: PromptDeliveryCapabilities;
 }
 
 export interface HelloFrame {
@@ -76,6 +88,8 @@ export interface TurnDeliverFrame {
   /** Default "prompt". */
   kind?: TurnKind;
   text: string;
+  /** Prompt only. Omitted means normal queued delivery. Never silently downgraded. */
+  deliveryMode?: PromptDeliveryMode;
   attachments?: Attachment[];
   /** kind "command": a harness slash command / skill from the session's catalog. */
   command?: { name: string; args?: string };

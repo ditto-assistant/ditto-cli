@@ -2,6 +2,7 @@ import { chmod } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
 import type { Harness } from "../agents/types.js";
+import type { PromptDeliveryMode } from "./protocol.js";
 
 /**
  * Runs a harness inside a pseudo-terminal this process owns, mirrored to the
@@ -69,7 +70,7 @@ export interface PtySession {
   /** Writes raw bytes to the harness's input. */
   write(data: string): void;
   /** Pastes a prompt (bracketed, so newlines survive) and submits it. */
-  inject(prompt: string): Promise<void>;
+  inject(prompt: string, mode?: PromptDeliveryMode, signal?: AbortSignal): Promise<void>;
   /** Sends the harness its interrupt key. */
   interrupt(harness: Harness): void;
   /** Milliseconds since the harness last wrote to the screen. */
@@ -142,10 +143,14 @@ export async function spawnInPty(command: string, args: string[], options: PtyOp
   return {
     pid: child.pid,
     write: (data) => child.write(data),
-    inject: async (prompt) => {
+    inject: async (prompt, mode = "queue", signal) => {
+      if (signal?.aborted) return;
       child.write(`\u001b[200~${prompt}\u001b[201~`);
       await sleep(120);
-      child.write("\r");
+      if (signal?.aborted) return;
+      // Observed from native Claude Code 2.1.312 in a real terminal. Stop
+      // remains a separate Escape key; steering does not emulate Stop.
+      child.write(mode === "steer" ? "\u001b[13;5u" : "\r");
     },
     interrupt: (harness) => child.write(harness === "claude" ? "\u001b" : "\u0003"),
     quietFor: () => Date.now() - lastOutput,

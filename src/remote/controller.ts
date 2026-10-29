@@ -49,6 +49,18 @@ interface PendingPrompt extends Omit<PromptRequestFrame, "type"> {
   keys?: Record<string, string>;
 }
 
+interface ActiveTurn {
+  turnId: string;
+  interrupted: boolean;
+  headless?: HeadlessTurn;
+  done: () => void;
+  settled: Promise<void>;
+  /** Stop hooks carry no remote turn identity, so a late old Stop is unsafe. */
+  ignoreStopHook: boolean;
+  injection: AbortController;
+  superseded?: ActiveTurn;
+}
+
 const CLAUDE_PERMISSION_OPTIONS = [
   { id: "1", label: "Yes" },
   { id: "2", label: "Yes, and don't ask again this session" },
@@ -62,7 +74,9 @@ export class RemoteSession {
   private pty?: PtySession;
   private runHeadless?: (prompt: string) => HeadlessTurn;
   private readonly queue: TurnDeliverFrame[] = [];
-  private current?: { turnId: string; interrupted: boolean; headless?: HeadlessTurn; done: () => void };
+  private current?: ActiveTurn;
+  private inputReady: Promise<void> = Promise.resolve();
+  private steering?: Promise<void>;
   private draining = false;
   private stopped = false;
   private catalog: CommandEntry[] = [];
@@ -80,6 +94,7 @@ export class RemoteSession {
         attachments: true,
         headless: true,
         teleport: Boolean(ctx.checkpoint),
+        promptDelivery: { queue: true, steer: ctx.harness === "claude" && ctx.mode === "tui", interrupt: true },
       },
       log: ctx.log,
       handlers: {
@@ -151,6 +166,26 @@ export class RemoteSession {
       this.finish(frame.turnId, { error: "unknown session on this host" });
       return;
     }
+    if (frame.deliveryMode !== undefined && frame.deliveryMode !== "queue" && frame.deliveryMode !== "steer") {
+      this.finish(frame.turnId, { unsupported: "Unknown prompt delivery mode" });
+      return;
+    }
+    if (frame.deliveryMode !== undefined && (frame.kind ?? "prompt") !== "prompt") {
+      this.finish(frame.turnId, { unsupported: "Delivery modes apply only to prompts" });
+      return;
+    }
+    if (frame.deliveryMode === "steer") {
+      if (this.ctx.harness !== "claude" || this.ctx.mode !== "tui" || !this.pty || this.pending) {
+        this.finish(frame.turnId, { unsupported: "Send now requires a Claude Code terminal without a pending permission or question" });
+        return;
+      }
+      const steering = this.runTurn(frame);
+      this.steering = steering;
+      void steering.finally(() => {
+        if (this.steering === steering) this.steering = undefined;
+      });
+      return;
+    }
     if ((frame.kind ?? "prompt") === "answer") {
       // Not a turn of its own: the running turn is waiting on this.
       this.deliverAnswer(frame);
@@ -164,6 +199,11 @@ export class RemoteSession {
     const current = this.current;
     if (!current || current.turnId !== turnId) return;
     current.interrupted = true;
+    current.injection.abort();
+    if (current.superseded) {
+      current.superseded.interrupted = true;
+      current.superseded.done();
+    }
     if (current.headless) current.headless.interrupt();
     else this.pty?.interrupt(this.ctx.harness);
   }
@@ -241,6 +281,7 @@ export class RemoteSession {
     if (/turn-complete|turn-ended|agent-turn/.test(event.event)) this.turnEnded();
   }
   private turnEnded(): void {
+    if (this.current?.ignoreStopHook) return;
     this.clearPending();
     if (!this.current) this.host.status(this.ctx.sessionId, "idle");
     this.current?.done();
@@ -302,6 +343,11 @@ export class RemoteSession {
     this.draining = true;
     try {
       while (this.queue.length > 0 && !this.stopped) {
+        // A steering turn bypasses this FIFO, but its completion still gates
+        // later normal input. Superseded runs cannot drain over the new turn.
+        if (this.steering) await this.steering;
+        if (this.current) await this.current.settled;
+        if (this.stopped) break;
         const frame = this.queue.shift() as TurnDeliverFrame;
         await this.runTurn(frame);
       }
@@ -339,53 +385,74 @@ export class RemoteSession {
 
   private async runTurn(frame: TurnDeliverFrame): Promise<void> {
     const { turnId } = frame;
-    this.host.status(this.ctx.sessionId, "running");
-    let resolved: Awaited<ReturnType<RemoteSession["resolveText"]>>;
+    const steer = frame.deliveryMode === "steer";
+    // Reserve input order before asynchronous downloads. Only preparation and
+    // paste/submission hold this lock; Stop always remains independent.
+    const previousInput = this.inputReady;
+    let releaseInput: () => void = () => undefined;
+    this.inputReady = new Promise<void>((resolve) => { releaseInput = resolve; });
+    await previousInput;
+    let released = false;
+    const release = () => { if (!released) { released = true; releaseInput(); } };
+    let active: ActiveTurn | undefined;
+    let settle: () => void = () => undefined;
     try {
-      resolved = await this.resolveText(frame);
-    } catch (err) {
-      this.finish(turnId, { error: err instanceof Error ? err.message : String(err) });
-      this.host.status(this.ctx.sessionId, "idle");
-      return;
-    }
-    if ("unsupported" in resolved) {
-      this.finish(turnId, { exitCode: 0, unsupported: resolved.unsupported });
-      this.host.status(this.ctx.sessionId, "idle");
-      return;
-    }
-    const { text, entry } = resolved;
-
-    let finish: () => void = () => undefined;
-    const finished = new Promise<void>((resolve) => {
-      finish = resolve;
-    });
-    this.current = { turnId, interrupted: false, done: finish };
-
-    try {
+      if (this.stopped) return;
+      const resolved = await this.resolveText(frame);
+      if ("unsupported" in resolved) {
+        this.finish(turnId, { exitCode: 0, unsupported: resolved.unsupported });
+        return;
+      }
+      if (steer && this.pending) {
+        this.finish(turnId, { unsupported: "Answer the pending permission or question before Send now" });
+        return;
+      }
+      if (this.stopped) return;
+      const { text, entry } = resolved;
+      let finish: () => void = () => undefined;
+      const finished = new Promise<void>((resolve) => { finish = resolve; });
+      const settled = new Promise<void>((resolve) => { settle = resolve; });
+      const previous = this.current;
+      active = { turnId, interrupted: false, done: finish, settled, ignoreStopHook: steer, injection: new AbortController(), ...(steer && previous ? { superseded: previous } : {}) };
+      this.current = active;
+      this.host.status(this.ctx.sessionId, "running");
       if (this.pty) {
-        this.ctx.log(`remote control: ${entry ? `command ${text.split("\n")[0]}` : "prompt"} received from the app (turn ${turnId.slice(0, 8)})`);
-        await this.pty.inject(text);
-        this.host.send({ type: "turn.started", turnId });
-        // Builtins (/model, /clear …) run no model turn, so no Stop hook
-        // fires; a short quiet period ends them.
+        this.ctx.log(`remote control: ${entry ? `command ${text.split("\n")[0]}` : steer ? "Send now prompt" : "prompt"} received from the app (turn ${turnId.slice(0, 8)})`);
+        await this.pty.inject(text, frame.deliveryMode, active.injection.signal);
+        if (active.interrupted) active.done();
+        else this.host.send({ type: "turn.started", turnId });
+        // Ctrl+Enter itself performs native steering. Do not use Escape here.
+        // Supersede only after submission, and keep normal queued prompts.
+        if (steer && previous && !active.interrupted) {
+          previous.interrupted = true;
+          previous.done();
+        }
+        release();
         const quiet = entry?.source === "builtin" ? Math.min(this.ctx.quietFallbackMs ?? 8000, 1500) : undefined;
         await Promise.race([finished, this.pty.exit, this.quietFallback(finished, quiet)]);
-        this.finish(turnId, { exitCode: 0, ...(this.current.interrupted ? { interrupted: true } : {}) });
+        this.finish(turnId, { exitCode: 0, ...(active.interrupted ? { interrupted: true } : {}) });
       } else if (this.runHeadless) {
         const turn = this.runHeadless(text);
-        this.current.headless = turn;
+        active.headless = turn;
         this.host.send({ type: "turn.started", turnId });
+        release();
         const exitCode = await turn.exit;
-        this.finish(turnId, { exitCode, ...(this.current.interrupted ? { interrupted: true } : {}) });
+        this.finish(turnId, { exitCode, ...(active.interrupted ? { interrupted: true } : {}) });
       } else {
         this.finish(turnId, { error: "no harness attached" });
       }
     } catch (err) {
       this.finish(turnId, { error: err instanceof Error ? err.message : String(err) });
     } finally {
-      this.current = undefined;
-      this.clearPending();
-      this.host.status(this.ctx.sessionId, "idle");
+      release();
+      // The superseded run may finish after its replacement starts. Its
+      // cleanup and Stop receipt must never clear the replacement's state.
+      if (active && this.current === active) {
+        this.current = undefined;
+        this.clearPending();
+        this.host.status(this.ctx.sessionId, "idle");
+      }
+      settle();
     }
   }
 
