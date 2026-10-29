@@ -80,6 +80,9 @@ export class RemoteSession {
   private inputReady: Promise<void> = Promise.resolve();
   private steering?: Promise<void>;
   private readonly pendingSteers = new Map<string, AbortController>();
+  // An exact Stop can race the server's enqueue. Remember only this session's
+  // bounded steering intent; it never cancels ordinary queued input.
+  private readonly canceledSteers = new Map<string, number>();
   private nativeBusy = false;
   private stopHooksUncorrelated = false;
   private nativeEpoch = 0;
@@ -148,6 +151,7 @@ export class RemoteSession {
     this.stopped = true;
     for (const pending of this.pendingSteers.values()) pending.abort();
     this.nativeIdle();
+    this.canceledSteers.clear();
     this.stopWatching?.();
     this.host.close();
   }
@@ -185,8 +189,17 @@ export class RemoteSession {
       return;
     }
     if (frame.deliveryMode === "steer") {
-      if (this.ctx.harness !== "claude" || this.ctx.mode !== "tui" || !this.pty || this.pending) {
+      if (this.ctx.harness !== "claude" || this.ctx.mode !== "tui" || !this.pty) {
         this.finish(frame.turnId, { unsupported: "Send now requires a Claude Code terminal without a pending permission or question" });
+        return;
+      }
+      this.pruneCanceledSteers();
+      if (this.canceledSteers.has(frame.turnId)) {
+        this.finish(frame.turnId, { exitCode: 0, interrupted: true });
+        return;
+      }
+      if (this.pending) {
+        this.finish(frame.turnId, { unsupported: "Answer the pending permission or question before Send now" });
         return;
       }
       const injection = new AbortController();
@@ -216,9 +229,17 @@ export class RemoteSession {
         pending.abort();
         if (current) this.onInterrupt(current.turnId);
         else if (this.nativeBusy) this.pty?.interrupt(this.ctx.harness);
+      } else {
+        this.pruneCanceledSteers();
+        if (turnId.length > 0 && turnId.length <= 256) {
+          this.canceledSteers.delete(turnId);
+          this.canceledSteers.set(turnId, Date.now() + 5 * 60_000);
+          while (this.canceledSteers.size > 256) this.canceledSteers.delete(this.canceledSteers.keys().next().value as string);
+        }
       }
       return;
     }
+    if (current.interrupted) return;
     current.interrupted = true;
     current.injection.abort();
     if (current.superseded) {
@@ -227,6 +248,11 @@ export class RemoteSession {
     }
     if (current.headless) current.headless.interrupt();
     else this.pty?.interrupt(this.ctx.harness);
+  }
+
+  private pruneCanceledSteers(): void {
+    const now = Date.now();
+    for (const [id, expiresAt] of this.canceledSteers) if (expiresAt <= now) this.canceledSteers.delete(id);
   }
 
   private async onCheckpoint(request: CheckpointRequestFrame): Promise<void> {

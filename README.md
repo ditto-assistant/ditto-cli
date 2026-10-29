@@ -1327,3 +1327,11 @@ heyditto orgs set-role @teammate member --org your-team --expected-role viewer
 `allowance` reads your own allowance when the member is omitted. Current org managers can inspect another member by exact id, email or handle. It uses Ditto MCP, exposes no company balance or purchase history, and changes no budget. MCP refusals exit with an error.
 
 `set-role` resolves exactly one member, sends only the role, and reports the previous role. `--expected-role` is a client preflight, not an atomic compare-and-set. Owner/admin authorization and last-owner/last-manager protections are enforced by the backend. Reverting a role uses the same command with the reported previous role and current authorization. Directory listing is capped at 2000 rows and reports possible truncation. Role changes refuse a directory at that cap, since an exact name lookup cannot be guaranteed complete. These commands need a full account CLI key and a backend that admits the member routes; narrowed space/tool/thread keys are refused.
+
+
+Stop also covers a steering command that races its server enqueue. Unknown
+cancellation IDs are retained for5minutes (at most256 entries) in the current
+CLI session and cancel only the matching later steer. They do not cancel normal
+queued prompts or interrupt unrelated current turns. Repeated exact Stop frames
+send one physical interrupt. This intent does not survive a fresh CLI process;
+steering is not automatically replayed offline.

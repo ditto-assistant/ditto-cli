@@ -181,6 +181,59 @@ test("Stop cancels a delivered steer waiting for the input lock before activatio
   assert.equal(w.calls.length, 1, "cancelled pending steer must never paste or submit later");
 });
 
+test("Stop before delivery cancels only a later matching steer, never its unrelated current or normal queue", { timeout: 6000 }, async (t) => {
+  const w = await world(t);
+  w.send("actual"); await w.started("actual");
+  w.stub.send({ type: "turn.interrupt", turnId: "late-steer" });
+  w.send("late-steer", { deliveryMode: "steer" });
+  await w.stub.waitFor(f => f.type === "turn.ack" && f.turnId === "late-steer");
+  assert.equal(w.calls.length, 1, "a canceled future steer must not reach native injection");
+  assert.equal((await w.finished("late-steer")).interrupted, true);
+  assert.equal(w.calls.length, 1); assert.equal(w.interrupts(), 0, "unknown ID alone cannot interrupt an unrelated current turn");
+  w.stub.send({ type: "turn.interrupt", turnId: "ordinary" });
+  w.send("ordinary");
+  w.events.emit("hook", { source: "claude", event: "Stop" }); await w.finished("actual");
+  await w.started("ordinary");
+  assert.equal(w.calls.length, 2, "cancellation intent applies only to steering, not normal queued prompts");
+  w.events.emit("hook", { source: "claude", event: "Stop" }); await w.finished("ordinary");
+});
+
+test("paired pending-steer and predecessor Stop frames send one independent physical interrupt", { timeout: 6000 }, async (t) => {
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  t.after(() => release());
+  const w = await world(t, { inject: async (_text, mode) => { if (mode === "steer") await gate; } });
+  w.send("predecessor"); await w.started("predecessor");
+  w.send("preparing", { deliveryMode: "steer" });
+  while (w.calls.length < 2) await sleep(5);
+  w.stub.send({ type: "turn.interrupt", turnId: "preparing" });
+  w.stub.send({ type: "turn.interrupt", turnId: "predecessor" });
+  w.send("normal-barrier");
+  await w.stub.waitFor(f => f.type === "turn.ack" && f.turnId === "normal-barrier");
+  assert.equal(w.interrupts(), 1, "paired exact targets cannot generate duplicate Escape keys");
+  release();
+  assert.equal((await w.finished("preparing")).interrupted, true);
+  assert.equal((await w.finished("predecessor")).interrupted, true);
+  await w.started("normal-barrier");
+  w.events.emit("hook", { source: "claude", event: "Stop" }); await w.finished("normal-barrier");
+});
+
+test("pre-delivery steering cancellation expires and remains bounded", { timeout: 6000 }, async (t) => {
+  const w = await world(t);
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  w.stub.send({ type: "turn.interrupt", turnId: "expired" });
+  w.send("barrier"); await w.started("barrier");
+  w.events.emit("hook", { source: "claude", event: "Stop" }); await w.finished("barrier");
+  now += 5 * 60_000 + 1;
+  w.send("expired", { deliveryMode: "steer" }); await w.started("expired");
+  for (let i = 0; i <= 256; i++) w.stub.send({ type: "turn.interrupt", turnId: `bounded-${i}` });
+  w.send("bounded-0", { deliveryMode: "steer" }); await w.started("bounded-0");
+  w.send("bounded-256", { deliveryMode: "steer" });
+  assert.equal((await w.finished("bounded-256")).interrupted, true);
+  assert.equal(w.calls.length, 3, "expired and evicted intents release; retained intent cannot inject");
+});
+
 test("actual PTY submits Enter and observed Ctrl+Enter bytes while Stop remains Escape", async (t) => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), "ditto-send-keys-"));
   const chunks = [];
