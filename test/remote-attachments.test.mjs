@@ -158,3 +158,17 @@ test("reserved and trailing-dot turn identifiers use distinct portable directori
     assert.equal(path.basename(path.dirname(ordinary.absPath)),"ordinary");
   } finally { await rm(cwd,{recursive:true,force:true}); }
 });
+
+
+test("literal hash-shaped turn IDs cannot alias another turn's downloaded files", async () => {
+  const cwd=await mkdtemp(path.join(os.tmpdir(),"ditto-turn-namespace-"));
+  try {
+    const unsafe="channel:turn",literal="turn-"+createHash("sha256").update(unsafe).digest("hex");
+    const [first]=await downloadAttachments(cwd,unsafe,[attachment()],async()=>bytes);
+    const other=Buffer.from("different turn attachment");
+    const [second]=await downloadAttachments(cwd,literal,[attachment({size:other.length,sha256:createHash("sha256").update(other).digest("hex")})],async()=>other);
+    assert.notEqual(first.absPath,second.absPath);
+    assert.deepEqual(await readFile(first.absPath),bytes);
+    assert.deepEqual(await readFile(second.absPath),other);
+  } finally { await rm(cwd,{recursive:true,force:true}); }
+});

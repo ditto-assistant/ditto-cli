@@ -319,7 +319,7 @@ export class RemoteSession {
   private async resolveText(frame: TurnDeliverFrame): Promise<{ text: string; entry?: CommandEntry } | { unsupported: string }> {
     const attachments = await downloadAttachments(this.ctx.cwd, frame.turnId, frame.attachments);
     if (attachments.length > 0) {
-      this.ctx.log(`remote control: ${attachments.length} attachment(s) saved under .tmp/ditto/attachments/${frame.turnId}`);
+      this.ctx.log(`remote control: ${attachments.length} attachment(s) saved under ${attachments[0].relPath.split("/").slice(0, -1).join("/")}`);
     }
     const promptOptions = { nativeFileReferences: this.ctx.harness === "claude" && this.ctx.mode === "tui" };
     if ((frame.kind ?? "prompt") !== "command") return { text: buildPrompt(frame.text, attachments, promptOptions) };

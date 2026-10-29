@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -258,6 +259,16 @@ test("tui: default launch announces, sends the catalog, and runs prompt / comman
       fakes.entries().filter((e) => e.event === "answer").map((e) => e.key),
       ["1", "1"],
     );
+
+    // A portable hashed turn logs the actual downloaded directory.
+    const portableTurn="channel:notes";
+    stub.send({type:"turn.deliver",turnId:portableTurn,sessionId:announce.sessionId,text:"read portable notes",attachments:[attachment]});
+    await stub.waitFor(f=>f.type==="turn.finished"&&f.turnId===portableTurn);
+    const portableDir=".tmp/ditto/attachments/turn-"+createHash("sha256").update(portableTurn).digest("hex");
+    assert.equal(readFileSync(path.join(repo,portableDir,"notes.txt"),"utf8"),"notes from the phone\n");
+    const notes=readFileSync(path.join(env.DITTO_CONFIG_DIR,"logs","notes.log"),"utf8");
+    assert.ok(notes.includes("attachment(s) saved under "+portableDir));
+    assert.ok(!notes.includes("attachment(s) saved under .tmp/ditto/attachments/"+portableTurn));
 
     // Ctrl+C at the keyboard ends the harness; the host announces the session closed and the key is revoked.
     run.write("\u0003");
