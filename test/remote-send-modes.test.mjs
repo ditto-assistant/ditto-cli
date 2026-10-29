@@ -409,6 +409,8 @@ test("controller refuses queued paste after an aborted owned paste preserves for
   const staleFrom = w.stub.frames.length; const beforeStale = hex();
   w.stub.send({ type: "prompt.answer", sessionId: "owned-session", promptId: pending.promptId, value: "1" });
   w.stub.send({ type: "ping" }); await w.stub.waitFor(f => f.type === "pong", { from: staleFrom });
+  // Observe delayed input as well as the synchronous WebSocket handler.
+  await sleep(250);
   assert.equal(w.session.pending?.promptId, successor.promptId, "duplicate old answer cannot consume a successor");
   assert.equal(hex(), beforeStale, "old-ID replay writes no bytes into the successor dialog");
 });
