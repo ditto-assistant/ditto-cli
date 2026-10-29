@@ -972,7 +972,8 @@ How it works:
   answer is typed back as the option's hotkey (or as text). Codex exposes no
   hook for its approval dialogs, so those still need the keyboard.
 - Claude Code terminal hosts advertise prompt delivery modes separately from
-  Stop. Normal busy sends remain in the CLI's FIFO. Explicit `deliveryMode:
+  Stop. Normal busy sends remain in the CLI's FIFO; native keyboard activity
+  observed through Claude hooks also holds that FIFO until its Stop hook. Explicit `deliveryMode:
   "steer"` bypasses that FIFO and submits the prompt with native Ctrl+Enter;
   queued prompts remain queued. Escape still performs the independent Stop.
   A steered turn ignores unscoped native Stop hooks because they have no remote

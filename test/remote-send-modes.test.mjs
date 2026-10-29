@@ -56,6 +56,20 @@ test("Claude normal FIFO survives immediate steering and stale Stop cannot finis
   await w.finished("queued");
 });
 
+test("a locally typed native prompt holds remote FIFO until its Stop hook", async (t) => {
+  const w = await world(t);
+  w.events.emit("hook", { source: "claude", event: "UserPromptSubmit", payload: { prompt: "local synthetic input" } });
+  w.send("after-local");
+  await w.stub.waitFor((f) => f.type === "turn.ack" && f.turnId === "after-local");
+  await sleep(40);
+  assert.equal(w.calls.length, 0, "busy native keyboard turn must not consume a remote receipt");
+  w.events.emit("hook", { source: "claude", event: "Stop" });
+  await w.started("after-local");
+  assert.equal(w.calls[0][0], "after-local");
+  w.events.emit("hook", { source: "claude", event: "Stop" });
+  await w.finished("after-local");
+});
+
 test("unsupported mode, non-prompt steering and pending permission never inject", async (t) => {
   const w = await world(t);
   w.send("unknown", { deliveryMode: "invented" });
@@ -91,6 +105,26 @@ test("Stop during paste aborts submission and does not report a started turn", a
   release();
   assert.equal((await w.finished("paste")).interrupted, true);
   assert.equal(w.stub.frames.some((f) => f.type === "turn.started" && f.turnId === "paste"), false);
+});
+
+test("Stop targeting the prior active receipt cancels a steering paste before Ctrl+Enter", async (t) => {
+  let release;
+  const pasted = new Promise((resolve) => { release = resolve; });
+  const w = await world(t, { inject: async (_text, mode) => { if (mode === "steer") await pasted; } });
+  w.send("prior"); await w.started("prior");
+  w.send("new-paste", { deliveryMode: "steer" });
+  const deadline = Date.now() + 2000;
+  while (w.calls.length < 2 && Date.now() < deadline) await sleep(5);
+  assert.equal(w.calls.length, 2);
+  w.stub.send({ type: "turn.interrupt", turnId: "prior" });
+  const stopDeadline = Date.now() + 2000;
+  while (!w.interrupts() && Date.now() < stopDeadline) await sleep(5);
+  assert.equal(w.interrupts(), 1);
+  assert.equal(w.calls[1][2].aborted, true);
+  release();
+  assert.equal((await w.finished("prior")).interrupted, true);
+  assert.equal((await w.finished("new-paste")).interrupted, true);
+  assert.equal(w.stub.frames.some((f) => f.type === "turn.started" && f.turnId === "new-paste"), false);
 });
 
 test("actual PTY submits Enter and observed Ctrl+Enter bytes while Stop remains Escape", async (t) => {
