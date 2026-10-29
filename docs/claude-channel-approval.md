@@ -4,6 +4,10 @@ Submitting organization: OmniAura LLC. Account owner/contact: Peyton Spencer (`p
 Engineering owns the plugin, evidence and fixes; Peyton owns external submission and the Anthropic relationship.
 Tracking: DITTO-1585. Last checked: October 28, 2026.
 Status: preparation only. Ditto has not been submitted or approved as a channel.
+The local owner-review runtime remains pinned to clean `1756fd7`; its packaged
+native prompt/receipt/reply test passed under the development override. See
+[the evidence record](submissions/ditto-remote/evidence.md) for the archive hash
+and remaining admission/security gates.
 
 ## Objective and current limits
 
@@ -178,9 +182,11 @@ launch and retain native/MCP-only versus Router labels in the app.
 
 ## Immediate next steps
 
-1. Engineering: validate the packaged plugin and preserve a sanitized visible
-   native prompt/receipt/reply recording; previous server-adapter tests already
-   show both transports but do not prove this package or channel admission.
+1. Engineering: review and sanitize the preserved `1756fd7` native packaged
+   prompt/receipt/reply evidence for the owner-review packet. Manifest/archive
+   validation and the exact installed native demo passed locally; ordinary
+   channel admission, revoked-credential and two-account negatives remain
+   outstanding. Repeat the demo for any later published bundle or revision.
 2. Engineering and Peyton: review the submission packet, confirm publisher,
    icon, monitored contact, policy coverage and proposed owning organization.
 3. Peyton: review the artifact and request destination, then authorize the

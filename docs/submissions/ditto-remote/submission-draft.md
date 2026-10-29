@@ -57,8 +57,10 @@ necessary for the default allowlist. We understand that the official
 marketplace does not take submissions through the directory portal; this
 request is specifically for the relationship/support-led Channel route.
 
-We can provide a sanitized native-subscription demonstration, source revision,
-exact-lock runtime bundle, test evidence, data-flow and threat model. We do not
+We have preserved a native-subscription demonstration of the exact clean
+`1756fd7` review bundle, including visible prompt arrival and actual
+acknowledge/reply. We can provide its owner-reviewed, sanitized evidence,
+source revision, exact-lock runtime bundle, data-flow and threat model. We do not
 claim default-list approval or a review deadline. We will retain the CLI bridge
 for harnesses and accounts without admitted Channels.
 
@@ -124,11 +126,11 @@ inbound Channels.
 
 | Item | Current status / required next step |
 | --- | --- |
-| Installable versioned plugin | `npm run plugin:build` produces a local installable review bundle; `BUILD.json` binds source revision and dependency-lock SHA256 |
+| Installable versioned plugin | Clean owner-review runtime `1756fd7b18e0a7a9e33d138fe5ab90cde3bd3081`; `BUILD.json` binds source and exact dependency lock. Archive SHA256: `0ede757255e09b1f21a64d249ce53ce55d057de64045163435251bf4cc0e05a9`. Documentation-only follow-ups do not relabel this artifact |
 | Runnable public distribution | **Not published**; approve a complete release bundle and a runnable GitHub source location before directory ingestion; the checked-in template alone is insufficient |
 | Source and runtime | Reuses the CLI channel implementation; Node provided by the host, dependencies bundled from committed lock; no startup download |
-| Manifest validation | Clean `4a2debc` plugin manifest and local-review marketplace both passed without warnings on Claude Code 2.1.312; runtime artifact remains pinned independently of documentation-only updates |
-| Native live demo | **Passed October 28, 2026**: clean runtime artifact `4a2debc3aa478e981c59c225bb10e9fac5be8867`, Claude Code 2.1.312 displaying Opus 5.5 / Claude Max, unique Browser prompt visibly received through the packaged plugin, explicit acknowledge/reply completed and matching response returned to Ditto. Development override only; run IDs and screenshot originals in `evidence.md` |
+| Manifest validation | Clean `1756fd7` plugin manifest and local-review marketplace passed without warnings on Claude Code 2.1.312; archive integrity passed and 4,165 installed bundle files matched the reviewed distribution |
+| Native live demo | **Passed October 28, 2026**: clean runtime artifact `1756fd7b18e0a7a9e33d138fe5ab90cde3bd3081`, Claude Code 2.1.312 displaying Opus 5.5 / Claude Max, unique Browser prompt visibly received through the packaged plugin, explicit acknowledge/reply completed and matching response returned to Ditto. Matching response: `PACKAGED_CHANNEL_1756FD7_20261028_C`; backend turn finished. Development override only; redacted run references and portable evidence names in `evidence.md`. Earlier `4a2debc` proof is historical |
 | CLI live demo | Record separately; CLI terminal transport is not plugin admission evidence |
 | Sender isolation | **Outstanding**: two-account session ownership negative test; attach the exact backend head/result, not just client-session-ID filtering |
 | Revoked credentials | **Outstanding**: revoke a disposable QA key; prove disconnection/rejection and no new delivery; do not revoke a user's shared key |
