@@ -235,6 +235,12 @@ export class RemoteSession {
 
   private onInterrupt(turnId: string): void {
     const current = this.current;
+    // An uncertain editor refuses every future remote paste, so there is no
+    // remote successor to target. Explicit Stop still interrupts this PTY.
+    if (!current && this.pty?.inputBlockReason?.()) {
+      this.pty.interrupt(this.ctx.harness);
+      return;
+    }
     if (!current || (current.turnId !== turnId && !(current.superseded?.turnId === turnId && !current.submitted))) {
       const pending = this.pendingSteers.get(turnId);
       if (pending) {
@@ -419,7 +425,10 @@ export class RemoteSession {
     });
   }
 
+  private promptGeneration = 0;
+
   private requestPrompt(prompt: Omit<PendingPrompt, "promptId" | "sessionId">): void {
+    this.promptGeneration++;
     const pending: PendingPrompt = { promptId: randomUUID(), sessionId: this.ctx.sessionId, ...prompt };
     this.pending = pending;
     const { keys: _keys, ...frame } = pending;
@@ -443,9 +452,16 @@ export class RemoteSession {
     this.pty.write(keys);
     // A digit hotkey confirms on its own in Claude Code; the extra Enter is a
     // no-op there and submits typed text everywhere else.
-    setTimeout(() => this.pty?.write("\r"), 150).unref?.();
     this.claudePermissions.answered(this.pendingPermission);
     this.clearPending();
+    const generation = this.promptGeneration;
+    const operation = this.current;
+    const nativeEpoch = this.nativeEpoch;
+    const answeredPty = this.pty;
+    setTimeout(() => {
+      if (!this.stopped && this.pty === answeredPty && !answeredPty.inputBlockReason?.() &&
+          this.promptGeneration === generation && !this.pending && this.current === operation && this.nativeEpoch === nativeEpoch) answeredPty.write("\r");
+    }, 150).unref?.();
     return true;
   }
 
@@ -528,6 +544,12 @@ export class RemoteSession {
       if (this.stopped) return;
       if (injection?.signal.aborted) {
         this.finish(turnId, { exitCode: 0, interrupted: true });
+        return;
+      }
+      const blockedInput = this.pty?.inputBlockReason?.();
+      if (blockedInput) {
+        this.ctx.log(`remote control: ${blockedInput}`);
+        this.finish(turnId, { error: blockedInput });
         return;
       }
       const resolved = await this.resolveText(frame);

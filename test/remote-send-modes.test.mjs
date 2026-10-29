@@ -17,9 +17,10 @@ async function world(t, { harness = "claude", mode = "tui", inject } = {}) {
   const stub = await startHostStub();
   const events = new EventEmitter();
   const calls = [];
+  const writes = [];
   let interrupts = 0;
   let quiet = 0;
-  const pty = { pid: 1, write() {}, inject: async (...args) => { calls.push(args); await inject?.(...args); }, interrupt() { interrupts++; }, quietFor: () => quiet, exit: new Promise(() => {}), kill() {} };
+  const pty = { pid: 1, write(data) { writes.push(data); }, inject: async (...args) => { calls.push(args); await inject?.(...args); }, interrupt() { interrupts++; }, quietFor: () => quiet, exit: new Promise(() => {}), kill() {} };
   const session = new RemoteSession({ harness, mode, cwd, sessionId: "owned-session", apiKey: "ditto_mcp_test", baseUrl: stub.base, log() {}, quietFallbackMs: 400 }, { events });
   if (mode === "tui") session.attachTui(pty);
   t.after(async () => { session.stop(); await stub.close(); if (prior === undefined) delete process.env.DITTO_CONFIG_DIR; else process.env.DITTO_CONFIG_DIR = prior; await rm(cwd, { recursive: true, force: true }); });
@@ -27,7 +28,7 @@ async function world(t, { harness = "claude", mode = "tui", inject } = {}) {
   const send = (turnId, extra = {}) => stub.send({ type: "turn.deliver", sessionId: "owned-session", turnId, text: turnId, ...extra });
   const started = (id) => stub.waitFor((f) => f.type === "turn.started" && f.turnId === id);
   const finished = (id) => stub.waitFor((f) => f.type === "turn.finished" && f.turnId === id);
-  return { stub, events, calls, session, send, started, finished, interrupts: () => interrupts, quiet: () => { quiet = Infinity; }, busy: () => { quiet = 0; } };
+  return { stub, events, calls, writes, session, send, started, finished, interrupts: () => interrupts, quiet: () => { quiet = Infinity; }, busy: () => { quiet = 0; } };
 }
 
 test("Claude normal FIFO survives immediate steering and stale Stop cannot finish its replacement", async (t) => {
@@ -327,4 +328,95 @@ test("canceled owned paste never undoes an intervening local stdin edit", { time
   const report = output.match(/REPORT:([^\r\n]+)/);
   assert.ok(report, output);
   assert.equal(JSON.parse(report[1]).hex, Buffer.from("\u001b[200~owned paste\u001b[201~local-edit").toString("hex"), "intervening local edit must suppress undo without submitting the canceled paste");
+});
+
+test("aborted owned paste never undoes an intervening public PTY write", { timeout: 6000 }, async t => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "ditto-public-input-"));
+  const chunks = [];
+  const echo = String.raw`process.stdin.setRawMode(true);process.stdin.resume();process.stdout.write("READY\n");process.stdin.on("data",b=>process.stdout.write("HEX:"+b.toString("hex")+"\n"));`;
+  const pty = await spawnInPty(process.execPath, ["--input-type=module", "-e", echo], { cwd, env: process.env, harness: "claude", attachTerminal: false, pasteDelayMs: 200, onOutput: data => chunks.push(data) });
+  t.after(async () => { pty.kill(); await pty.exit; await rm(cwd, { recursive: true, force: true }); });
+  const until = async (ready, label) => {
+    const deadline = Date.now() + 1500;
+    while (!ready() && Date.now() < deadline) await sleep(5);
+    assert.ok(ready(), label);
+  };
+  await until(() => chunks.join("").includes("READY"), "owned echo PTY ready");
+  const stop = new AbortController();
+  const injecting = pty.inject("owned paste", "steer", stop.signal);
+  pty.write("permission-answer");
+  stop.abort(); await injecting;
+  const expected = Buffer.from("\u001b[200~owned paste\u001b[201~permission-answer").toString("hex");
+  const hex = () => [...chunks.join("").matchAll(/HEX:([0-9a-f]+)/g)].map(m => m[1]).join("");
+  await until(() => hex().length >= expected.length, "public write observed by actual PTY");
+  assert.equal(hex(), expected, "foreign input must not be undone or submitted by cancellation");
+  pty.interrupt("claude");
+  await until(() => hex().length > expected.length, "independent Stop observed");
+  assert.equal(hex(), expected + "1b", "physical Claude Stop remains Escape independently");
+  assert.match(pty.inputBlockReason(), /terminal.*draft/i);
+  const fresh = await spawnInPty(process.execPath, ["--input-type=module", "-e", echo], { cwd, env: process.env, harness: "claude", attachTerminal: false });
+  t.after(async () => { fresh.kill(); await fresh.exit; });
+  assert.equal(fresh.inputBlockReason(), undefined, "a new owned PTY is known fresh input state");
+});
+
+test("controller refuses queued paste after an aborted owned paste preserves foreign input", { timeout: 8000 }, async t => {
+  const w = await world(t);
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "ditto-controller-input-"));
+  const chunks = [];
+  const echo = String.raw`process.stdin.setRawMode(true);process.stdin.resume();process.stdout.write("READY\n");process.stdin.on("data",b=>process.stdout.write("HEX:"+b.toString("hex")+"\n"));`;
+  const pty = await spawnInPty(process.execPath, ["--input-type=module", "-e", echo], { cwd, env: process.env, harness: "claude", attachTerminal: false, pasteDelayMs: 200, onOutput: data => chunks.push(data) });
+  t.after(async () => { pty.kill(); await pty.exit; await rm(cwd, { recursive: true, force: true }); });
+  w.session.attachTui(pty);
+  const until = async (ready, label) => { const deadline = Date.now() + 1500; while (!ready() && Date.now() < deadline) await sleep(5); assert.ok(ready(), label); };
+  const hex = () => [...chunks.join("").matchAll(/HEX:([0-9a-f]+)/g)].map(m => m[1]).join("");
+  await until(() => chunks.join("").includes("READY"), "owned PTY ready");
+  w.send("cancel-owned", { deliveryMode: "steer" });
+  await until(() => hex().includes(Buffer.from("cancel-owned").toString("hex")), "first owned paste reached actual PTY");
+  w.events.emit("hook", { source: "claude", event: "Notification", payload: { notification_type: "permission_prompt", message: "Synthetic permission" } });
+  const pending = await w.stub.waitFor(f => f.type === "prompt.request");
+  const beforeAnswer = hex();
+  w.stub.send({ type: "prompt.answer", sessionId: "owned-session", promptId: pending.promptId, value: "1" });
+  await until(() => hex().length > beforeAnswer.length, "actual controller answer reached PTY public write");
+  const answeredAt = Date.now();
+  w.send("queued-after-cancel");
+  await w.stub.waitFor(f => f.type === "turn.ack" && f.turnId === "queued-after-cancel");
+  w.stub.send({ type: "turn.interrupt", turnId: "cancel-owned" });
+  assert.equal((await w.finished("cancel-owned")).interrupted, true);
+  const queued = await w.finished("queued-after-cancel");
+  const facts = { queuedStarted: w.stub.frames.some(f => f.type === "turn.started" && f.turnId === "queued-after-cancel"), foreignWriteObserved: hex().includes(beforeAnswer + "31"), queuedPasteObserved: hex().includes(Buffer.from("queued-after-cancel").toString("hex")), undoObserved: hex().includes("1f") };
+  assert.match(queued.error ?? "", /terminal.*draft/i, JSON.stringify(facts));
+  assert.equal(w.stub.frames.some(f => f.type === "turn.started" && f.turnId === "queued-after-cancel"), false);
+  assert.ok(hex().includes(beforeAnswer + "31"));
+  await sleep(Math.max(0, answeredAt + 250 - Date.now()));
+  assert.equal(hex().includes("0d"), false, "a delayed confirmation cannot submit the uncertain canceled editor");
+  assert.equal(hex().includes(Buffer.from("queued-after-cancel").toString("hex")), false);
+  assert.equal(hex().includes("1f"), false, "the foreign edit is never undone");
+  const beforeStop = hex();
+  w.stub.send({ type: "turn.interrupt", turnId: "cancel-owned" });
+  await until(() => hex().length > beforeStop.length, "Stop remains available while latched without an active remote turn");
+  assert.equal(hex(), beforeStop + "1b");
+  w.events.emit("hook", { source: "claude", event: "UserPromptSubmit", payload: {} });
+  assert.match(pty.inputBlockReason(), /terminal.*draft/i, "a late unscoped hook is not evidence of cleared input");
+  w.send("steer-while-blocked", { deliveryMode: "steer" });
+  assert.match((await w.finished("steer-while-blocked")).error, /terminal.*draft/i);
+  assert.equal(hex().includes(Buffer.from("steer-while-blocked").toString("hex")), false);
+});
+
+
+test("a permission confirmation is scoped to its original prompt and operation", { timeout: 4000 }, async t => {
+  const w = await world(t); const seen = new Set();
+  const prompt = async () => {
+    w.events.emit("hook", { source: "claude", event: "Notification", payload: { notification_type: "permission_prompt", message: "Synthetic permission" } });
+    const next = await w.stub.waitFor(f => f.type === "prompt.request" && !seen.has(f.promptId)); seen.add(next.promptId); return next;
+  };
+  const answer = async p => { w.stub.send({ type: "prompt.answer", sessionId: "owned-session", promptId: p.promptId, value: "1" }); await w.stub.waitFor(f => f.resolvedPromptId === p.promptId); };
+  await answer(await prompt());
+  const next = await prompt();
+  await sleep(220); assert.deepEqual(w.writes, ["1"], "old confirmation cannot answer a live successor dialog");
+  await answer(next);
+  await sleep(220); assert.deepEqual(w.writes, ["1", "1", "\r"], "ordinary current answer retains its confirmation");
+  await answer(await prompt()); await answer(await prompt());
+  await sleep(220); assert.deepEqual(w.writes, ["1", "1", "\r", "1", "1", "\r"], "a rapidly answered successor must not inherit the older confirmation timer");
+  await answer(await prompt()); w.send("new-operation"); await w.started("new-operation");
+  await sleep(220); assert.deepEqual(w.writes, ["1", "1", "\r", "1", "1", "\r", "1"], "old confirmation cannot submit into a new operation");
 });

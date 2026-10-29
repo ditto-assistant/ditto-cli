@@ -75,6 +75,8 @@ export interface PtySession {
   interrupt(harness: Harness): void;
   /** Milliseconds since the harness last wrote to the screen. */
   quietFor(): number;
+  /** A refused undo leaves input ownership unknown until a fresh PTY. */
+  inputBlockReason?(): string | undefined;
   /** Resolves with the exit code once the harness exits. */
   exit: Promise<number | null>;
   kill(): void;
@@ -112,6 +114,8 @@ export async function spawnInPty(command: string, args: string[], options: PtyOp
     child = spawnOnce();
   }
 
+  let inputOwnershipUncertain = false;
+  const inputBlockReason = () => inputOwnershipUncertain ? "Input changed on the device during cancellation. Review the terminal draft and relaunch the session before sending more prompts." : undefined;
   let lastOutput = Date.now();
   child.onData((data) => {
     lastOutput = Date.now();
@@ -150,16 +154,21 @@ export async function spawnInPty(command: string, args: string[], options: PtyOp
 
   return {
     pid: child.pid,
-    write: (data) => child.write(data),
+    write: (data) => { localInputRevision++; child.write(data); },
     inject: async (prompt, mode = "queue", signal) => {
       if (signal?.aborted) return;
+      const blocked = inputBlockReason();
+      if (blocked) throw new Error(blocked);
       let pasted = false;
       const pasteInputRevision = localInputRevision;
       // Undo only this owned, nonempty paste, preserving its prior native draft.
       // Do not undo an intervening local edit. Native undo also checks input mode.
       // The caller still sends Escape independently to stop native execution.
       const cancelPaste = () => {
-        if (pasted && options.harness === "claude" && localInputRevision === pasteInputRevision) child.write("\u001f");
+        if (pasted && options.harness === "claude") {
+          if (localInputRevision === pasteInputRevision) child.write("\u001f");
+          else inputOwnershipUncertain = true;
+        }
       };
       signal?.addEventListener("abort", cancelPaste, { once: true });
       try {
@@ -178,6 +187,7 @@ export async function spawnInPty(command: string, args: string[], options: PtyOp
     },
     interrupt: (harness) => child.write(harness === "claude" ? "\u001b" : "\u0003"),
     quietFor: () => Date.now() - lastOutput,
+    inputBlockReason,
     exit,
     kill: () => child.kill(),
   };

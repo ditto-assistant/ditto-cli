@@ -96,3 +96,14 @@ host's last capabilities. API success alone does not prove native acceptance.
 Attachment rendering preserves the supplied text, including leading/trailing
 spaces and CRLF, before appending the separate native file-reference block.
 Native editor normalization remains the native client's behavior.
+
+If local typing or a public PTY write intervenes in an unsubmitted paste, abort
+preserves that foreign input instead of sending undo. The owned PTY then latches
+input uncertainty: queued or immediate future prompt pastes fail visibly through
+the existing turn error receipt before a new active turn is created. They cannot
+silently append to the uncertain editor. Independent Escape Stop remains available,
+even without an active remote turn. No late unscoped hook clears this latch.
+Recovery currently requires reviewing the terminal draft and normally relaunching
+the session; a new owned PTY starts with fresh input state. DITTO-1649 tracks a
+less disruptive recovery based on authoritative input ownership. This rare
+relaunch-only path is conservative and never automatically clears device input.
