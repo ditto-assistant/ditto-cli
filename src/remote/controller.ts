@@ -321,7 +321,8 @@ export class RemoteSession {
     if (attachments.length > 0) {
       this.ctx.log(`remote control: ${attachments.length} attachment(s) saved under .tmp/ditto/attachments/${frame.turnId}`);
     }
-    if ((frame.kind ?? "prompt") !== "command") return { text: buildPrompt(frame.text, attachments) };
+    const promptOptions = { nativeFileReferences: this.ctx.harness === "claude" && this.ctx.mode === "tui" };
+    if ((frame.kind ?? "prompt") !== "command") return { text: buildPrompt(frame.text, attachments, promptOptions) };
     const name = frame.command?.name?.trim() || frame.text.trim().replace(/^[/$]/, "").split(/\s+/)[0];
     if (!name) return { unsupported: "command turn without a command name" };
     const entry = this.lookupCommand(name);
@@ -333,7 +334,7 @@ export class RemoteSession {
         return { unsupported: `${invocation.split(" ")[0]} only works in a terminal session (${entry ? "TUI-only builtin" : "not in this session's catalog"})` };
       }
     }
-    return { text: buildPrompt(invocation, attachments), entry };
+    return { text: buildPrompt(invocation, attachments, promptOptions), entry };
   }
 
   private async runTurn(frame: TurnDeliverFrame): Promise<void> {

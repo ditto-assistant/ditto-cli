@@ -211,7 +211,7 @@ test("tui: default launch announces, sends the catalog, and runs prompt / comman
     const saved = path.join(repo, ".tmp", "ditto", "attachments", "turn-1", "notes.txt");
     assert.equal(readFileSync(saved, "utf8"), "notes from the phone\n");
     const submitted = fakes.entries().find((e) => e.event === "prompt");
-    assert.equal(submitted.prompt, "read the notes\n\nAttached files:\n- .tmp/ditto/attachments/turn-1/notes.txt");
+    assert.equal(submitted.prompt, 'read the notes\n\nAttached files:\n- @".tmp/ditto/attachments/turn-1/notes.txt"\n\n');
     const exclude = readFileSync(path.join(repo, ".git", "info", "exclude"), "utf8");
     assert.ok(exclude.includes("\n.tmp/\n"), ".tmp/ is excluded per clone, never via .gitignore");
     assert.equal(existsSync(path.join(repo, ".gitignore")), false);

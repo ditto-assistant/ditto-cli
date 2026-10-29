@@ -5,13 +5,21 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { downloadAttachments } from "../dist/remote/attachments.js";
+import { buildPrompt, downloadAttachments } from "../dist/remote/attachments.js";
 
 const bytes = Buffer.from("attachment fixture");
 const attachment = (overrides = {}) => ({
   id: "same-prefix-id", name: "fixture.txt", mime: "text/plain", size: bytes.length,
   sha256: createHash("sha256").update(bytes).digest("hex"), url: "http://unused.test/",
   ...overrides,
+});
+
+test("Claude TUI file references quote spaces and close autocomplete before submit", () => {
+  const files = [{ relPath: ".tmp/ditto/attachments/turn/image with space.png" }];
+  assert.equal(buildPrompt("inspect", files, { nativeFileReferences: true }),
+    'inspect\n\nAttached files:\n- @".tmp/ditto/attachments/turn/image with space.png"\n\n');
+  assert.equal(buildPrompt("inspect", files),
+    "inspect\n\nAttached files:\n- .tmp/ditto/attachments/turn/image with space.png");
 });
 
 test("attachment descriptors reject traversal and invalid sizes before downloading", async () => {

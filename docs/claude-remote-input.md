@@ -20,10 +20,14 @@ instructions tell Claude to Read those files. Text that resembles an attachment
 annotation does not create trusted attachment metadata. A notification write
 is transport delivery only; acknowledge/reply remain separate receipts.
 
-The TUI currently submits bracketed pasted text with relative attachment paths.
-Native image attachment ingestion through that input path still requires a
-real Claude Code content-block probe. Channels file Read also needs native
-image-content evidence beyond the metadata transport tests.
+Claude's TUI receives bracketed pasted text with quoted relative `@file`
+references. Two trailing newlines close the file-completion menu so the submit
+key sends the prompt. Other harnesses and headless behavior retain plain paths.
+A real Claude Code2.1.312 loopback probe confirmed this format, including a
+filename with spaces, produced an actual PNG image block:1,334decoded bytes
+and an exact SHA-256 match to the synthetic source. This proves native format
+compatibility, not the complete app/upload/CLI delivery path. Channels file Read
+still needs native image-content evidence beyond the metadata transport tests.
 
 ## Input actions
 
@@ -34,7 +38,10 @@ input cancellation separate from stopping the response already running.
 Queue, steering, and Send Now (Ctrl+Enter) are not implemented by this initial
 attachment change. Native Channels notifications are normally consumed at the
 next turn; the documented Channels event schema has no force-now or interrupt
-field. Do not advertise unsupported controls based on invented metadata.
+field. Do not advertise unsupported controls based on invented metadata. A
+native TUI probe confirmed Ctrl+Enter cancels the running request and submits
+queued input plus the new direction. Ditto's typed send-mode contract and its
+terminal key encoding still need implementation and testing.
 
 Before release, exercise both transports visibly with actual Claude Code:
 image bytes present in native model context; long multiline text intact;
