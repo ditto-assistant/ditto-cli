@@ -10,6 +10,9 @@ import { npmInstallInvocation, readGitProvenance, verifyRuntimeArchive } from ".
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const pin = JSON.parse(await readFile(path.join(root, "plugins/ditto-remote/runtime-release.json"), "utf8"));
+if (typeof pin.gitHead !== "string" || !/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(pin.gitHead)) {
+  throw new Error("runtime-release.json must pin a valid canonical release gitHead.");
+}
 const provenance = readGitProvenance(root, pin.gitHead);
 if (provenance.dirty) throw new Error("Build the review plugin from a clean committed checkout.");
 const archive = process.argv[3];

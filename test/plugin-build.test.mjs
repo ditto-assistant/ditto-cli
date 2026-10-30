@@ -105,6 +105,16 @@ test("builder verifies the canonical archive and retains its runtime while overl
     const build=JSON.parse(await readFile(path.join(target,"BUILD.json"),"utf8"));assert.equal(build.sourceRevision,git("rev-parse","HEAD"));assert.equal(build.dirty,false);assert.equal(build.overlays.length,6);
     assert.deepEqual(JSON.parse(await readFile(marker,"utf8")),["ci","--omit=dev","--omit=optional","--ignore-scripts","--no-audit","--no-fund"]);
     assert.notEqual(execute(target).status,0,"existing bundles cannot be replaced");
+    for (const value of [undefined, null, 123, "not-a-revision"]) {
+      const invalid={...pin,gitHead:value};
+      await writeFile(path.join(template,"runtime-release.json"),JSON.stringify(invalid));
+      git("add",".");git("-c","user.name=Plugin QA","-c","user.email=qa@example.invalid","commit","-m","invalid pin fixture");
+      const missingTarget=path.join(root,".tmp",`invalid-${String(value)}`);
+      assert.match(execute(missingTarget).stderr,/must pin a valid canonical release gitHead/);
+      await assert.rejects(access(missingTarget),"invalid pins must fail before output or npm");
+    }
+    await writeFile(path.join(template,"runtime-release.json"),JSON.stringify(pin));
+    git("add",".");git("-c","user.name=Plugin QA","-c","user.email=qa@example.invalid","commit","-m","restore pin fixture");
     await writeFile(archive,Buffer.from("tampered"));
     const badTarget=path.join(root,".tmp","bad-bundle");assert.match(execute(badTarget).stderr,/pinned canonical/);await assert.rejects(access(badTarget));
   } finally {await rm(root,{recursive:true,force:true});}
