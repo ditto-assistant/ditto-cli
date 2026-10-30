@@ -1260,6 +1260,39 @@ your own workspace or an app workspace.`,
 
   addExamples(
     program
+      .command("feedback")
+      .description("send a diagnostic report or feature request to the Ditto team")
+      .argument("[report]", "report text (or use --file)")
+      .requiredOption("--title <title>", "short report title")
+      .option("--file <path>", "read report text from a UTF-8 file")
+      .option("--tool <name>", "Ditto tool involved")
+      .option("--error <message>", "error observed, with private data removed")
+      .option("--expected <text>", "expected behavior")
+      .option("--include-recent-traces", "include recent request diagnostics from this session")
+      .addOption(outputOption())
+      .action(async (report: string | undefined, options: {
+        title: string; file?: string; tool?: string; error?: string; expected?: string;
+        includeRecentTraces?: boolean; output?: string;
+      }) => {
+        if ((report === undefined) === (options.file === undefined)) {
+          throw new Error("feedback: provide report text or --file");
+        }
+        const text = options.file ? await readFile(options.file, "utf8") : report!;
+        if (!text.trim()) throw new Error("feedback: report text cannot be empty");
+        await callAndPrint("submit_feedback", {
+          title: options.title, report: text,
+          ...(options.tool ? { tool_name: options.tool } : {}),
+          ...(options.error ? { error: options.error } : {}),
+          ...(options.expected ? { expected: options.expected } : {}),
+          include_recent_traces: options.includeRecentTraces === true,
+        }, parseOutputFormat(options.output), true);
+      }),
+    `  heyditto feedback "The search tool timed out twice" --title "Search timeouts"
+  heyditto feedback --file ./report.txt --title "Missing capability" --include-recent-traces`,
+  );
+
+  addExamples(
+    program
       .command("agents")
       .description("list your Ditto agents (threads, activity, connections)")
       .summary("list Ditto agents")
