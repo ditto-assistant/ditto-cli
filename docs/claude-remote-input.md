@@ -117,3 +117,20 @@ permission values are refused. Neither action appends a delayed Enter, which
 could otherwise approve a successor before its notification arrives. General
 questions/text retain their operation- and prompt-scoped confirmation. Independent
 Stop still uses the existing Escape path.
+
+Remote Claude terminal-dialog actions require an unresolved token captured from
+PreToolUse/PermissionRequest and the same opaque controller operation or local
+input origin at publication and answer time. A Notification alone is not proof
+of an answerable dialog. Origin markers stay in memory and are not sent on the
+wire. Receipt-time origins do not authenticate an arbitrarily delayed first
+PreToolUse from an older native input.
+
+After the first successful Send now, **all remote permission prompts and
+questions/choices require the device terminal until a fresh session**. The CLI
+does not expose new actionable dialogs or type an answer to an earlier one.
+Correlated device Allow/No/tool-result handling still holds and releases FIFO
+where metadata proves completion. Ambiguous metadata stays held; device review
+or relaunch can be required. Independent physical Stop remains available, but
+this does not invent completion from unscoped hooks or promise that every
+ambiguous queue drains. DITTO-1649 tracks stronger native input-origin proof and
+less disruptive recovery.

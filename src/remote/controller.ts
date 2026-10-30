@@ -46,9 +46,12 @@ export function harnessName(harness: Harness): HarnessName {
 }
 
 interface PendingPrompt extends Omit<PromptRequestFrame, "type"> {
+  inputOrigin?: object;
   /** Keystrokes per option id, when they differ from the id itself. */
   keys?: Record<string, string>;
 }
+
+type PromptAnswerResult = "answered" | "stale" | "refused" | "changed";
 
 interface ActiveTurn {
   turnId: string;
@@ -94,6 +97,7 @@ export class RemoteSession {
   private stopWatching?: () => void;
   private pending?: PendingPrompt;
   private pendingPermission?: ClaudePermissionToken;
+  private nativeInputOrigin: object = {};
   private readonly claudePermissions: ClaudePermissionTracker;
 
   constructor(ctx: RemoteSessionContext, hooks?: HookServer) {
@@ -299,6 +303,7 @@ export class RemoteSession {
           // phone or the keyboard.
           this.clearPending();
           this.claudePermissions.reset();
+          this.nativeInputOrigin = {};
           this.nativeBusy = true;
           this.watchLocalQuietFallback();
           this.host.status(this.ctx.sessionId, "running");
@@ -306,8 +311,13 @@ export class RemoteSession {
         case "Notification":
           if (payload.notification_type === "permission_prompt") {
             const token = this.claudePermissions.notification(payload);
-            if (token?.resolved) return;
+            const origin = this.current ?? this.nativeInputOrigin;
+            // Native hooks do not authenticate a remote input generation. After
+            // steering even the first delayed PreToolUse could be an old turn,
+            // so permission actions require the device until a fresh process.
+            if (this.stopHooksUncorrelated || !token || token.resolved || token.origin !== origin) return;
             this.requestPrompt({
+              inputOrigin: origin,
               kind: "permission",
               text: String(payload.message ?? payload.title ?? "Claude Code is asking for permission"),
               options: CLAUDE_PERMISSION_OPTIONS,
@@ -318,10 +328,11 @@ export class RemoteSession {
           }
           return;
         case "PreToolUse":
-          this.claudePermissions.preTool(payload);
+          this.claudePermissions.preTool(payload, this.current ?? this.nativeInputOrigin);
           if (payload.tool_name === "AskUserQuestion" && this.hasQuestion(payload.tool_input)) {
             const token = this.claudePermissions.question(payload);
-            this.requestQuestion(payload.tool_input);
+            if (this.stopHooksUncorrelated || !token || token.resolved || token.origin !== (this.current ?? this.nativeInputOrigin)) return;
+            this.requestQuestion(payload.tool_input, token.origin);
             this.pendingPermission = token;
           }
           return;
@@ -374,6 +385,7 @@ export class RemoteSession {
   }
 
   private nativeIdle(): void {
+    this.nativeInputOrigin = {};
     this.nativeEpoch++;
     clearInterval(this.nativeIdleTimer);
     this.nativeIdleTimer = undefined;
@@ -413,12 +425,13 @@ export class RemoteSession {
     return Boolean(input && Array.isArray(input.questions) && input.questions[0]);
   }
 
-  private requestQuestion(toolInput: unknown): void {
+  private requestQuestion(toolInput: unknown, inputOrigin?: object): void {
     const input = (toolInput ?? {}) as { questions?: Array<{ question?: string; header?: string; options?: Array<{ label?: string }> }> };
     const q = input.questions?.[0];
     if (!q) return;
     const options = (q.options ?? []).map((o, i) => ({ id: String(i + 1), label: o.label ?? `option ${i + 1}` }));
     this.requestPrompt({
+      inputOrigin,
       kind: options.length > 0 ? "choice" : "question",
       text: [q.header, q.question].filter(Boolean).join(": "),
       ...(options.length > 0 ? { options } : {}),
@@ -431,7 +444,7 @@ export class RemoteSession {
     this.promptGeneration++;
     const pending: PendingPrompt = { promptId: randomUUID(), sessionId: this.ctx.sessionId, ...prompt };
     this.pending = pending;
-    const { keys: _keys, ...frame } = pending;
+    const { keys: _keys, inputOrigin: _origin, ...frame } = pending;
     this.host.send({ type: "prompt.request", ...frame });
   }
 
@@ -443,15 +456,16 @@ export class RemoteSession {
   }
 
   /** `prompt.answer` frame: inject the keystrokes for the pending prompt. */
-  private answerPrompt(answer: PromptAnswerFrame): boolean {
+  private answerPrompt(answer: PromptAnswerFrame): PromptAnswerResult {
     const pending = this.pending;
-    if (!pending || pending.promptId !== answer.promptId) return false;
-    if (!this.pty) return false;
+    if (!pending || pending.promptId !== answer.promptId) return "stale";
+    if (!this.pty) return "refused";
     const option = pending.options?.find((o) => o.id === answer.value || o.label.toLowerCase() === answer.value.trim().toLowerCase());
     const claudePermission = this.ctx.harness === "claude" && pending.kind === "permission";
+    if (this.ctx.harness === "claude" && (this.stopHooksUncorrelated || pending.inputOrigin !== (this.current ?? this.nativeInputOrigin))) return "changed";
     // Permission menu lengths vary. Only the advertised one-time allow and
     // Escape cancellation are known; never type an arbitrary numeric choice.
-    if (claudePermission && !option) return false;
+    if (claudePermission && !option) return "refused";
     const keys = option ? (pending.keys?.[option.id] ?? option.id) : answer.value;
     if (claudePermission && keys === "\u001b") {
       if (this.current) this.onInterrupt(this.current.turnId);
@@ -461,7 +475,7 @@ export class RemoteSession {
     this.clearPending();
     // Claude permission digits confirm themselves and Escape cancels the
     // turn. A delayed Enter could approve a successor before its hook arrives.
-    if (claudePermission) return true;
+    if (claudePermission) return "answered";
     // General questions/text retain their scoped confirmation.
     const generation = this.promptGeneration;
     const operation = this.current;
@@ -471,7 +485,7 @@ export class RemoteSession {
       if (!this.stopped && this.pty === answeredPty && !answeredPty.inputBlockReason?.() &&
           this.promptGeneration === generation && !this.pending && this.current === operation && this.nativeEpoch === nativeEpoch) answeredPty.write("\r");
     }, 150).unref?.();
-    return true;
+    return "answered";
   }
 
   /** `turn.deliver {kind: "answer"}`: same as a `prompt.answer`, reported as an instant turn. */
@@ -479,7 +493,8 @@ export class RemoteSession {
     if (!frame.answer) return this.finish(frame.turnId, { error: "answer turn without an answer" });
     if (!this.pty) return this.finish(frame.turnId, { exitCode: 0, unsupported: "headless sessions cannot answer harness prompts" });
     if (!this.pending) return this.finish(frame.turnId, { error: "no prompt is pending" });
-    if (!this.answerPrompt({ type: "prompt.answer", ...frame.answer })) return this.finish(frame.turnId, { error: `prompt ${frame.answer.promptId} is not pending` });
+    const result = this.answerPrompt({ type: "prompt.answer", ...frame.answer });
+    if (result !== "answered") return this.finish(frame.turnId, { error: result === "refused" ? "Choose one of the offered permission options." : result === "changed" ? "The prompt changed on the device. Review it in the terminal before answering." : `prompt ${frame.answer.promptId} is not pending` });
     this.finish(frame.turnId, { exitCode: 0 });
   }
 

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { captureClaudeToolResultAnchor, readClaudeToolResults, type ClaudeToolResultAnchor } from "./claude-tool-results.js";
 
 interface ToolOperation {
+  origin?: object;
   key: string;
   session: string;
   signature: string;
@@ -9,6 +10,7 @@ interface ToolOperation {
   anchor: Promise<ClaudeToolResultAnchor | undefined>;
 }
 export interface ClaudePermissionToken {
+  origin?: object;
   session: string;
   signature: string;
   operation?: ToolOperation;
@@ -55,19 +57,20 @@ export class ClaudePermissionTracker {
     this.operations.clear();
   }
 
-  preTool(payload: Record<string, unknown>): void {
+  preTool(payload: Record<string, unknown>, origin?: object): void {
     const meta = metadata(payload);
     const id = payload.tool_use_id;
     if (!meta || typeof id !== "string" || !id || id.length > 256 || typeof payload.transcript_path !== "string") return;
     const key = `${meta.session}:${id}`;
     if (this.operations.has(key)) return;
-    const operation = { ...meta, key, toolUseId: id, anchor: captureClaudeToolResultAnchor(payload.transcript_path, meta.session) };
+    const operation = { ...meta, key, toolUseId: id, origin, anchor: captureClaudeToolResultAnchor(payload.transcript_path, meta.session) };
     this.operations.set(key, operation);
     while (this.operations.size > 128) this.operations.delete(this.operations.keys().next().value as string);
     const active = this.active;
     if (active && !active.resolved && active.session === meta.session && active.signature === meta.signature) {
       if (active.operation && active.operation !== operation) active.ambiguous = true;
       else if (!active.ambiguous) active.operation = operation;
+      active.origin = this.commonOrigin([...this.operations.values()].filter(op => op.session === meta.session && op.signature === meta.signature));
     }
   }
 
@@ -77,7 +80,7 @@ export class ClaudePermissionTracker {
     const matches = [...this.operations.values()].filter(op => op.session === meta.session && op.signature === meta.signature);
     if (this.active && !this.active.resolved && this.active.operation === matches[0] && matches.length === 1) return;
     const alreadyPending = this.pending;
-    this.active = { ...meta, operation: matches.length === 1 ? matches[0] : undefined, ambiguous: alreadyPending || matches.length > 1, resolved: false };
+    this.active = { ...meta, origin: this.commonOrigin(matches), operation: matches.length === 1 ? matches[0] : undefined, ambiguous: alreadyPending || matches.length > 1, resolved: false };
     this.poll(this.active, this.epoch);
   }
 
@@ -86,7 +89,7 @@ export class ClaudePermissionTracker {
     if (!meta || typeof payload.tool_use_id !== "string") return;
     const operation = this.operations.get(`${meta.session}:${payload.tool_use_id}`);
     if (!operation) return;
-    this.active = { ...meta, operation, ambiguous: this.pending, resolved: false };
+    this.active = { ...meta, origin: operation.origin, operation, ambiguous: this.pending, resolved: false };
     this.poll(this.active, this.epoch);
     return this.active;
   }
@@ -94,6 +97,11 @@ export class ClaudePermissionTracker {
   notification(payload: Record<string, unknown>): ClaudePermissionToken | undefined {
     if (typeof payload.agent_id === "string" && payload.agent_id && payload.agent_id !== payload.session_id) return;
     return this.active?.session === payload.session_id ? this.active : undefined;
+  }
+
+  private commonOrigin(operations: ToolOperation[]): object | undefined {
+    const origin = operations[0]?.origin;
+    return origin && operations.every(operation => operation.origin === origin) ? origin : undefined;
   }
 
   toolFinished(payload: Record<string, unknown>): void {

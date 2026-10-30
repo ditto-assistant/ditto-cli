@@ -26,9 +26,23 @@ async function world(t, { harness = "claude", mode = "tui", inject } = {}) {
   t.after(async () => { session.stop(); await stub.close(); if (prior === undefined) delete process.env.DITTO_CONFIG_DIR; else process.env.DITTO_CONFIG_DIR = prior; await rm(cwd, { recursive: true, force: true }); });
   await session.start();
   const send = (turnId, extra = {}) => stub.send({ type: "turn.deliver", sessionId: "owned-session", turnId, text: turnId, ...extra });
+  let toolSequence = 0;
+  const permissionPayload = () => ({ session_id: "11111111-1111-4111-8111-111111111111", tool_use_id: `synthetic-${++toolSequence}`, tool_name: "Bash", tool_input: { command: "printf owned-permission" }, transcript_path: path.join(cwd, "11111111-1111-4111-8111-111111111111.jsonl") });
+  const permission = (message = "Synthetic permission") => {
+    const payload = permissionPayload();
+    events.emit("hook", { source: "claude", event: "PreToolUse", payload });
+    events.emit("hook", { source: "claude", event: "PermissionRequest", payload });
+    events.emit("hook", { source: "claude", event: "Notification", payload: { session_id: payload.session_id, notification_type: "permission_prompt", message } });
+    return payload;
+  };
+  const question = (options = [{ label: "Next" }]) => {
+    const payload = { ...permissionPayload(), tool_name: "AskUserQuestion", tool_input: { questions: [{ question: "Synthetic question", options }] } };
+    events.emit("hook", { source: "claude", event: "PreToolUse", payload });
+    return payload;
+  };
   const started = (id) => stub.waitFor((f) => f.type === "turn.started" && f.turnId === id);
   const finished = (id) => stub.waitFor((f) => f.type === "turn.finished" && f.turnId === id);
-  return { stub, events, calls, writes, session, send, started, finished, interrupts: () => interrupts, quiet: () => { quiet = Infinity; }, busy: () => { quiet = 0; } };
+  return { stub, events, calls, writes, session, send, started, finished, permission, permissionPayload, question, interrupts: () => interrupts, quiet: () => { quiet = Infinity; }, busy: () => { quiet = 0; } };
 }
 
 test("Claude normal FIFO survives immediate steering and stale Stop cannot finish its replacement", async (t) => {
@@ -112,7 +126,7 @@ test("unsupported mode, non-prompt steering and pending permission never inject"
   w.send("unknown", { deliveryMode: "invented" });
   w.send("command", { deliveryMode: "steer", kind: "command", command: { name: "compact" } });
   for (const id of ["unknown", "command"]) assert.ok((await w.finished(id)).unsupported);
-  w.events.emit("hook", { source: "claude", event: "Notification", payload: { notification_type: "permission_prompt" } });
+  w.permission();
   w.send("permission", { deliveryMode: "steer" });
   assert.ok((await w.finished("permission")).unsupported);
   assert.equal(w.calls.length, 0);
@@ -372,7 +386,7 @@ test("controller refuses queued paste after an aborted owned paste preserves for
   await until(() => chunks.join("").includes("READY"), "owned PTY ready");
   w.send("cancel-owned", { deliveryMode: "steer" });
   await until(() => hex().includes(Buffer.from("cancel-owned").toString("hex")), "first owned paste reached actual PTY");
-  w.events.emit("hook", { source: "claude", event: "Notification", payload: { notification_type: "permission_prompt", message: "Synthetic permission" } });
+  w.permission();
   const pending = await w.stub.waitFor(f => f.type === "prompt.request");
   const beforeAnswer = hex();
   const answerFrom = w.stub.frames.length;
@@ -404,7 +418,7 @@ test("controller refuses queued paste after an aborted owned paste preserves for
   w.send("steer-while-blocked", { deliveryMode: "steer" });
   assert.match((await w.finished("steer-while-blocked")).error, /terminal.*draft/i);
   assert.equal(hex().includes(Buffer.from("steer-while-blocked").toString("hex")), false);
-  w.events.emit("hook", { source: "claude", event: "Notification", payload: { notification_type: "permission_prompt", message: "Synthetic successor" } });
+  w.permission("Synthetic successor");
   const successor = await w.stub.waitFor(f => f.type === "prompt.request" && f.promptId !== pending.promptId);
   const staleFrom = w.stub.frames.length; const beforeStale = hex();
   w.stub.send({ type: "prompt.answer", sessionId: "owned-session", promptId: pending.promptId, value: "1" });
@@ -419,7 +433,7 @@ test("controller refuses queued paste after an aborted owned paste preserves for
 test("a question confirmation is scoped to its original prompt and operation", { timeout: 4000 }, async t => {
   const w = await world(t); const seen = new Set();
   const prompt = async () => {
-    w.events.emit("hook", { source: "claude", event: "PreToolUse", payload: { tool_name: "AskUserQuestion", tool_input: { questions: [{ question: "Synthetic question", options: [{ label: "Next" }] }] } } });
+    w.question();
     const next = await w.stub.waitFor(f => f.type === "prompt.request" && !seen.has(f.promptId)); seen.add(next.promptId); return next;
   };
   const answer = async p => { w.stub.send({ type: "prompt.answer", sessionId: "owned-session", promptId: p.promptId, value: "1" }); await w.stub.waitFor(f => f.resolvedPromptId === p.promptId); };
@@ -450,9 +464,10 @@ for (const menu of ["1. Yes\n2. No", "1. Yes\n2. Always allow\n3. No"]) {
     await until(() => chunks.join("").includes("READY"), "actual PTY ready");
     const seen = new Set();
     const permission = async () => {
-      w.events.emit("hook", { source: "claude", event: "Notification", payload: { notification_type: "permission_prompt", message: "Synthetic permission" } });
+      w.permission();
       const prompt = await w.stub.waitFor(f => f.type === "prompt.request" && !seen.has(f.promptId)); seen.add(prompt.promptId);
       assert.deepEqual(prompt.options, [{ id: "1", label: "Yes once" }, { id: "cancel", label: "Cancel" }]);
+      assert.equal("inputOrigin" in prompt, false, "opaque origin stays local");
       return prompt;
     };
     const answer = async (prompt, value) => {
@@ -475,7 +490,7 @@ for (const menu of ["1. Yes\n2. No", "1. Yes\n2. Always allow\n3. No"]) {
     await sleep(250);
     assert.equal(hex(), "1b31", "Yes once is self-confirming; duplicates and delayed Enter add no input");
     const questionFrom = w.stub.frames.length;
-    w.events.emit("hook", { source: "claude", event: "PreToolUse", payload: { tool_name: "AskUserQuestion", tool_input: { questions: [{ question: "Synthetic question", options: [{ label: "Next" }] }] } } });
+    w.question();
     const question = await w.stub.waitFor(f => f.type === "prompt.request", { from: questionFrom });
     await answer(question, "1"); await sleep(250);
     assert.equal(hex(), "1b31310d", "ordinary question confirmation remains available");
@@ -485,7 +500,7 @@ for (const menu of ["1. Yes\n2. No", "1. Yes\n2. Always allow\n3. No"]) {
 test("permission Cancel marks the active turn interrupted and preserves independent Stop", { timeout: 5000 }, async t => {
   const w = await world(t);
   w.send("active"); await w.started("active");
-  w.events.emit("hook", { source: "claude", event: "Notification", payload: { notification_type: "permission_prompt", message: "Synthetic permission" } });
+  w.permission();
   const prompt = await w.stub.waitFor(f => f.type === "prompt.request");
   w.send("retained"); await w.stub.waitFor(f => f.type === "turn.ack" && f.turnId === "retained");
   w.stub.send({ type: "prompt.answer", promptId: prompt.promptId, value: "cancel" });
@@ -496,4 +511,88 @@ test("permission Cancel marks the active turn interrupted and preserves independ
   w.stub.send({ type: "turn.interrupt", turnId: "retained" });
   await sleep(30); assert.equal(w.interrupts(), 2, "independent Stop still targets the successor");
   w.quiet(); assert.equal((await w.finished("retained")).interrupted, true);
+});
+
+test("unbound and old-operation permission notifications cannot expose a successor dialog", { timeout: 5000 }, async t => {
+  const w = await world(t);
+  w.events.emit("hook", { source: "claude", event: "Notification", payload: { session_id: "11111111-1111-4111-8111-111111111111", notification_type: "permission_prompt" } });
+  w.stub.send({ type: "ping" }); await w.stub.waitFor(f => f.type === "pong");
+  assert.equal(w.stub.frames.some(f => f.type === "prompt.request"), false, "a notification alone proves no live operation");
+  w.send("old"); await w.started("old");
+  const oldTool = w.permissionPayload();
+  w.events.emit("hook", { source: "claude", event: "PreToolUse", payload: oldTool });
+  w.send("successor", { deliveryMode: "steer" }); await w.started("successor");
+  w.events.emit("hook", { source: "claude", event: "PermissionRequest", payload: oldTool });
+  const notification = { session_id: oldTool.session_id, notification_type: "permission_prompt" };
+  w.events.emit("hook", { source: "claude", event: "Notification", payload: notification });
+  w.events.emit("hook", { source: "claude", event: "UserPromptSubmit", payload: {} });
+  w.events.emit("hook", { source: "claude", event: "Notification", payload: notification });
+  w.question(); w.question([]);
+  const from = w.stub.frames.length;
+  w.stub.send({ type: "prompt.answer", promptId: "old-unbound", value: "cancel" });
+  w.stub.send({ type: "ping" }); await w.stub.waitFor(f => f.type === "pong", { from });
+  assert.equal(w.stub.frames.some(f => f.type === "prompt.request"), false, "late and post-steer terminal dialogs stay device-only");
+  assert.deepEqual(w.writes, []); assert.equal(w.interrupts(), 0);
+  w.stub.send({ type: "turn.interrupt", turnId: "successor" });
+  await sleep(30); assert.equal(w.interrupts(), 1, "dialog refusal never disables independent Stop");
+});
+
+test("a captured permission operation cannot publish after a failed steer restores its predecessor", { timeout: 5000 }, async t => {
+  let fail;
+  const w = await world(t, { inject: (_text, mode) => mode === "steer" ? new Promise((_resolve, reject) => { fail = reject; }) : undefined });
+  w.send("old"); await w.started("old"); w.send("failed", { deliveryMode: "steer" });
+  const deadline = Date.now() + 1000;
+  while (!fail && Date.now() < deadline) await sleep(5);
+  assert.ok(fail);
+  const tool = w.permissionPayload();
+  w.events.emit("hook", { source: "claude", event: "PreToolUse", payload: tool });
+  fail(new Error("synthetic pre-submit failure")); await w.finished("failed");
+  w.events.emit("hook", { source: "claude", event: "PermissionRequest", payload: tool });
+  w.events.emit("hook", { source: "claude", event: "Notification", payload: { session_id: tool.session_id, notification_type: "permission_prompt" } });
+  const from = w.stub.frames.length; w.stub.send({ type: "ping" }); await w.stub.waitFor(f => f.type === "pong", { from });
+  assert.equal(w.stub.frames.some(f => f.type === "prompt.request"), false, "token receipt cannot reassign its captured operation origin");
+  assert.deepEqual(w.writes, []); assert.equal(w.interrupts(), 0);
+});
+
+for (const kind of ["permission", "choice", "question"]) {
+  test(`${kind} answer snapshots cannot cross a failed-steer operation`, { timeout: 5000 }, async t => {
+    let fail;
+    const w = await world(t, { inject: (_text, mode) => mode === "steer" ? new Promise((_resolve, reject) => { fail = reject; }) : undefined });
+    w.send("old"); await w.started("old");
+    w.send("failed-steer", { deliveryMode: "steer" });
+    const deadline = Date.now() + 1000;
+    while (!fail && Date.now() < deadline) await sleep(5);
+    assert.ok(fail, "steering paste reached controlled operation");
+    if (kind === "permission") w.permission(); else w.question(kind === "question" ? [] : undefined);
+    const prompt = await w.stub.waitFor(f => f.type === "prompt.request");
+    fail(new Error("synthetic pre-submit failure"));
+    assert.match((await w.finished("failed-steer")).error, /synthetic/);
+    w.send("answer-rebound", { kind: "answer", answer: { promptId: prompt.promptId, value: kind === "question" ? "synthetic text" : "1" } });
+    assert.match((await w.finished("answer-rebound")).error, /changed on the device/i);
+    assert.deepEqual(w.writes, []); assert.equal(w.interrupts(), 0);
+  });
+
+  test(`${kind} actions are refused after successful steering even with a matching origin`, { timeout: 5000 }, async t => {
+    let submit;
+    const w = await world(t, { inject: (_text, mode) => mode === "steer" ? new Promise(resolve => { submit = resolve; }) : undefined });
+    w.send("steer", { deliveryMode: "steer" });
+    const deadline = Date.now() + 1000;
+    while (!submit && Date.now() < deadline) await sleep(5);
+    assert.ok(submit);
+    if (kind === "permission") w.permission(); else w.question(kind === "question" ? [] : undefined);
+    const prompt = await w.stub.waitFor(f => f.type === "prompt.request");
+    submit(); await w.started("steer");
+    w.send("answer-post-steer", { kind: "answer", answer: { promptId: prompt.promptId, value: kind === "question" ? "synthetic text" : "1" } });
+    assert.match((await w.finished("answer-post-steer")).error, /changed on the device/i);
+    assert.deepEqual(w.writes, []); assert.equal(w.interrupts(), 0);
+  });
+}
+
+test("an unadvertised permission choice has an accurate error and leaves the prompt live", async t => {
+  const w = await world(t); w.permission();
+  const prompt = await w.stub.waitFor(f => f.type === "prompt.request");
+  w.send("refused-choice", { kind: "answer", answer: { promptId: prompt.promptId, value: "3" } });
+  assert.match((await w.finished("refused-choice")).error, /offered permission options/i);
+  assert.equal(w.session.pending.promptId, prompt.promptId);
+  assert.deepEqual(w.writes, []); assert.equal(w.interrupts(), 0);
 });

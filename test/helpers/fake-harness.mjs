@@ -66,7 +66,7 @@ function runClaudeHook(hooks, event, payload) {
           const child = spawn("sh", ["-c", command], { stdio: ["pipe", "ignore", "ignore"] });
           child.on("exit", resolve);
           child.on("error", resolve);
-          child.stdin.end(JSON.stringify({ hook_event_name: event, session_id: "fake", ...payload }));
+          child.stdin.end(JSON.stringify({ hook_event_name: event, session_id: "11111111-1111-4111-8111-111111111111", ...payload }));
         }),
     ),
   );
@@ -138,6 +138,9 @@ async function tui() {
       const answered = new Promise((resolve) => {
         turn.waitingKey = resolve;
       });
+      const permission = { tool_use_id: "fake-permission-" + Date.now(), tool_name: "Bash", tool_input: { command: "npm test" }, transcript_path: process.cwd() + "/11111111-1111-4111-8111-111111111111.jsonl" };
+      await runClaudeHook(hooks, "PreToolUse", permission);
+      await runClaudeHook(hooks, "PermissionRequest", permission);
       await runClaudeHook(hooks, "Notification", { notification_type: "permission_prompt", message: "Claude needs your permission to use Bash", title: "Permission" });
       await answered;
     }

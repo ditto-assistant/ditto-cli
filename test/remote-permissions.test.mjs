@@ -78,9 +78,16 @@ async function world(t) {
     await Promise.all([...session.claudePermissions.operations.values()].map(operation => operation.anchor));
   };
   const permission = async id => { await pre(id); hook("PermissionRequest", payload(id)); hook("Notification", { notification_type: "permission_prompt" }); return stub.waitFor(frame => frame.type === "prompt.request"); };
+  const localPermission = async id => {
+    const from = stub.frames.length;
+    await pre(id); hook("PermissionRequest", payload(id)); hook("Notification", { notification_type: "permission_prompt" });
+    stub.send({ type: "ping" }); await stub.waitFor(frame => frame.type === "pong", { from });
+    assert.equal(stub.frames.slice(from).some(frame => frame.type === "prompt.request"), false, "post-steer permission actions require the device");
+    const token = session.claudePermissions.active; assert.ok(token && !token.resolved); return token;
+  };
   const send = (id, deliveryMode) => stub.send({ type: "turn.deliver", sessionId: native, turnId: id, text: "synthetic input", ...(deliveryMode ? { deliveryMode } : {}) });
   const started = id => stub.waitFor(frame => frame.type === "turn.started" && frame.turnId === id);
-  return { ...f, session, stub, hook, pre, payload, permission, send, started, quiet: () => { quiet = Infinity; }, busy: () => { quiet = 0; }, interrupts: () => interrupts };
+  return { ...f, session, stub, hook, pre, payload, permission, localPermission, send, started, quiet: () => { quiet = Infinity; }, busy: () => { quiet = 0; }, interrupts: () => interrupts };
 }
 
 test("observed native 2.1.312 builtin lifecycle without UserPromptSubmit does not hold FIFO", { timeout: 3000 }, async t => {
@@ -92,31 +99,31 @@ test("observed native 2.1.312 builtin lifecycle without UserPromptSubmit does no
 
 test("correlated PostToolUse releases a terminal-answered permission after steering; stale Stop does not", { timeout: 6000 }, async t => {
   const w = await world(t); w.send("steer", "steer"); await w.started("steer"); w.hook("UserPromptSubmit");
-  const pending = await w.permission("allow-id"); w.send("queued"); w.quiet(); w.hook("Stop");
+  const pending = await w.localPermission("allow-id"); w.send("queued"); w.quiet(); w.hook("Stop");
   await sleep(350); assert.equal(w.stub.frames.some(f => f.type === "turn.started" && f.turnId === "queued"), false);
   w.hook("PostToolUse", w.payload("wrong-id")); await sleep(150);
-  assert.equal(w.stub.frames.some(f => f.resolvedPromptId === pending.promptId), false);
+  assert.equal(pending.resolved, false);
   w.hook("PostToolUse", { ...w.payload("allow-id"), agent_id: "subagent-other" }); await sleep(100);
-  assert.equal(w.stub.frames.some(f => f.resolvedPromptId === pending.promptId), false);
+  assert.equal(pending.resolved, false);
   w.hook("PostToolUse", { ...w.payload("allow-id"), tool_input: { description: "fixture", command: "synthetic" } }); await w.started("queued");
-  assert.ok(w.stub.frames.some(f => f.type === "session.status" && f.resolvedPromptId === pending.promptId));
+  assert.equal(pending.resolved, true);
   assert.equal(w.interrupts(), 0, "permission recovery never sends a physical key");
 });
 
 test("native No tool_result releases only the exact current input epoch", { timeout: 7000 }, async t => {
   const w = await world(t); w.send("steer", "steer"); await w.started("steer"); w.hook("UserPromptSubmit");
-  await w.pre("old-id"); w.hook("UserPromptSubmit"); const pending = await w.permission("deny-id");
+  await w.pre("old-id"); w.hook("UserPromptSubmit"); const pending = await w.localPermission("deny-id");
   w.send("queued"); w.quiet(); w.hook("Stop"); w.hook("PostToolUse", w.payload("old-id"));
   await appendFile(w.file, result("old-id", true)); await sleep(700);
-  assert.equal(w.stub.frames.some(f => f.resolvedPromptId === pending.promptId), false);
+  assert.equal(pending.resolved, false);
   assert.equal(w.stub.frames.some(f => f.type === "turn.started" && f.turnId === "queued"), false);
   await appendFile(w.file, result("deny-id", true)); await w.started("queued");
-  assert.ok(w.stub.frames.some(f => f.resolvedPromptId === pending.promptId));
+  assert.equal(pending.resolved, true);
 });
 
 test("PermissionRequest holds FIFO before notification and resolved IDs replay after reconnect", { timeout: 8000 }, async t => {
-  const w = await world(t); w.send("steer", "steer"); await w.started("steer"); w.hook("UserPromptSubmit");
-  await w.pre("early-id"); w.hook("PermissionRequest", w.payload("early-id")); w.send("queued"); w.quiet(); w.hook("Stop");
+  const w = await world(t); w.send("normal"); await w.started("normal"); w.hook("UserPromptSubmit");
+  await w.pre("early-id"); w.hook("PermissionRequest", w.payload("early-id")); w.send("queued"); w.quiet();
   await sleep(350); assert.equal(w.stub.frames.some(f => f.type === "turn.started" && f.turnId === "queued"), false, "a native dialog is live before its delayed notification");
   w.hook("Notification", { notification_type: "permission_prompt" });
   const pending = await w.stub.waitFor(f => f.type === "prompt.request");
@@ -137,18 +144,22 @@ test("local permission completion rearms quiet fallback without overtaking TTY a
   w.hook("PostToolUse", w.payload("later-tool")); await w.started("queued");
 });
 
-test("ambiguous parallel tool inputs fail closed until an explicit answer", { timeout: 6000 }, async t => {
+test("ambiguous post-steer permissions stay held without unsafe remote answers", { timeout: 6000 }, async t => {
   const w = await world(t); w.send("steer", "steer"); await w.started("steer"); w.hook("UserPromptSubmit");
   await w.pre("one"); await w.pre("two"); w.hook("PermissionRequest", w.payload("one")); w.hook("Notification", { notification_type: "permission_prompt" });
-  const pending = await w.stub.waitFor(f => f.type === "prompt.request"); w.send("queued"); w.quiet();
+  w.send("queued"); w.quiet();
   await appendFile(w.file, result("one") + result("two")); w.hook("PostToolUse", w.payload("one")); w.hook("Stop"); await sleep(700);
   assert.equal(w.stub.frames.some(f => f.type === "turn.started" && f.turnId === "queued"), false);
-  w.stub.send({ type: "prompt.answer", sessionId: native, promptId: pending.promptId, value: "1" }); await w.started("queued");
+  assert.equal(w.stub.frames.some(f => f.type === "prompt.request"), false);
+  w.stub.send({ type: "prompt.answer", sessionId: native, promptId: "unbound-old-prompt", value: "1" });
+  await sleep(200); assert.equal(w.session.claudePermissions.pending, true);
+  w.stub.send({ type: "turn.interrupt", turnId: "steer" });
+  await sleep(30); assert.equal(w.interrupts(), 1, "independent physical Stop remains available; ambiguity is not cleared by unscoped hooks");
 });
 
 
 test("incomplete AskUserQuestion cannot discard an existing answerable permission token", { timeout: 6000 }, async t => {
-  const w = await world(t); w.send("steer", "steer"); await w.started("steer"); w.hook("UserPromptSubmit");
+  const w = await world(t); w.send("normal"); await w.started("normal"); w.hook("UserPromptSubmit");
   // Ambiguous metadata requires the original explicit answer to release FIFO.
   await w.pre("one"); await w.pre("two");
   w.hook("PermissionRequest", w.payload("one"));
