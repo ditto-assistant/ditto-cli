@@ -27,11 +27,17 @@ export async function runChannelServer(options: { receiptTimeoutMs?: number; com
   const result = (text: string, isError = false) => ({ content: [{ type: "text" as const, text }], isError });
   const host = new HostClient({
     baseUrl: apiBaseURL(), apiKey: key,
-    capabilities: { harnesses: ["claude-code"], attachments: true, headless: false, teleport: false },
+    capabilities: { harnesses: ["claude-code"], attachments: true, headless: false, teleport: false,
+      promptDelivery: { queue: false, steer: false, interrupt: false, nativeScheduling: true } },
     log: (line) => process.stderr.write(`${line}\n`),
     handlers: {
       onTurn: (turn) => {
         if (turn.sessionId !== sessionId) return;
+        if (turn.deliveryMode !== undefined && turn.deliveryMode !== "queue") {
+          host.send({ type: "turn.ack", turnId: turn.turnId });
+          host.send({ type: "turn.finished", turnId: turn.turnId, unsupported: "MCP Channels cannot force Send now or interrupt Claude Code. Normal notifications are scheduled by Claude." });
+          return;
+        }
         if ((turn.kind ?? "prompt") !== "prompt" || pending.size >= 32) {
           host.send({ type: "turn.ack", turnId: turn.turnId });
           host.send((turn.kind ?? "prompt") !== "prompt"

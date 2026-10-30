@@ -971,6 +971,19 @@ How it works:
   dialog or `AskUserQuestion` is forwarded to the app with its options; the
   answer is typed back as the option's hotkey (or as text). Codex exposes no
   hook for its approval dialogs, so those still need the keyboard.
+- Claude Code terminal hosts advertise prompt delivery modes separately from
+  Stop. Normal busy sends remain in the CLI's FIFO; native keyboard activity
+  observed through Claude hooks also holds that FIFO until its Stop hook. Explicit `deliveryMode:
+  "steer"` bypasses that FIFO and submits the prompt with native Ctrl+Enter;
+  queued prompts remain queued. Escape still performs the independent Stop.
+  After the first successful steer, Claude Stop hooks remain uncorrelated for
+  the rest of that session. Remote receipts and later local keyboard activity
+  therefore use the existing quiet fallback (eight seconds by default), which
+  can delay completion receipts and queue draining. Physical cancellation and receipt timing are
+  separate. Headless and other harnesses reject steering. MCP Channels also
+  rejects forced steering and interruption; Claude schedules its notifications,
+  which does not establish a host FIFO or immediate-delivery guarantee.
+
 - **Headless mode** runs one `claude -p --resume <id> --output-format
   stream-json` / `codex exec resume --last` per turn, prints a compact progress
   line per event, and reports `turn.finished {exitCode}`. Ctrl+C finishes the
@@ -1314,3 +1327,11 @@ heyditto orgs set-role @teammate member --org your-team --expected-role viewer
 `allowance` reads your own allowance when the member is omitted. Current org managers can inspect another member by exact id, email or handle. It uses Ditto MCP, exposes no company balance or purchase history, and changes no budget. MCP refusals exit with an error.
 
 `set-role` resolves exactly one member, sends only the role, and reports the previous role. `--expected-role` is a client preflight, not an atomic compare-and-set. Owner/admin authorization and last-owner/last-manager protections are enforced by the backend. Reverting a role uses the same command with the reported previous role and current authorization. Directory listing is capped at 2000 rows and reports possible truncation. Role changes refuse a directory at that cap, since an exact name lookup cannot be guaranteed complete. These commands need a full account CLI key and a backend that admits the member routes; narrowed space/tool/thread keys are refused.
+
+
+Stop also covers a steering command that races its server enqueue. Unknown
+cancellation IDs are retained for 5 minutes (at most 256 entries) in the current
+CLI session and cancel only the matching later steer. They do not cancel normal
+queued prompts or interrupt unrelated current turns. Repeated exact Stop frames
+send one physical interrupt. This intent does not survive a fresh CLI process;
+steering is not automatically replayed offline.

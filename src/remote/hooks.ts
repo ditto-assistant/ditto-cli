@@ -95,8 +95,12 @@ export function claudeHookSettings(socketPath: string, script = hookScriptPath()
       Stop: [{ hooks: [{ type: "command", command: command("Stop"), timeout: 5 }] }],
       // Permission dialogs arrive as notification_type "permission_prompt".
       Notification: [{ hooks: [{ type: "command", command: command("Notification"), timeout: 5 }] }],
-      // AskUserQuestion carries its question and options in tool_input.
-      PreToolUse: [{ matcher: "AskUserQuestion", hooks: [{ type: "command", command: command("PreToolUse"), timeout: 5 }] }],
+      // Exact tool IDs fence terminal answers from stale predecessor events.
+      PreToolUse: [{ hooks: [{ type: "command", command: command("PreToolUse"), timeout: 5 }] }],
+      PermissionRequest: [{ hooks: [{ type: "command", command: command("PermissionRequest"), timeout: 5 }] }],
+      PostToolUse: [{ hooks: [{ type: "command", command: command("PostToolUse"), timeout: 5 }] }],
+      PostToolUseFailure: [{ hooks: [{ type: "command", command: command("PostToolUseFailure"), timeout: 5 }] }],
+      PermissionDenied: [{ hooks: [{ type: "command", command: command("PermissionDenied"), timeout: 5 }] }],
     },
   };
   return JSON.stringify(settings);

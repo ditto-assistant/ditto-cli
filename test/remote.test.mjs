@@ -117,7 +117,7 @@ test("attachments: names are confined to the turn folder and the prompt lists re
   assert.equal(safeAttachmentName(".env"), "env");
   assert.equal(safeAttachmentName("C:\\Users\\me\\report.pdf"), "report.pdf");
   const prompt = buildPrompt("look at this\r\n", [{ relPath: ".tmp/ditto/attachments/t1/a.png" }, { relPath: ".tmp/ditto/attachments/t1/b.txt" }]);
-  assert.equal(prompt, "look at this\n\nAttached files:\n- .tmp/ditto/attachments/t1/a.png\n- .tmp/ditto/attachments/t1/b.txt");
+  assert.equal(prompt, "look at this\r\n\n\nAttached files:\n- .tmp/ditto/attachments/t1/a.png\n- .tmp/ditto/attachments/t1/b.txt");
   assert.equal(buildPrompt("plain", []), "plain");
 });
 
@@ -198,7 +198,7 @@ test("tui: default launch announces, sends the catalog, and runs prompt / comman
     // The fake harness got the hook settings and is on screen.
     await waitUntil(() => run.output().includes("fake claude ready"), { what: "fake claude banner" });
     const launch = fakes.entries().find((e) => e.mode === "tui");
-    assert.deepEqual(launch.hooks.sort(), ["Notification", "PreToolUse", "Stop", "UserPromptSubmit"]);
+    assert.deepEqual(launch.hooks.sort(), ["Notification", "PermissionDenied", "PermissionRequest", "PostToolUse", "PostToolUseFailure", "PreToolUse", "Stop", "UserPromptSubmit"]);
 
     // 1. Prompt with an attachment.
     const bytes = Buffer.from("notes from the phone\n");
@@ -251,7 +251,7 @@ test("tui: default launch announces, sends the catalog, and runs prompt / comman
     // 4. Same, answered through a turn of kind "answer".
     stub.send({ type: "turn.deliver", turnId: "turn-4", sessionId: announce.sessionId, text: "again [ask]" });
     const request2 = await stub.waitFor((f) => f.type === "prompt.request" && f.promptId !== request.promptId);
-    stub.send({ type: "turn.deliver", turnId: "turn-5", sessionId: announce.sessionId, kind: "answer", text: "", answer: { promptId: request2.promptId, value: "Yes" } });
+    stub.send({ type: "turn.deliver", turnId: "turn-5", sessionId: announce.sessionId, kind: "answer", text: "", answer: { promptId: request2.promptId, value: "Yes once" } });
     const answered = await stub.waitFor((f) => f.type === "turn.finished" && f.turnId === "turn-5");
     assert.equal(answered.exitCode, 0);
     await stub.waitFor((f) => f.type === "turn.finished" && f.turnId === "turn-4");

@@ -53,3 +53,84 @@ Stop with queued input; failed uploads/downloads; and reconnect/redelivery.
 Use the portable backend `scripts/harness-probe` tools with synthetic fixtures.
 Preserve evidence separately for transport receipt, native receipt, and final
 response. Unit tests using a fake harness are not native behavior evidence.
+
+
+Terminal permission answers after steering are correlated by native session,
+input epoch, unique tool/input fingerprint and exact tool-use ID. A matching
+PostToolUse/Failure can resolve the dialog; native No in observed2.1.312 emits
+neither completion hook, but writes the exact user/tool_result with is_error.
+The CLI polls only that active main-session UUID file, anchored before the tool
+outcome by offset, file identity and a capture-boundary hash. Reads are limited
+to256KiB of complete appended rows. It never scans session inventories or returns
+raw tool content. Replaced/truncated files, wrong session/ID/role, sidechains,
+ambiguous matches and oversized missing rows fail closed. An explicit answer or
+new native prompt remains the recovery for unconfirmed metadata.
+
+A local completed permission with no remote turn can rearm the existing quiet
+fallback even before the first steer. Still-live dialogs, subsequent outstanding
+tools and terminal activity hold it. Quiet is a heuristic rather than an exact
+native model-busy guarantee. Uncorrelated Stop never resolves a live dialog;
+Escape remains independent and does not await the metadata reader to interrupt.
+The observed2.1.312 /model and/clear commands emit no UserPromptSubmit, so their
+builtin behavior does not justify a blanket local fallback change.
+
+Authoritative dialog resolution emits an optional resolvedPromptId on existing
+session.status, with current status rather than a fabricated idle event. The
+paired backend clears only that exact pending ID for the owner/current socket.
+The latest resolution is replayed after a same-process reconnect; stale IDs
+cannot clear a newer prompt. Older backends ignore this additive field and may
+retain stale permission UI until updated. Existing running Claude processes need
+a normal relaunch/resume to load the added native hooks.
+
+
+New Claude TUI hosts advertise `capabilities.promptDelivery.promptResolution`.
+Only the exact socket that receives a remote answer may declare that capability.
+The paired API then leaves the dialog pending until the host sends its matching
+`resolvedPromptId`; legacy sockets retain API-driven clearing. A sequential API
+retry with an already-recorded answer sends no second keypress. Concurrent API
+requests are not promised exactly once: the existing answer ledger is recorded
+after socket delivery. The host itself ignores an answer after its pending ID
+has cleared. Reconnect reads the new socket declaration, never the physical
+host's last capabilities. API success alone does not prove native acceptance.
+
+Attachment rendering preserves the supplied text, including leading/trailing
+spaces and CRLF, before appending the separate native file-reference block.
+Native editor normalization remains the native client's behavior.
+
+If local typing or a public PTY write intervenes in an unsubmitted paste, abort
+preserves that foreign input instead of sending undo. The owned PTY then latches
+input uncertainty: queued or immediate future prompt pastes fail visibly through
+the existing turn error receipt before a new active turn is created. They cannot
+silently append to the uncertain editor. Independent Escape Stop remains available,
+even without an active remote turn. No late unscoped hook clears this latch.
+Recovery currently requires reviewing the terminal draft and normally relaunching
+the session; a new owned PTY starts with fresh input state. DITTO-1649 tracks a
+less disruptive recovery based on authoritative input ownership. This rare
+relaunch-only path is conservative and never automatically clears device input.
+
+Claude permission menus vary between two and three options, and Notification
+hooks do not provide the actual menu. Remote permission controls therefore offer
+only **Yes once** (native self-confirming `1`) and **Cancel** (Escape). Cancel
+interrupts the active native turn; it is not represented as a precise Deny.
+Persistent allow is not offered without authoritative menu metadata. Unknown
+permission values are refused. Neither action appends a delayed Enter, which
+could otherwise approve a successor before its notification arrives. General
+questions/text retain their operation- and prompt-scoped confirmation. Independent
+Stop still uses the existing Escape path.
+
+Remote Claude terminal-dialog actions require an unresolved token captured from
+PreToolUse/PermissionRequest and the same opaque controller operation or local
+input origin at publication and answer time. A Notification alone is not proof
+of an answerable dialog. Origin markers stay in memory and are not sent on the
+wire. Receipt-time origins do not authenticate an arbitrarily delayed first
+PreToolUse from an older native input.
+
+After the first successful Send now, **all remote permission prompts and
+questions/choices require the device terminal until a fresh session**. The CLI
+does not expose new actionable dialogs or type an answer to an earlier one.
+Correlated device Allow/No/tool-result handling still holds and releases FIFO
+where metadata proves completion. Ambiguous metadata stays held; device review
+or relaunch can be required. Independent physical Stop remains available, but
+this does not invent completion from unscoped hooks or promise that every
+ambiguous queue drains. DITTO-1649 tracks stronger native input-origin proof and
+less disruptive recovery.
