@@ -319,6 +319,7 @@ heyditto search "launch notes" --include-public --filter-username peyton
 heyditto review local --preview
 heyditto review local --staged --profile quick --org omniaura
 heyditto review local --base main --context-file .tmp/task.md --output json
+heyditto review local --full-review --profile standard
 heyditto review local-status <run-id> --org omniaura
 heyditto review local-cancel <run-id> --org omniaura
 ```
@@ -335,14 +336,32 @@ reviews the index bytes, including when a file also has unstaged edits.
 `main`. It cannot be combined with `--staged`. No commit, push, PR or index
 mutation is required.
 
+Absent tracked files marked skip-worktree in a sparse checkout use their pinned
+index bytes; materialized files keep their working bytes. Ordinary unflagged
+deletions remain deletions. A collapsed sparse index is rejected before upload:
+run `git sparse-checkout reapply --no-sparse-index` manually before retrying.
+Capture never expands the index, materializes sparse files or fetches missing
+objects. Required unavailable blobs must be supplied manually before review.
+
 `--preview` is offline: it shows the selected paths, snapshot digest, file and
-byte counts, exclusions and omitted context without logging in or uploading.
-Running without `--preview` uploads the selected source changes and bounded
-surrounding tracked source to Ditto Review, which uses the existing independent
-review and verification engine. The immutable snapshot is limited to 16 MiB of
-decoded source and 4096 files per tree. Every eligible changed file must fit;
-nearby surrounding files fill the remaining budget. Binary files, symlinks and
-submodules are recorded as skipped rather than followed or executed.
+byte counts, capture time, exclusions and omitted context without logging in or
+uploading. When the server advertises anchored snapshots and a local origin
+anchor is available, the CLI uploads bounded independent anchor-to-baseline and
+anchor-to-selected-head overlays, deletion records and exact Git tree identities.
+This includes unpushed commits and preserves index versus working bytes. The
+cloud verifies an authorized anchor in the configured GitHub repository and both
+reconstructed trees before reviewing; full context and dependency indexing happen
+there. The CLI never fetches, checks out files, writes the index or uploads Git
+history, agent transcripts or a Teleport capsule. Preview shows planned cloud
+context, which still requires server verification.
+
+Unborn repositories, older servers, unavailable anchors or unsupported overlays
+use the original bounded snapshot, with an explicit fallback reason. Selected
+eligible changes must fit the 16 MiB decoded-source and 4096-files-per-tree
+limits; snapshot JSON is bounded to 24 MiB. In this fallback, nearby unchanged
+source fills the remaining budget. Binary files, symlinks and submodules are
+recorded as skipped rather than followed or executed. Unchanged opaque assets
+may remain in an authorized cloud anchor without being uploaded by the CLI.
 Git paths must be valid UTF-8. Unsupported path encodings abort capture before
 upload rather than changing path identity or silently omitting changes.
 
@@ -357,9 +376,30 @@ recover that same admission. The server reuses the original run for identical
 input and refuses changes to the source snapshot, profile or context under that
 ID, so this recovery does not start another paid attempt.
 
+The cloud reuses eligible completed review work by default. `--full-review`
+explicitly bypasses prior receipts and work selection. Receipts distinguish
+reused, newly reviewed, unfinished and retained historical work units, actual
+server models, current inference cost and historical cost. An exact completed
+cache hit can have zero current charge; historical cost is not charged again.
+For anchored workspace/index reviews, analysis can cover the accumulated changes
+in the selected files since the anchor; `--base` keeps the explicitly selected
+comparison. Affected historical dependency work and retained historical evidence
+are labeled separately and never count as current selected coverage. Escalation
+suggestions do not start or pay for another review.
+
+Server-derived account scope, repository, requester and available policy/engine
+identities appear in the receipt. Private task context restricts publication to
+the local receipt and prevents PR inheritance. Other inheritance remains subject
+to the server's current authorship, policy and dependency checks. This command
+does not publish findings or modify GitHub threads.
+
 Readable and JSON results identify the reviewed snapshot, findings, coverage,
-cost receipts and whether the current working tree still matches. Partial
-reviews return a nonzero exit code. Bounded surrounding context is stated
+cost receipts and whether the current working tree still matches. An admitted
+`review local` action exits zero only for a completed, complete receipt without
+unfinished work; stopped, skipped, superseded and partial admissions exit nonzero.
+A local no-changes skip succeeds before admission. `local-status` remains an
+inspection command and does not use the action's review-success exit contract.
+Bounded surrounding context is stated
 explicitly; "no findings in reviewed scope" is not an assertion that the
 checkout is bug-free. Results are unpublished local reviews and post nothing
 to GitHub. Organization learning-memory and complete hosted repository-policy
