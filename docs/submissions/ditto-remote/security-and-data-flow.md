@@ -110,3 +110,10 @@ Attachment retention/quotas and durable receipt/exactly-once recovery remain
 separate limitations (DITTO-1749 / DITTO-1649); no inherited runtime behavior is
 claimed repaired by packaging. Current two-account and revocation acceptance
 remain required before an external submission-security claim.
+
+Registration before MCP initialization can retain an offline chat if stdio
+startup fails. The API registration handler creates canonical chat metadata;
+it does not establish a host connection or online presence. The Channel server
+starts/announces the host only after MCP initialization. A safe metadata-only
+unregister endpoint is not implemented; automatic chat deletion is deliberately
+excluded. Existing service retention and explicit deletion controls apply.

@@ -31,7 +31,7 @@ export function npmInstallInvocation({ node = process.execPath, npmCLI = process
 /** A source revision and clean flag are evidence, so Git failures cannot be
  * interpreted as an empty revision or clean checkout.
  */
-export function readGitProvenance(root) {
+export function readGitProvenance(root, requiredAncestor) {
   const git = (...args) => {
     const result = spawnSync("git", args, { cwd: root, encoding: "utf8" });
     if (result.error || result.status !== 0) throw new Error(`Cannot establish plugin source provenance: git ${args[0]} failed. Build from a Git checkout with Git installed.`);
@@ -39,5 +39,10 @@ export function readGitProvenance(root) {
   };
   const sourceRevision = git("rev-parse", "--verify", "HEAD");
   if (!/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(sourceRevision)) throw new Error("Cannot establish plugin source provenance: Git returned an invalid commit ID.");
+  if (requiredAncestor !== undefined) {
+    if (!/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(requiredAncestor)) throw new Error("Invalid pinned release Git revision.");
+    const ancestry = spawnSync("git", ["merge-base", "--is-ancestor", requiredAncestor, sourceRevision], { cwd: root, encoding: "utf8" });
+    if (ancestry.error || ancestry.status !== 0) throw new Error("Plugin source must descend from the pinned release. Fetch that release history and build from its descendant checkout.");
+  }
   return { sourceRevision, dirty: git("status", "--porcelain") !== "" };
 }

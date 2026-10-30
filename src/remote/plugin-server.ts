@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { randomUUID } from "node:crypto";
+import { realpathSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { apiFetch, findEndpoint, listEndpoints } from "../api.js";
 import { resolveApiKey } from "../config.js";
 import { findProfileEndpoint, repoDefaultProfile } from "../dittoconfig/profiles.js";
@@ -32,7 +34,9 @@ export async function preparePluginSession(cwd = process.env.DITTO_REMOTE_CWD ??
   const endpoint = profile
     ? await findProfileEndpoint(profile, catalog.endpoints)
     : selected ? findEndpoint(catalog.endpoints, selected) : catalog.endpoints.length === 1 ? catalog.endpoints[0] : undefined;
-  if (!endpoint) throw new PluginSetupError("Select an existing endpoint with `heyditto endpoints use <slug>` or apply this repository's .ditto profile, then restart Ditto Remote.");
+  if (!endpoint) throw new PluginSetupError(explicit
+    ? "Check DITTO_REMOTE_ENDPOINT. Unset it or select an existing endpoint slug, then restart Ditto Remote."
+    : "Select an existing endpoint with `heyditto endpoints use <slug>` or apply this repository's .ditto profile, then restart Ditto Remote.");
   const sessionId = randomUUID();
   const registration = await apiFetch<{ threadId: string; kgID?: string; graphAlias?: string }>("/api/v5/sessions/register", { method: "POST", body: {
     sessionId, endpointId: endpoint.id, harness: "claude-code", inference: "native", transport: "channels",
@@ -56,7 +60,13 @@ export async function runPluginServer(): Promise<void> {
   await runChannelServer();
 }
 
-if (process.argv[1]?.endsWith("plugin-server.js")) {
+function isEntryPoint(): boolean {
+  try {
+    return !!process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch { return false; }
+}
+
+if (isEntryPoint()) {
   runPluginServer().catch((error: unknown) => {
     // Do not print request bodies, credentials or server cause text onto MCP stderr.
     process.stderr.write(`${pluginStartupMessage(error)}\n`);

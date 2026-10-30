@@ -9,9 +9,9 @@ import { pipeline } from "node:stream/promises";
 import { npmInstallInvocation, readGitProvenance, verifyRuntimeArchive } from "./remote-plugin-build-utils.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
-const provenance = readGitProvenance(root);
-if (provenance.dirty) throw new Error("Build the review plugin from a clean committed checkout.");
 const pin = JSON.parse(await readFile(path.join(root, "plugins/ditto-remote/runtime-release.json"), "utf8"));
+const provenance = readGitProvenance(root, pin.gitHead);
+if (provenance.dirty) throw new Error("Build the review plugin from a clean committed checkout.");
 const archive = process.argv[3];
 if (!archive) throw new Error("Supply the pinned npm runtime archive: npm run plugin:build -- <fresh-output> <cli-version.tgz>");
 // Verify BEFORE extracting, creating output, or invoking npm. The archive is an

@@ -85,7 +85,7 @@ test("builder verifies the canonical archive and retains its runtime while overl
     const template=path.join(root,"plugins","ditto-remote");
     await mkdir(path.join(template,".claude-plugin"),{recursive:true});
     await writeFile(path.join(template,".claude-plugin","plugin.json"),JSON.stringify({name:"ditto-remote",description:"fixture"}));
-    const pin={version:pkg.version,sha256:createHash("sha256").update(bytes).digest("hex"),integrity:`sha512-${createHash("sha512").update(bytes).digest("base64")}`,dependencyLockSHA256:createHash("sha256").update(lock).digest("hex")};
+    const pin={version:pkg.version,gitHead:"0".repeat(40),sha256:createHash("sha256").update(bytes).digest("hex"),integrity:`sha512-${createHash("sha512").update(bytes).digest("base64")}`,dependencyLockSHA256:createHash("sha256").update(lock).digest("hex")};
     await writeFile(path.join(template,"runtime-release.json"),JSON.stringify(pin));
     await mkdir(path.join(root,"dist","remote"),{recursive:true});
     for(const name of ["plugin-server","session-link"]) for(const suffix of ["js","js.map","d.ts"]) await writeFile(path.join(root,"dist","remote",`${name}.${suffix}`),`// pairing ${name}.${suffix}`);
@@ -96,7 +96,9 @@ test("builder verifies the canonical archive and retains its runtime while overl
     const target=path.join(root,".tmp","bundle");
     assert.match(execute(target).stderr,/Cannot establish plugin source provenance/);
     await assert.rejects(access(target));
-    git("init","--initial-branch=main");git("add",".");git("-c","user.name=Plugin QA","-c","user.email=qa@example.invalid","commit","-m","fixture");
+    git("init","--initial-branch=main");git("-c","user.name=Plugin QA","-c","user.email=qa@example.invalid","commit","--allow-empty","-m","release fixture");
+    pin.gitHead=git("rev-parse","HEAD");await writeFile(path.join(template,"runtime-release.json"),JSON.stringify(pin));
+    git("add",".");git("-c","user.name=Plugin QA","-c","user.email=qa@example.invalid","commit","-m","fixture");
     const success=execute(target);assert.equal(success.status,0,success.stderr);
     assert.equal(await readFile(path.join(target,"runtime","dist","channel-server.js"),"utf8"),"// canonical channel runtime");
     assert.equal(await readFile(path.join(target,"runtime","dist","remote","plugin-server.js"),"utf8"),"// pairing plugin-server.js");
@@ -105,5 +107,22 @@ test("builder verifies the canonical archive and retains its runtime while overl
     assert.notEqual(execute(target).status,0,"existing bundles cannot be replaced");
     await writeFile(archive,Buffer.from("tampered"));
     const badTarget=path.join(root,".tmp","bad-bundle");assert.match(execute(badTarget).stderr,/pinned canonical/);await assert.rejects(access(badTarget));
+  } finally {await rm(root,{recursive:true,force:true});}
+});
+
+
+test("overlay provenance accepts release descendants and refuses unrelated or unavailable history", async () => {
+  const root=await mkdtemp(path.join(os.tmpdir(),"ditto-plugin-ancestry-"));
+  const git=(...args)=>{
+    const r=spawnSync("git",args,{cwd:root,encoding:"utf8"});assert.equal(r.status,0,r.stderr);return r.stdout.trim();
+  };
+  const commit=message=>git("-c","user.name=Plugin QA","-c","user.email=qa@example.invalid","commit","--allow-empty","-m",message);
+  try {
+    git("init","--initial-branch=main");commit("release");const release=git("rev-parse","HEAD");commit("pairing");
+    assert.equal(readGitProvenance(root,release).dirty,false);
+    assert.throws(()=>readGitProvenance(root,"0".repeat(40)),/must descend/);
+    assert.throws(()=>readGitProvenance(root,"not-a-revision"),/Invalid pinned/);
+    git("checkout","--orphan","unrelated");commit("unrelated");
+    assert.throws(()=>readGitProvenance(root,release),/must descend/);
   } finally {await rm(root,{recursive:true,force:true});}
 });

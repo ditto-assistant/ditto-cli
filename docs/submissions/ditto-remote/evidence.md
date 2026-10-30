@@ -18,7 +18,7 @@ source merge `e5e41776b5f53806acc365bd3e12b5c85d88f596`.
 | Evidence | Current result / next gate |
 | --- | --- |
 | Canonical npm runtime | Registry SRI/SHA1/SHA256 verified; GitHub tag/registry gitHead matched; npm provenance statement retrieved and linked to the release workflow/source merge. This does not claim an independent Sigstore trust-root verification |
-| Packaging / pairing automated controls | Local `npm run verify`: 499 total, 496 passed, 0 failed, 3 existing opt-in skips; 11 focused packaging/pairing tests pass. Removing archive verification makes the integrity control fail. Controls cover no endpoint/key creation on missing selection, inactive opt-in, wrapper identity reuse, standalone registration, sanitized errors and canonical runtime preservation. Exact-head Depot checks must be recorded separately |
+| Packaging / pairing automated controls | Local `npm run verify`: 503 total, 500 passed, 0 failed, 3 existing opt-in skips; 15 focused packaging/pairing tests pass. Removing archive verification makes the integrity control fail. Controls cover no endpoint/key creation on missing selection, inactive opt-in, wrapper identity reuse, standalone registration, sanitized errors and canonical runtime preservation. Exact-head Depot checks must be recorded separately |
 | Manifest and local install | Record exact candidate validation and installed-file comparison in the owner-review receipt; installation alone does not prove channel delivery |
 | Current packaged native Max test | **Pending coordinator-visible retest of this new artifact**; historical 1756 proof does not transfer |
 | CLI terminal live proof | Separate tested Modes transport; does not prove Channels queue/steer/interrupt or plugin admission |
@@ -45,3 +45,10 @@ Neither archive is rebuilt, relabeled, or used as the new candidate's native pro
 Keep exact new archive hashes, private receipts and sanitized screenshots in
 the owner-review handoff. Do not commit credentials, customer prompts, private
 absolute paths or unsanitized screenshots.
+
+The follow-up controls distinguish invalid explicit-selector guidance, exact
+physical entry-point execution (including symlinks and macOS temp aliases),
+release ancestry, and offline registration from initialized host admission.
+Unavailable stored endpoint selection intentionally remains fail-closed.
+Historical b82d3e5 archive/install evidence predates this narrow follow-up and
+must not be relabeled as the final rebuilt candidate.

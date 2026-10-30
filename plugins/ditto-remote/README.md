@@ -72,8 +72,22 @@ DITTO_REMOTE_CHANNELS_ENABLED=1 claude --dangerously-load-development-channels p
 Review the local source/trust prompt. Do not add a global permanent marketplace
 merely to test a candidate. The local install writes Claude settings for the
 review project; use the plugin manager to disable/remove it afterwards.
-Alternatively, `--plugin-dir` loads the built root for a single process, using
-the identity Claude reports for that mode.
+For a single process, Claude Code 2.1.312 identifies an explicit directory as
+`ditto-remote@inline`, without registering a user marketplace:
+
+```sh
+DITTO_REMOTE_CHANNELS_ENABLED=1 claude --plugin-dir /absolute/path/to/built-plugin --dangerously-load-development-channels plugin:ditto-remote@inline
+```
+
+Do not add `--strict-mcp-config` to this plugin launch: that flag suppresses
+plugin MCP servers, even with `--plugin-dir`. A disposable review launch can
+instead omit user/project/local settings using `--setting-sources ''` and an
+owned `--settings` file with `disableAllHooks: true`,
+`disableClaudeAiConnectors: true`, and `enabledPlugins: {}`. Explicit inline
+plugins still load; managed policy still applies. Inspect the loaded MCP list
+before sending a prompt. Keep native account authentication unchanged.
+Do not use `--bare` (it does not read OAuth/keychain) or `--safe-mode` (it disables
+plugin customizations) for this native-subscription test.
 Do not use `-p` or the SDK for this test: development Channels are interactive.
 An ordinary community marketplace does not put the plugin on Anthropic's default
 channel allowlist. The approval packet documents the two proposed routes:
@@ -127,3 +141,16 @@ No mark was redrawn.
 The listing owner should approve this icon before the first directory save,
 since the current validator warns the initial listing icon is not replaced by
 later plugin updates.
+
+## Unavailable selection and startup retention
+
+An explicit unavailable `DITTO_REMOTE_ENDPOINT` must be corrected or unset.
+An unavailable saved default also fails closed: the plugin does not silently
+place activity under a different endpoint just because one other endpoint is
+available. Select the intended endpoint and restart the MCP process.
+
+Registration materializes an offline chat before MCP initialization. If stdio
+startup fails, that offline chat may remain in Ditto under its normal retention
+policy; registration alone does not connect or announce a controllable host.
+There is no metadata-only unregister API used by this plugin. It does not delete
+a chat automatically on startup failure or uninstall.
