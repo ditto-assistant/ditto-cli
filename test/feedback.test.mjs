@@ -64,6 +64,10 @@ test("feedback forwards an explicit trace choice and fails on tool errors", asyn
     assert.match(result.stderr, /disabled/);
     result = await run(["feedback", "text", "--file", reportFile, "--title", "t"], base, dir);
     assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /not both/);
+    result = await run(["feedback", "test", "--title", "  "], base, dir);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /title cannot be empty/);
     assert.equal(calls.length, 3);
   } finally {
     server.closeAllConnections();

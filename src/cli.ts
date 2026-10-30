@@ -1274,13 +1274,17 @@ your own workspace or an app workspace.`,
         title: string; file?: string; tool?: string; error?: string; expected?: string;
         includeRecentTraces?: boolean; output?: string;
       }) => {
-        if ((report === undefined) === (options.file === undefined)) {
+        if (report !== undefined && options.file !== undefined) {
+          throw new Error("feedback: use report text or --file, not both");
+        }
+        if (report === undefined && options.file === undefined) {
           throw new Error("feedback: provide report text or --file");
         }
+        if (!options.title.trim()) throw new Error("feedback: title cannot be empty");
         const text = options.file ? await readFile(options.file, "utf8") : report!;
         if (!text.trim()) throw new Error("feedback: report text cannot be empty");
         await callAndPrint("submit_feedback", {
-          title: options.title, report: text,
+          title: options.title.trim(), report: text,
           ...(options.tool ? { tool_name: options.tool } : {}),
           ...(options.error ? { error: options.error } : {}),
           ...(options.expected ? { expected: options.expected } : {}),
