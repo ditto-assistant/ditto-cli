@@ -276,6 +276,20 @@ heyditto search --help
 heyditto graphs add --help
 ```
 
+### `feedback`
+
+Submit a bug report or feature request to the Ditto team. Use a concise report
+without memories, private user content, credentials, or raw tool responses.
+
+```sh
+heyditto feedback "The search tool timed out twice" --title "Search timeouts" --tool search_memories
+heyditto feedback --file ./report.txt --title "Missing capability" --include-recent-traces
+```
+
+Recent request diagnostics are omitted by default. The flag opts in for the
+current session; start one with `heyditto session new` to group CLI calls.
+The command submits immediately and reports any server-side refusal.
+
 ### `save`
 
 Save a document or note to the user's memory base.
