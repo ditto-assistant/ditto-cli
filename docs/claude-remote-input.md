@@ -107,3 +107,13 @@ Recovery currently requires reviewing the terminal draft and normally relaunchin
 the session; a new owned PTY starts with fresh input state. DITTO-1649 tracks a
 less disruptive recovery based on authoritative input ownership. This rare
 relaunch-only path is conservative and never automatically clears device input.
+
+Claude permission menus vary between two and three options, and Notification
+hooks do not provide the actual menu. Remote permission controls therefore offer
+only **Yes once** (native self-confirming `1`) and **Cancel** (Escape). Cancel
+interrupts the active native turn; it is not represented as a precise Deny.
+Persistent allow is not offered without authoritative menu metadata. Unknown
+permission values are refused. Neither action appends a delayed Enter, which
+could otherwise approve a successor before its notification arrives. General
+questions/text retain their operation- and prompt-scoped confirmation. Independent
+Stop still uses the existing Escape path.

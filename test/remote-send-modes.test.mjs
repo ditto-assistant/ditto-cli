@@ -416,10 +416,10 @@ test("controller refuses queued paste after an aborted owned paste preserves for
 });
 
 
-test("a permission confirmation is scoped to its original prompt and operation", { timeout: 4000 }, async t => {
+test("a question confirmation is scoped to its original prompt and operation", { timeout: 4000 }, async t => {
   const w = await world(t); const seen = new Set();
   const prompt = async () => {
-    w.events.emit("hook", { source: "claude", event: "Notification", payload: { notification_type: "permission_prompt", message: "Synthetic permission" } });
+    w.events.emit("hook", { source: "claude", event: "PreToolUse", payload: { tool_name: "AskUserQuestion", tool_input: { questions: [{ question: "Synthetic question", options: [{ label: "Next" }] }] } } });
     const next = await w.stub.waitFor(f => f.type === "prompt.request" && !seen.has(f.promptId)); seen.add(next.promptId); return next;
   };
   const answer = async p => { w.stub.send({ type: "prompt.answer", sessionId: "owned-session", promptId: p.promptId, value: "1" }); await w.stub.waitFor(f => f.resolvedPromptId === p.promptId); };
@@ -432,4 +432,68 @@ test("a permission confirmation is scoped to its original prompt and operation",
   await sleep(220); assert.deepEqual(w.writes, ["1", "1", "\r", "1", "1", "\r"], "a rapidly answered successor must not inherit the older confirmation timer");
   await answer(await prompt()); w.send("new-operation"); await w.started("new-operation");
   await sleep(220); assert.deepEqual(w.writes, ["1", "1", "\r", "1", "1", "\r", "1"], "old confirmation cannot submit into a new operation");
+});
+
+for (const menu of ["1. Yes\n2. No", "1. Yes\n2. Always allow\n3. No"]) {
+  test(`Claude permissions use stable keys without delayed Enter (${menu.split("\n").length} options)`, { timeout: 8000 }, async t => {
+    const w = await world(t);
+    const cwd = await mkdtemp(path.join(os.tmpdir(), "ditto-permission-keys-"));
+    const chunks = [];
+    // Observed menu variants are synthetic fixtures. The production hook does
+    // not provide that menu, so its unknown middle choices cannot be exposed.
+    const echo = `process.stdin.setRawMode(true);process.stdin.resume();process.stdout.write(${JSON.stringify(menu + "\nREADY\n")});process.stdin.on("data",b=>process.stdout.write("HEX:"+b.toString("hex")+"\\n"));`;
+    const pty = await spawnInPty(process.execPath, ["--input-type=module", "-e", echo], { cwd, env: process.env, harness: "claude", attachTerminal: false, onOutput: data => chunks.push(data) });
+    t.after(async () => { pty.kill(); await pty.exit; await rm(cwd, { recursive: true, force: true }); });
+    w.session.attachTui(pty);
+    const until = async (ready, label) => { const deadline = Date.now() + 1500; while (!ready() && Date.now() < deadline) await sleep(5); assert.ok(ready(), label); };
+    const hex = () => [...chunks.join("").matchAll(/HEX:([0-9a-f]+)/g)].map(m => m[1]).join("");
+    await until(() => chunks.join("").includes("READY"), "actual PTY ready");
+    const seen = new Set();
+    const permission = async () => {
+      w.events.emit("hook", { source: "claude", event: "Notification", payload: { notification_type: "permission_prompt", message: "Synthetic permission" } });
+      const prompt = await w.stub.waitFor(f => f.type === "prompt.request" && !seen.has(f.promptId)); seen.add(prompt.promptId);
+      assert.deepEqual(prompt.options, [{ id: "1", label: "Yes once" }, { id: "cancel", label: "Cancel" }]);
+      return prompt;
+    };
+    const answer = async (prompt, value) => {
+      const from = w.stub.frames.length;
+      w.stub.send({ type: "prompt.answer", sessionId: "owned-session", promptId: prompt.promptId, value });
+      w.stub.send({ type: "ping" }); await w.stub.waitFor(f => f.type === "pong", { from });
+    };
+    const first = await permission();
+    await answer(first, "3"); await answer(first, "2");
+    assert.equal(w.session.pending?.promptId, first.promptId, "unadvertised numeric choices remain refused");
+    assert.equal(hex(), "");
+    await answer(first, "cancel"); await answer(first, "cancel");
+    const successor = await permission();
+    await answer(first, "cancel"); await sleep(250);
+    assert.equal(hex(), "1b", "Cancel is one Escape; no Enter can approve a successor");
+    assert.equal(w.session.pending?.promptId, successor.promptId);
+    await answer(successor, "1"); await answer(successor, "1");
+    await until(() => hex().length >= 4, "allow key observed");
+    // Native can open a successor before a delayed Notification hook arrives.
+    await sleep(250);
+    assert.equal(hex(), "1b31", "Yes once is self-confirming; duplicates and delayed Enter add no input");
+    const questionFrom = w.stub.frames.length;
+    w.events.emit("hook", { source: "claude", event: "PreToolUse", payload: { tool_name: "AskUserQuestion", tool_input: { questions: [{ question: "Synthetic question", options: [{ label: "Next" }] }] } } });
+    const question = await w.stub.waitFor(f => f.type === "prompt.request", { from: questionFrom });
+    await answer(question, "1"); await sleep(250);
+    assert.equal(hex(), "1b31310d", "ordinary question confirmation remains available");
+  });
+}
+
+test("permission Cancel marks the active turn interrupted and preserves independent Stop", { timeout: 5000 }, async t => {
+  const w = await world(t);
+  w.send("active"); await w.started("active");
+  w.events.emit("hook", { source: "claude", event: "Notification", payload: { notification_type: "permission_prompt", message: "Synthetic permission" } });
+  const prompt = await w.stub.waitFor(f => f.type === "prompt.request");
+  w.send("retained"); await w.stub.waitFor(f => f.type === "turn.ack" && f.turnId === "retained");
+  w.stub.send({ type: "prompt.answer", promptId: prompt.promptId, value: "cancel" });
+  await w.stub.waitFor(f => f.resolvedPromptId === prompt.promptId);
+  assert.equal(w.interrupts(), 1, "Cancel uses the ordinary physical interrupt path");
+  w.quiet(); assert.equal((await w.finished("active")).interrupted, true);
+  await w.started("retained"); w.busy();
+  w.stub.send({ type: "turn.interrupt", turnId: "retained" });
+  await sleep(30); assert.equal(w.interrupts(), 2, "independent Stop still targets the successor");
+  w.quiet(); assert.equal((await w.finished("retained")).interrupted, true);
 });

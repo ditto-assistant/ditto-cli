@@ -251,7 +251,7 @@ test("tui: default launch announces, sends the catalog, and runs prompt / comman
     // 4. Same, answered through a turn of kind "answer".
     stub.send({ type: "turn.deliver", turnId: "turn-4", sessionId: announce.sessionId, text: "again [ask]" });
     const request2 = await stub.waitFor((f) => f.type === "prompt.request" && f.promptId !== request.promptId);
-    stub.send({ type: "turn.deliver", turnId: "turn-5", sessionId: announce.sessionId, kind: "answer", text: "", answer: { promptId: request2.promptId, value: "Yes" } });
+    stub.send({ type: "turn.deliver", turnId: "turn-5", sessionId: announce.sessionId, kind: "answer", text: "", answer: { promptId: request2.promptId, value: "Yes once" } });
     const answered = await stub.waitFor((f) => f.type === "turn.finished" && f.turnId === "turn-5");
     assert.equal(answered.exitCode, 0);
     await stub.waitFor((f) => f.type === "turn.finished" && f.turnId === "turn-4");

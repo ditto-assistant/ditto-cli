@@ -65,9 +65,8 @@ interface ActiveTurn {
 }
 
 const CLAUDE_PERMISSION_OPTIONS = [
-  { id: "1", label: "Yes" },
-  { id: "2", label: "Yes, and don't ask again this session" },
-  { id: "3", label: "No, and tell Claude what to do differently" },
+  { id: "1", label: "Yes once" },
+  { id: "cancel", label: "Cancel" },
 ];
 
 export class RemoteSession {
@@ -312,6 +311,7 @@ export class RemoteSession {
               kind: "permission",
               text: String(payload.message ?? payload.title ?? "Claude Code is asking for permission"),
               options: CLAUDE_PERMISSION_OPTIONS,
+              keys: { cancel: "\u001b" },
               default: "1",
             });
             this.pendingPermission = token;
@@ -448,12 +448,21 @@ export class RemoteSession {
     if (!pending || pending.promptId !== answer.promptId) return false;
     if (!this.pty) return false;
     const option = pending.options?.find((o) => o.id === answer.value || o.label.toLowerCase() === answer.value.trim().toLowerCase());
+    const claudePermission = this.ctx.harness === "claude" && pending.kind === "permission";
+    // Permission menu lengths vary. Only the advertised one-time allow and
+    // Escape cancellation are known; never type an arbitrary numeric choice.
+    if (claudePermission && !option) return false;
     const keys = option ? (pending.keys?.[option.id] ?? option.id) : answer.value;
-    this.pty.write(keys);
-    // A digit hotkey confirms on its own in Claude Code; the extra Enter is a
-    // no-op there and submits typed text everywhere else.
+    if (claudePermission && keys === "\u001b") {
+      if (this.current) this.onInterrupt(this.current.turnId);
+      else this.pty.interrupt("claude");
+    } else this.pty.write(keys);
     this.claudePermissions.answered(this.pendingPermission);
     this.clearPending();
+    // Claude permission digits confirm themselves and Escape cancels the
+    // turn. A delayed Enter could approve a successor before its hook arrives.
+    if (claudePermission) return true;
+    // General questions/text retain their scoped confirmation.
     const generation = this.promptGeneration;
     const operation = this.current;
     const nativeEpoch = this.nativeEpoch;
