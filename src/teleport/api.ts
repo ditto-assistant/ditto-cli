@@ -6,7 +6,7 @@ import type { Manifest } from "./types.js";
 export interface Capsule {
   id: string;
   name: string;
-  rootKind: "repo" | "folder";
+  rootKind: "repo" | "folder" | "archive";
   harnessKind?: string;
   harnessSessionId?: string | null;
   headGeneration: number;
@@ -112,7 +112,7 @@ export async function listCapsules(): Promise<Capsule[]> {
 
 export async function createCapsule(input: {
   name: string;
-  rootKind: "repo" | "folder";
+  rootKind: "repo" | "folder" | "archive";
   harnessKind?: string;
   harnessSessionId?: string;
   mirrorPolicy?: Capsule["mirrorPolicy"];

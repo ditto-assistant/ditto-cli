@@ -15,6 +15,8 @@ import { discoverRepos } from "../teleport/discover.js";
 import { offloadBlockers, planCapture } from "../teleport/workspace.js";
 import { formatCapturePlan } from "../dittoconfig/commands.js";
 import { formatBytes, type HarnessKind, type Manifest } from "../teleport/types.js";
+import { defaultArchiveSources, pushArchive, restoreArchive, type ArchiveSource } from "../teleport/archive.js";
+import { stat } from "node:fs/promises";
 
 function out(line: string): void {
   process.stdout.write(`${line}\n`);
@@ -487,6 +489,63 @@ function withOutput(c: Command): Command {
   return c.addOption(outputOption()).addOption(jsonAlias());
 }
 
+interface ArchiveOptions extends OutputOptions {
+  name?: string;
+  source?: string[];
+}
+
+/** Parses repeatable --source name=dir; defaults to agent history and infinite-disk recovery data. */
+async function archiveSources(options: ArchiveOptions): Promise<ArchiveSource[]> {
+  const names = new Set<string>();
+  const sources = options.source?.length
+    ? options.source.map((s) => {
+        const at = s.indexOf("=");
+        const dir = s.slice(at + 1);
+        if (at <= 0 || !dir) throw new Error(`--source must be name=dir, got "${s}"`);
+        const name = s.slice(0, at);
+        if (names.has(name)) throw new Error(`duplicate --source name "${name}"`);
+        names.add(name);
+        return { name, dir: path.resolve(dir) };
+      })
+    : defaultArchiveSources();
+  const present: ArchiveSource[] = [];
+  for (const src of sources) {
+    const info = await stat(src.dir).catch(() => undefined);
+    if (info?.isDirectory()) present.push(src);
+    else if (options.source?.length) throw new Error(`${src.dir} is not a directory`);
+  }
+  if (present.length === 0) throw new Error("nothing to archive: no source directory exists");
+  return present;
+}
+
+export async function cmdTeleportArchive(options: ArchiveOptions): Promise<void> {
+  const name = options.name ?? "agent-traces";
+  const sources = await archiveSources(options);
+  let capsule = (await tapi.listCapsules()).find((c) => c.name === name && c.status !== "deleted");
+  if (capsule && capsule.rootKind !== "archive") {
+    throw new Error(`capsule "${name}" is a ${capsule.rootKind} capsule; choose another --name for the archive`);
+  }
+  if (!capsule) capsule = await tapi.createCapsule({ name, rootKind: "archive" });
+  if (!json(options)) {
+    err(`Archiving ${sources.map((s) => s.name).join(", ")} into "${name}" (generation ${capsule.headGeneration + 1})…`);
+  }
+  const res = await pushArchive(capsule.id, name, sources, capsule.headGeneration);
+  if (json(options)) {
+    out(JSON.stringify({ capsule: capsule.id, ...res }));
+    return;
+  }
+  for (const a of res.archives) out(`  ${pad(a.name, 24)} ${pad(String(a.entries), 7)} files  ${formatBytes(a.bytes)}`);
+  out(`Generation ${res.generation}: ${formatBytes(res.logicalBytes)} archived, ${formatBytes(res.storedBytes)} stored compressed, ${formatBytes(res.uploadedBytes)} uploaded (${res.reused} chunks already stored).`);
+  out("Billed as storage on your plan; restore with `heyditto teleport archive-restore`.");
+}
+
+export async function cmdTeleportArchiveRestore(archiveName: string, dest: string, options: { name?: string; generation?: string }): Promise<void> {
+  const generation = options.generation === undefined ? undefined : Number(options.generation);
+  if (generation !== undefined && (!Number.isInteger(generation) || generation < 1)) throw new Error("--generation must be a positive integer");
+  const res = await restoreArchive(options.name ?? "agent-traces", archiveName, path.resolve(dest), generation);
+  out(`Restored ${res.entries} files (${formatBytes(res.bytes)}) into ${path.resolve(dest)}.`);
+}
+
 export function registerTeleportCommands(program: Command, addExamples: (c: Command, ex: string) => Command): void {
   const teleport = withOutput(
     program
@@ -550,6 +609,20 @@ export function registerTeleportCommands(program: Command, addExamples: (c: Comm
         for (const line of formatCapturePlan(plan)) out(line);
       }),
   );
+  withOutput(
+    teleport
+      .command("archive")
+      .description("back up agent session history and recovery data as storage (no capsule slot)")
+      .option("--name <capsule>", "archive capsule name", "agent-traces")
+      .option("--source <name=dir...>", "archive these directories instead of the defaults (~/.claude/projects, ~/.codex/sessions, infinite-disk recovery data)")
+      .action(cmdTeleportArchive),
+  );
+  teleport
+    .command("archive-restore <archive> <dest>")
+    .description("restore one archive (e.g. claude-code) into a new directory; never overwrites")
+    .option("--name <capsule>", "archive capsule name", "agent-traces")
+    .option("--generation <n>", "generation to restore (default: latest)")
+    .action(cmdTeleportArchiveRestore);
   withOutput(teleport.command("rm <capsule>").description("delete a capsule and its generations").option("--yes", "skip the confirmation").action(cmdTeleportRm));
 
   addExamples(

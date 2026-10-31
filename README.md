@@ -1102,6 +1102,23 @@ Recover any time with `heyditto teleport pull <capsule> <path>`.
 After pulling, reinstall Node dependencies that were removed during offload;
 `node_modules` is not stored in the capsule.
 
+## Archive
+
+Coding-agent session history and local recovery data only grow, and they
+usually live on one laptop with no backup. `teleport archive` backs them up to
+an archive capsule. It uses no capsule slot and no Teleport quota, and its bytes
+are billed as storage on your plan.
+
+```sh
+heyditto teleport archive                     # ~/.claude/projects, ~/.codex/sessions, infinite-disk recovery data
+heyditto teleport archive --source notes=~/notes --name my-archive
+heyditto teleport archive-restore claude-code ./restored   # never overwrites
+```
+
+Each source is one tar stream cut into content-defined chunks, with each chunk
+compressed on its own. Re-running uploads only the chunks that changed, so a
+nightly run after appending to a few sessions sends a few megabytes.
+
 ## Storage mirrors
 
 Ditto stores capsules redundantly on its own storage. You can also bring your
