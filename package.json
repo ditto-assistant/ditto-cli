@@ -21,6 +21,7 @@
     "test": "node --test",
     "prepack": "npm run build",
     "release": "semantic-release",
+    "plugin:build": "npm run build && node scripts/build-remote-plugin.mjs",
     "verify": "npm run check && npm run build && npm test && npm pack --dry-run"
   },
   "keywords": [
