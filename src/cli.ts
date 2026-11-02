@@ -913,9 +913,8 @@ function buildProgram(): Command {
       "after",
       `
 Notes:
-  On macOS, Apple ships /usr/bin/ditto (a file-copy utility). If 'ditto'
-  runs the wrong tool, install with 'npm i -g @heyditto/cli' and invoke as
-  'heyditto' (alias bin), or check 'type -a ditto' to disambiguate.
+  Use 'heyditto' for this CLI. On macOS, /usr/bin/ditto is Apple's
+  separate file-copy utility.
 
 Environment:
   DITTO_API_KEY     Optional override, taking precedence over the saved key.
