@@ -46,7 +46,7 @@ npm install -g @heyditto/cli
 npx -y --package @heyditto/cli heyditto search "what did I say about X"
 ```
 
-The package installs the `heyditto` command. On macOS, `ditto` is Apple’s file-copy utility and is not installed by this package.
+The package installs the `heyditto` command. On macOS, `ditto` is Apple’s file-copy utility and is not installed by this package. Scripts that used the older `ditto` alias must switch to `heyditto`.
 
 The published npm package is **`@heyditto/cli`**. Use the installed `heyditto`
 binary or the scoped `npx --package` form above; the unscoped `heyditto` npm name
