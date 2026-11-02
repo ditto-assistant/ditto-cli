@@ -415,10 +415,10 @@ test("review set --fast on sends fastMode and reports the cost", async () => {
   }
 });
 
-test("review add sets a repository up with the workspace's review endpoint and the defaults", async () => {
+test("review add sets a repository up with the workspace's review endpoint and the defaults, verdicts on", async () => {
   const stub = await startStub();
   try {
-    const out = await run(stub.base, ["review", "add", "ditto-assistant/ditto-cli", "--verdicts", "on", "--org", "omni-aura"]);
+    const out = await run(stub.base, ["review", "add", "ditto-assistant/ditto-cli", "--org", "omni-aura"]);
     assert.equal(out.status, 0, out.stderr);
     const put = stub.calls.find((c) => c.method === "PUT");
     assert.ok(put, "no PUT was sent");
@@ -445,7 +445,7 @@ test("review add takes --endpoint and the limits, and refuses before any write",
     assert.equal(put.body.maxMinutes, 20);
     assert.equal(put.body.budgetCents, 300);
     assert.equal(put.body.fastMode, true);
-    assert.equal("reviewVerdicts" in put.body, false, "an unnamed setting is left to the backend's default");
+    assert.equal(put.body.reviewVerdicts, true, "verdicts are on without --verdicts");
     const writes = () => stub.calls.filter((c) => c.method === "PUT").length;
     const existing = await run(stub.base, ["review", "add", "Ditto-Assistant/Console", "--org", "omni-aura"]);
     assert.notEqual(existing.status, 0);
@@ -457,6 +457,9 @@ test("review add takes --endpoint and the limits, and refuses before any write",
     assert.notEqual(badFlag.status, 0);
     assert.match(badFlag.stderr, /--verdicts must be on or off/);
     assert.equal(writes(), 1, "a refused add wrote nothing");
+    const off = await run(stub.base, ["review", "add", "acme/docs", "--verdicts", "off", "--org", "omni-aura"]);
+    assert.equal(off.status, 0, off.stderr);
+    assert.equal(stub.calls.filter((c) => c.method === "PUT").at(-1).body.reviewVerdicts, false);
   } finally {
     stub.close();
   }
