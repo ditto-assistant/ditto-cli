@@ -124,12 +124,23 @@ type Manifest struct {
 	CapsuleID        string         `json:"capsuleId"`
 	Root             Root           `json:"root"`
 	Repos            []Repo         `json:"repos"`
+	Archives         []Archive      `json:"archives,omitempty"`
 	Excludes         []string       `json:"excludes,omitempty"`
 	Harness          Harness        `json:"harness"`
 	Totals           Totals         `json:"totals"`
 	Version          int            `json:"v"`
 	Generation       int32          `json:"generation"`
 	ParentGeneration int32          `json:"parentGeneration"`
+}
+
+// Archive is one backed-up tree in an archive capsule.
+type Archive struct {
+	Name             string  `json:"name"`
+	Format           string  `json:"format"`
+	ChunkCompression string  `json:"chunkCompression"`
+	Chunks           []Chunk `json:"chunks"`
+	Entries          int     `json:"entries"`
+	Bytes            int64   `json:"bytes"`
 }
 
 // ErrInvalidManifest wraps every manifest validation failure.
