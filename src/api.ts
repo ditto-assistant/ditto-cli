@@ -54,16 +54,20 @@ export async function apiFetch<T>(
   if (!response.ok) {
     const text = await response.text().catch(() => "");
     let detail = text;
+    let explained = false;
     try {
-      const parsed = JSON.parse(text) as { message?: string; error?: string };
+      const parsed = JSON.parse(text) as { message?: string; error?: string; code?: unknown };
       detail = parsed.message || parsed.error || text;
+      // A coded refusal (api_key_limited, a Review permission or billing refusal)
+      // carries its own next step; a generic hint would contradict it.
+      explained = typeof parsed.code === "string" && Boolean(parsed.message || parsed.error);
     } catch {
       /* raw body */
     }
     const hint =
       response.status === 401
         ? " (is the saved key valid? run `heyditto login`)"
-        : response.status === 403
+        : response.status === 403 && !explained
           ? " (your account or key is not allowed to perform this action)"
           : "";
     throw new ApiError(
