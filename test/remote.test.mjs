@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -116,7 +117,7 @@ test("attachments: names are confined to the turn folder and the prompt lists re
   assert.equal(safeAttachmentName(".env"), "env");
   assert.equal(safeAttachmentName("C:\\Users\\me\\report.pdf"), "report.pdf");
   const prompt = buildPrompt("look at this\r\n", [{ relPath: ".tmp/ditto/attachments/t1/a.png" }, { relPath: ".tmp/ditto/attachments/t1/b.txt" }]);
-  assert.equal(prompt, "look at this\n\nAttached files:\n- .tmp/ditto/attachments/t1/a.png\n- .tmp/ditto/attachments/t1/b.txt");
+  assert.equal(prompt, "look at this\r\n\n\nAttached files:\n- .tmp/ditto/attachments/t1/a.png\n- .tmp/ditto/attachments/t1/b.txt");
   assert.equal(buildPrompt("plain", []), "plain");
 });
 
@@ -197,7 +198,7 @@ test("tui: default launch announces, sends the catalog, and runs prompt / comman
     // The fake harness got the hook settings and is on screen.
     await waitUntil(() => run.output().includes("fake claude ready"), { what: "fake claude banner" });
     const launch = fakes.entries().find((e) => e.mode === "tui");
-    assert.deepEqual(launch.hooks.sort(), ["Notification", "PreToolUse", "Stop", "UserPromptSubmit"]);
+    assert.deepEqual(launch.hooks.sort(), ["Notification", "PermissionDenied", "PermissionRequest", "PostToolUse", "PostToolUseFailure", "PreToolUse", "Stop", "UserPromptSubmit"]);
 
     // 1. Prompt with an attachment.
     const bytes = Buffer.from("notes from the phone\n");
@@ -211,7 +212,7 @@ test("tui: default launch announces, sends the catalog, and runs prompt / comman
     const saved = path.join(repo, ".tmp", "ditto", "attachments", "turn-1", "notes.txt");
     assert.equal(readFileSync(saved, "utf8"), "notes from the phone\n");
     const submitted = fakes.entries().find((e) => e.event === "prompt");
-    assert.equal(submitted.prompt, "read the notes\n\nAttached files:\n- .tmp/ditto/attachments/turn-1/notes.txt");
+    assert.equal(submitted.prompt, 'read the notes\n\nAttached files:\n- @".tmp/ditto/attachments/turn-1/notes.txt"\n\n');
     const exclude = readFileSync(path.join(repo, ".git", "info", "exclude"), "utf8");
     assert.ok(exclude.includes("\n.tmp/\n"), ".tmp/ is excluded per clone, never via .gitignore");
     assert.equal(existsSync(path.join(repo, ".gitignore")), false);
@@ -250,7 +251,7 @@ test("tui: default launch announces, sends the catalog, and runs prompt / comman
     // 4. Same, answered through a turn of kind "answer".
     stub.send({ type: "turn.deliver", turnId: "turn-4", sessionId: announce.sessionId, text: "again [ask]" });
     const request2 = await stub.waitFor((f) => f.type === "prompt.request" && f.promptId !== request.promptId);
-    stub.send({ type: "turn.deliver", turnId: "turn-5", sessionId: announce.sessionId, kind: "answer", text: "", answer: { promptId: request2.promptId, value: "Yes" } });
+    stub.send({ type: "turn.deliver", turnId: "turn-5", sessionId: announce.sessionId, kind: "answer", text: "", answer: { promptId: request2.promptId, value: "Yes once" } });
     const answered = await stub.waitFor((f) => f.type === "turn.finished" && f.turnId === "turn-5");
     assert.equal(answered.exitCode, 0);
     await stub.waitFor((f) => f.type === "turn.finished" && f.turnId === "turn-4");
@@ -258,6 +259,16 @@ test("tui: default launch announces, sends the catalog, and runs prompt / comman
       fakes.entries().filter((e) => e.event === "answer").map((e) => e.key),
       ["1", "1"],
     );
+
+    // A portable hashed turn logs the actual downloaded directory.
+    const portableTurn="channel:notes";
+    stub.send({type:"turn.deliver",turnId:portableTurn,sessionId:announce.sessionId,text:"read portable notes",attachments:[attachment]});
+    await stub.waitFor(f=>f.type==="turn.finished"&&f.turnId===portableTurn);
+    const portableDir=".tmp/ditto/attachments/turn-"+createHash("sha256").update(portableTurn).digest("hex");
+    assert.equal(readFileSync(path.join(repo,portableDir,"notes.txt"),"utf8"),"notes from the phone\n");
+    const notes=readFileSync(path.join(env.DITTO_CONFIG_DIR,"logs","notes.log"),"utf8");
+    assert.ok(notes.includes("attachment(s) saved under "+portableDir));
+    assert.ok(!notes.includes("attachment(s) saved under .tmp/ditto/attachments/"+portableTurn));
 
     // Ctrl+C at the keyboard ends the harness; the host announces the session closed and the key is revoked.
     run.write("\u0003");

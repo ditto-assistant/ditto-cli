@@ -73,6 +73,7 @@ export class HostClient {
   private heartbeat?: NodeJS.Timeout;
   private missedPongs = 0;
   private readonly sessions = new Map<string, SessionAnnounceFrame>();
+  private readonly resolvedPrompts = new Map<string, string>();
   private readonly catalogs = new Map<string, SessionCommandsFrame>();
   private readonly seenTurns: string[] = [];
   private readonly seenSet = new Set<string>();
@@ -214,6 +215,8 @@ export class HostClient {
     this.startHeartbeat(frame.heartbeatSeconds || this.options.heartbeatSeconds || 30);
     for (const session of this.sessions.values()) {
       this.send(session);
+      const resolvedPromptId = this.resolvedPrompts.get(session.sessionId);
+      if (resolvedPromptId) this.send({ type: "session.status", sessionId: session.sessionId, status: session.status, resolvedPromptId });
       const catalog = this.catalogs.get(session.sessionId);
       if (catalog) this.send(catalog);
     }
@@ -300,14 +303,16 @@ export class HostClient {
     this.send(full);
   }
 
-  status(sessionId: string, status: SessionStatus): void {
+  status(sessionId: string, status: SessionStatus, resolvedPromptId?: string): void {
     const known = this.sessions.get(sessionId);
     if (known) known.status = status;
-    this.send({ type: "session.status", sessionId, status });
+    if (resolvedPromptId) this.resolvedPrompts.set(sessionId, resolvedPromptId);
+    this.send({ type: "session.status", sessionId, status, ...(resolvedPromptId ? { resolvedPromptId } : {}) });
   }
 
   closed(sessionId: string): void {
     this.sessions.delete(sessionId);
+    this.resolvedPrompts.delete(sessionId);
     this.catalogs.delete(sessionId);
     this.send({ type: "session.closed", sessionId });
   }

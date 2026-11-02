@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { TOOL_DENY_HEADER } from "./claude-deny.js";
 
 /**
  * Native MCP mode for Claude Code (DITTO-1497).
@@ -109,7 +110,7 @@ export async function fetchMcpCatalog(
  * source, and the permission rules that put the endpoint's approval policy
  * into Claude Code's own prompts.
  */
-export function claudeMcpAttachment(catalog: McpCatalog, sessionId: string, opts: { yolo?: boolean } = {}): ClaudeMcpAttachment {
+export function claudeMcpAttachment(catalog: McpCatalog, sessionId: string, opts: { yolo?: boolean; toolDeny?: string[] } = {}): ClaudeMcpAttachment {
   const mcpServers: Record<string, unknown> = {};
   const allow: string[] = [];
   const ask: string[] = [];
@@ -121,7 +122,7 @@ export function claudeMcpAttachment(catalog: McpCatalog, sessionId: string, opts
     mcpServers[name] = {
       type: "http",
       url: server.url,
-      headers: { Authorization: `Bearer \${${MCP_KEY_ENV}}`, "X-Ditto-Session-Id": sessionId },
+      headers: { Authorization: `Bearer \${${MCP_KEY_ENV}}`, "X-Ditto-Session-Id": sessionId, ...(opts.toolDeny?.length ? { [TOOL_DENY_HEADER]: opts.toolDeny.join(",") } : {}) },
     };
     tools += server.tools.length;
     gated += server.tools.filter((t) => t.approval).length;

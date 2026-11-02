@@ -29,7 +29,7 @@ const ENDPOINTS = {
 };
 
 /** Tiny stand-in for the Ditto management API. */
-function startStub() {
+function startStub({ mcpError = false } = {}) {
   const calls = [];
   const server = http.createServer((req, res) => {
     let body = "";
@@ -42,7 +42,7 @@ function startStub() {
           res.statusCode = 401;
           return res.end(JSON.stringify({ message: "unauthorized" }));
         }
-        return res.end(JSON.stringify(ENDPOINTS));
+        return res.end(JSON.stringify(mcpError ? { ...ENDPOINTS, baseUrl: `http://127.0.0.1:${server.address().port}/v1` } : ENDPOINTS));
       }
       if (/\/keys$/.test(req.url) && req.method === "POST") {
         res.statusCode = 201;
@@ -358,12 +358,12 @@ test("endpoints lists and sets a default", async () => {
   writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ apiKey: "ditto_mcp_test", agentMode: true }));
   try {
     const env = { DITTO_API_BASE: stub.base, DITTO_CONFIG_DIR: configDir };
-    const list = await runAsync(["endpoints"], env);
+    const list = await runAsync(["endpoints"], env, configDir);
     assert.equal(list.status, 0, list.stderr);
     assert.match(list.stdout, /alpha\s+openai\/gpt-5\.6-luna\s+25,000 \/ 1,000,000 monthly\s+traces/);
     assert.match(list.stdout, /beta\s+anthropic\/claude-sonnet-5\s+0 \/ ∞/);
 
-    const set = await runAsync(["endpoints", "--set-default", "beta", "--output", "json"], env);
+    const set = await runAsync(["endpoints", "--set-default", "beta", "--output", "json"], env, configDir);
     assert.equal(set.status, 0, set.stderr);
     assert.equal(JSON.parse(set.stdout).defaultEndpoint, "beta");
     const stored = JSON.parse(readFileSync(path.join(configDir, "config.json"), "utf8"));
@@ -734,4 +734,18 @@ test("searchTranscripts: exact title wins, then title words, then prompts; this 
   assert.deepEqual(searchTranscripts(all, "DITTO REVIEW QUALITY AND UX", "/a").map((x) => x.id), ["3", "2"]);
   assert.deepEqual(searchTranscripts(all, "review", "/a").map((x) => x.id), ["3", "4", "2", "1"]);
   assert.deepEqual(searchTranscripts(all, "", "/a").length, 4);
+});
+
+
+test("MCP setup failure honors explicit key retention", async () => {
+ for (const keep of [false,true]) {
+  const stub = await startStub({mcpError:true});
+  const claude = fakeClaude();
+  try {
+   const result = await runAsync(["claude","--endpoint","alpha","--mcp-only","-p","hello",...(keep?["--keep-key"]:[])], claude.env({DITTO_API_BASE:stub.base,DITTO_API_KEY:"ditto_mcp_test"}));
+   assert.notEqual(result.status,0);
+   assert.match(result.stderr,/MCP-only setup failed/);
+   assert.equal(stub.calls.filter(c=>c.method==="DELETE"&&/keys\/key-1$/.test(c.url)).length,keep?0:1);
+  } finally { stub.close(); }
+ }
 });

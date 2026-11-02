@@ -276,6 +276,20 @@ heyditto search --help
 heyditto graphs add --help
 ```
 
+### `feedback`
+
+Submit a bug report or feature request to the Ditto team. Use a concise report
+without memories, private user content, credentials, or raw tool responses.
+
+```sh
+heyditto feedback "The search tool timed out twice" --title "Search timeouts" --tool search_memories
+heyditto feedback --file ./report.txt --title "Missing capability" --include-recent-traces
+```
+
+Recent request diagnostics are omitted by default. The flag opts in for the
+current session; start one with `heyditto session new` to group CLI calls.
+The command submits immediately and reports any server-side refusal.
+
 ### `save`
 
 Save a document or note to the user's memory base.
@@ -985,6 +999,19 @@ How it works:
   dialog or `AskUserQuestion` is forwarded to the app with its options; the
   answer is typed back as the option's hotkey (or as text). Codex exposes no
   hook for its approval dialogs, so those still need the keyboard.
+- Claude Code terminal hosts advertise prompt delivery modes separately from
+  Stop. Normal busy sends remain in the CLI's FIFO; native keyboard activity
+  observed through Claude hooks also holds that FIFO until its Stop hook. Explicit `deliveryMode:
+  "steer"` bypasses that FIFO and submits the prompt with native Ctrl+Enter;
+  queued prompts remain queued. Escape still performs the independent Stop.
+  After the first successful steer, Claude Stop hooks remain uncorrelated for
+  the rest of that session. Remote receipts and later local keyboard activity
+  therefore use the existing quiet fallback (eight seconds by default), which
+  can delay completion receipts and queue draining. Physical cancellation and receipt timing are
+  separate. Headless and other harnesses reject steering. MCP Channels also
+  rejects forced steering and interruption; Claude schedules its notifications,
+  which does not establish a host FIFO or immediate-delivery guarantee.
+
 - **Headless mode** runs one `claude -p --resume <id> --output-format
   stream-json` / `codex exec resume --last` per turn, prints a compact progress
   line per event, and reports `turn.finished {exitCode}`. Ctrl+C finishes the
@@ -1247,3 +1274,92 @@ project and path: a directory named `build` is only excluded under a project who
 says so. Tracked artifact directories are flagged rather than claimed excluded.
 `heyditto offload` refuses to delete a folder when unrelated files, unknown projects or
 escaping symlinks beneath it would be lost.
+
+### Native Claude inference and remote delivery
+
+`heyditto claude` keeps using Ditto Router for inference. `--mcp` changes
+how tools are attached; it does not change the inference provider.
+
+Use your native Claude Code account while attaching only the endpoint's selected
+MCP tools:
+
+```sh
+claude auth login
+heyditto claude --mcp-only --endpoint my-tools
+```
+
+The CLI terminal bridge remains the default remote transport. The launch prints
+a direct Ditto chat link, and live launches are listed by harness in the app's
+Apps view, with Router or MCP-only labels and device presence. MCP-only launches
+are saved under Claude Code in Main Memory; the endpoint supplies tools with its
+existing deny rules and approvals. The endpoint credential is never used for
+native model inference. Missing MCP configuration fails without switching to
+Router inference.
+
+For Claude Code's Channels research preview:
+
+```sh
+heyditto claude --mcp-only --endpoint my-tools --remote-transport channels
+```
+
+This attaches a launch-scoped local stdio MCP server declaring `claude/channel`
+and explicitly selects it using Claude's development-channel flag. Claude shows
+its own opt-in prompt; organization policy must also permit Channels. A regular
+MCP tools connection alone does not enable inbound prompts. Keep a supported,
+current Claude Code version and native account signed in.
+
+The adapter pushes `notifications/claude/channel` with a turn ID. A transport
+write is not a model receipt: the session stays awaiting receipt until Claude
+calls `acknowledge`, and finishes only after `reply`. The reply is shown in the
+remote composer. Native local conversation history remains in Claude Code;
+this mode does not proxy model requests or mirror its entire transcript.
+
+Channels supports prompt text and attachments. Use the CLI transport for slash
+commands, remote permission answers, interruption and Teleport checkpoints;
+Channels cannot perform those terminal operations. Senders authenticate through
+the same owned-session host bridge as CLI remote control. Redelivery of a turn
+ID does not inject a second prompt.
+
+Claude Code launch defaults can be saved on an endpoint in the developer console
+or in a repository endpoint profile:
+
+```toml
+[settings]
+claude_inference = "native" # native Claude account; "router" uses Ditto Router
+claude_remote_transport = "channels" # "cli" uses the terminal bridge
+```
+
+`heyditto claude` reads the repository's default endpoint profile; `--endpoint`
+selects the cloud profile directly. Repository launch settings override cloud
+settings without requiring `repo apply`; `repo apply` also saves them to the
+cloud. Explicit `--mcp-only`, `--no-mcp-only`, and `--remote-transport` flags
+win for one launch. Resuming retains the previous session's choices. Channels
+requires interactive native Claude Code, an eligible signed-in account and an
+organization that allows Channels. The CLI attaches `ditto-remote` and adds the
+development channel flag in one launch; Claude's experimental-channel
+confirmation still appears. Router inference defaults to the CLI bridge.
+
+Channel distribution and approval: [Claude Code channel approval plan](docs/claude-channel-approval.md).
+
+### Organization member access
+
+Use explicit organization scope when inspecting or changing access:
+
+```sh
+heyditto orgs members --org your-team --output json
+heyditto orgs allowance @teammate --org your-team --output json
+heyditto orgs set-role @teammate member --org your-team --expected-role viewer --dry-run
+heyditto orgs set-role @teammate member --org your-team --expected-role viewer
+```
+
+`allowance` reads your own allowance when the member is omitted. Current org managers can inspect another member by exact id, email or handle. It uses Ditto MCP, exposes no company balance or purchase history, and changes no budget. MCP refusals exit with an error.
+
+`set-role` resolves exactly one member, sends only the role, and reports the previous role. `--expected-role` is a client preflight, not an atomic compare-and-set. Owner/admin authorization and last-owner/last-manager protections are enforced by the backend. Reverting a role uses the same command with the reported previous role and current authorization. Directory listing is capped at 2000 rows and reports possible truncation. Role changes refuse a directory at that cap, since an exact name lookup cannot be guaranteed complete. These commands need a full account CLI key and a backend that admits the member routes; narrowed space/tool/thread keys are refused.
+
+
+Stop also covers a steering command that races its server enqueue. Unknown
+cancellation IDs are retained for 5 minutes (at most 256 entries) in the current
+CLI session and cancel only the matching later steer. They do not cancel normal
+queued prompts or interrupt unrelated current turns. Repeated exact Stop frames
+send one physical interrupt. This intent does not survive a fresh CLI process;
+steering is not automatically replayed offline.
