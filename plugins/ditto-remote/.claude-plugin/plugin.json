@@ -1,0 +1,22 @@
+{
+  "name": "ditto-remote",
+  "description": "Receive prompts from your signed-in Ditto account in a native Claude Code session and return explicit delivery receipts and replies.",
+  "author": {
+    "name": "Ditto"
+  },
+  "homepage": "https://heyditto.ai",
+  "repository": "https://github.com/ditto-assistant/ditto-cli",
+  "license": "MIT",
+  "keywords": [
+    "channel",
+    "remote-control",
+    "ditto"
+  ],
+  "channels": [
+    {
+      "server": "ditto-remote",
+      "displayName": "Ditto Remote"
+    }
+  ],
+  "icon": "./icon.png"
+}
