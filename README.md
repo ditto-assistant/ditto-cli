@@ -46,7 +46,7 @@ npm install -g @heyditto/cli
 npx -y --package @heyditto/cli heyditto search "what did I say about X"
 ```
 
-The package installs two equivalent binaries: `ditto` and `heyditto`. They run the same CLI — use whichever you prefer. We recommend **`heyditto`** on macOS because Apple ships `/usr/bin/ditto` (a file-copy utility) that can shadow the npm CLI.
+The package installs the `heyditto` command. On macOS, `ditto` is Apple’s file-copy utility and is not installed by this package.
 
 The published npm package is **`@heyditto/cli`**. Use the installed `heyditto`
 binary or the scoped `npx --package` form above; the unscoped `heyditto` npm name
@@ -127,23 +127,9 @@ cached versions, eligibility, policy and last result. Invalid selection metadata
 falls back before execution; a cached CLI execution failure is quarantined for
 the next invocation and **never retries the command**.
 
-### macOS: name collision with Apple's `/usr/bin/ditto`
+### macOS command name
 
-On macOS, Apple ships `/usr/bin/ditto` (a file-copy utility). On a default `PATH` that puts `/usr/bin` ahead of `/opt/homebrew/bin`, plain `ditto` will run Apple's tool instead of this one — which produces confusing errors like `unrecognized option '--output'`.
-
-Two ways to disambiguate:
-
-```bash
-# 1. Use the alias bin shipped by this package:
-heyditto status
-
-# 2. Or check which 'ditto' binary your shell resolves first:
-type -a ditto
-# /usr/bin/ditto                    ← Apple's tool
-# /opt/homebrew/bin/ditto           ← @heyditto/cli (use this)
-```
-
-You can also reorder your `PATH` so the npm global bin comes before `/usr/bin`, or invoke `@heyditto/cli` directly via its full path.
+Use `heyditto` for the Ditto CLI. Apple’s `/usr/bin/ditto` is a separate file-copy utility. If an older CLI installation left a `ditto` alias, remove that alias or upgrade the package so it no longer shadows Apple’s command.
 
 ## Auth
 
@@ -365,7 +351,7 @@ checkout is bug-free. Results are unpublished local reviews and post nothing
 to GitHub. Organization learning-memory and complete hosted repository-policy
 parity remain separate capabilities and are not implied by this command.
 
-Manage Ditto Review and follow reviews from either `ditto` or `heyditto`.
+Manage Ditto Review and follow reviews with `heyditto`.
 Commands use your selected organization (`orgs use`) or `--org`; without one,
 they use your personal workspace. Repositories must already be set up for
 Review. Workspace membership and manager permissions are enforced by the API.
