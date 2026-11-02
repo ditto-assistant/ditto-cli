@@ -62,4 +62,4 @@ Never commit `dist/` (it's in `.gitignore`; semantic-release rebuilds via `prepa
 
 ## Authentication for live testing
 
-`DITTO_API_KEY` is required for any command that hits the MCP server. Get one at <https://app.heyditto.ai/mcp/newkey> or run `ditto login`. Never commit a key.
+`DITTO_API_KEY` is required for any command that hits the MCP server. Get one at <https://app.heyditto.ai/mcp/newkey> or run `heyditto login`. Never commit a key.

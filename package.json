@@ -4,7 +4,6 @@
   "description": "Ditto Memory CLI — save, search, fetch, and traverse the Ditto memory graph from the shell.",
   "type": "module",
   "bin": {
-    "ditto": "dist/entry.js",
     "heyditto": "dist/entry.js"
   },
   "files": [
