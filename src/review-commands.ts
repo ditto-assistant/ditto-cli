@@ -612,9 +612,15 @@ interface AddOptions extends ScopeOptions {
   verdicts?: string;
 }
 
-/** What a new repository starts with when a flag does not say (the console's defaults). */
+/** What a new repository starts with when a flag does not say (the Omni Aura repositories' baseline). */
 const ADD_DEFAULT_MAX_MINUTES = 30;
 const ADD_DEFAULT_BUDGET_CENTS = 100;
+/**
+ * Verdicts are on unless --verdicts off: Ditto approves a clean head and
+ * requests changes on a blocking finding. Sent rather than left to the
+ * backend, so an older backend's default (off) does not apply.
+ */
+const ADD_DEFAULT_VERDICTS = true;
 
 function onOff(flag: string, value: string | undefined): boolean | undefined {
   if (value === undefined) return undefined;
@@ -637,7 +643,7 @@ export async function cmdReviewAdd(fullName: string, options: AddOptions): Promi
   const budgetCents =
     options.budgetCents === undefined ? ADD_DEFAULT_BUDGET_CENTS : intFlag("--budget-cents", options.budgetCents, 1, MAX_BUDGET_CENTS);
   const fast = onOff("--fast", options.fast);
-  const verdicts = onOff("--verdicts", options.verdicts);
+  const verdicts = onOff("--verdicts", options.verdicts) ?? ADD_DEFAULT_VERDICTS;
   const company = await resolveScope(options);
   const repos = await listReviewRepositories(company);
   const where = company ? ` in ${company.slug}` : " in your personal workspace";
@@ -666,7 +672,7 @@ export async function cmdReviewAdd(fullName: string, options: AddOptions): Promi
     budgetCents,
     maxMinutes,
     ...(fast !== undefined ? { fastMode: fast } : {}),
-    ...(verdicts !== undefined ? { reviewVerdicts: verdicts } : {}),
+    reviewVerdicts: verdicts,
   };
   const saved = await apiFetch<ReviewRepository>(`/api/v5/review/repositories${scopeQuery(company)}`, { method: "PUT", body });
   if (isJSON(options)) {
@@ -755,12 +761,13 @@ export function registerReviewCommands(
       .option("--endpoint <id>", "review endpoint to bill to (default: the one this workspace's repositories use)")
       .option("--max-minutes <n>", `time limit of one review (${MIN_MAX_MINUTES}-${MAX_MAX_MINUTES}, default ${ADD_DEFAULT_MAX_MINUTES})`)
       .option("--budget-cents <n>", `spend limit of one review, in cents (1-10000, default ${ADD_DEFAULT_BUDGET_CENTS})`)
-      .option("--verdicts <on|off>", "approve or request changes after each review (default off)")
+      .option("--verdicts <on|off>", "approve or request changes after each review (default on)")
       .option("--fast <on|off>", "fast mode: review on GLM-5.3-FlashX (faster, about 2.5x the per-token cost)")
       .addOption(orgOption())
       .addOption(outputOption())
       .action(cmdReviewAdd),
-    `  heyditto review add ditto-assistant/ditto-cli --org omniaura --verdicts on
+    `  heyditto review add ditto-assistant/ditto-cli --org omniaura
+  heyditto review add acme/docs --verdicts off
   heyditto review add acme/api --budget-cents 300 --max-minutes 20 --endpoint 44444444-…`,
   );
   addExamples(
