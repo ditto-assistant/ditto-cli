@@ -35,6 +35,8 @@ test("a coded 403 shows the server's message without the generic hint", async ()
   });
   assert.match(message, /HTTP 403 - This key cannot manage the CLI\. Run `heyditto login` or unset DITTO_API_KEY\.$/);
   assert.doesNotMatch(message, /not allowed to perform this action/);
+  const viaError = await failWith(403, { code: "review_billing_required", error: "Add credits to run Review." });
+  assert.match(viaError, /HTTP 403 - Add credits to run Review\.$/);
 });
 
 test("an unexplained 403 keeps the generic hint", async () => {

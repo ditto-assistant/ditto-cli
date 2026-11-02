@@ -60,7 +60,7 @@ export async function apiFetch<T>(
       detail = parsed.message || parsed.error || text;
       // A coded refusal (api_key_limited, a Review permission or billing refusal)
       // carries its own next step; a generic hint would contradict it.
-      explained = typeof parsed.code === "string" && Boolean(parsed.message);
+      explained = typeof parsed.code === "string" && Boolean(parsed.message || parsed.error);
     } catch {
       /* raw body */
     }
