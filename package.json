@@ -39,7 +39,7 @@
   "homepage": "https://github.com/ditto-assistant/ditto-cli",
   "bugs": "https://github.com/ditto-assistant/ditto-app/issues/1212",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "^1.32.0",
     "commander": "^15.0.0",
     "semver": "^7.8.5",
     "smol-toml": "^1.8.0",
