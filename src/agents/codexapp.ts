@@ -194,6 +194,12 @@ async function readMaybe(filePath: string): Promise<string | undefined> {
   }
 }
 
+/** Puts a file back the way it was read: rewrite it, or remove it if it did not exist. */
+async function restoreFile(filePath: string, raw: string | undefined): Promise<void> {
+  if (raw === undefined) await rm(filePath, { force: true });
+  else await writeFile(filePath, raw, { mode: 0o600 });
+}
+
 /** Copies `fromPath` to `toPath` once; never overwrites an earlier backup. */
 async function backupOnce(fromPath: string, toPath: string): Promise<boolean> {
   if ((await readMaybe(toPath)) !== undefined) return false;
@@ -427,6 +433,10 @@ export async function runCodexApp(options: CodexAppOptions): Promise<void> {
   }
 
   if (options.dryRun) {
+    // Without a key the catalog is unknown, so mirror the real run's rule: a
+    // current model is kept when the picker lists it, else the endpoint slug.
+    const currentModel = options.models !== false && options.model === undefined ? topLevelString(configRaw, "model") : undefined;
+    const plannedModel = currentModel ? { model: currentModel, modelIfNotInPicker: defaultModel } : { model: defaultModel };
     process.stdout.write(
       `${JSON.stringify(
         {
@@ -434,7 +444,7 @@ export async function runCodexApp(options: CodexAppOptions): Promise<void> {
           baseUrl,
           codexHome: home,
           write: {
-            [configPath]: { openai_base_url: baseUrl, forced_login_method: "api", model_provider: "openai", model: defaultModel, ...(options.models !== false ? { model_catalog_json: catalogPath } : {}) },
+            [configPath]: { openai_base_url: baseUrl, forced_login_method: "api", model_provider: "openai", ...plannedModel, ...(options.models !== false ? { model_catalog_json: catalogPath } : {}) },
             [authPath]: authKind === "absent" ? "{ OPENAI_API_KEY: <endpoint key> }" : `(replace the existing ${authKind === "chatgpt" ? "ChatGPT" : "API-key"} login; backup kept)`,
           },
           enableModelPicker: options.models !== false,
@@ -457,6 +467,12 @@ export async function runCodexApp(options: CodexAppOptions): Promise<void> {
   if (!key.key) throw new Error("key creation succeeded but no plaintext key was returned");
 
   let modelCatalog: CodexModelCatalog | undefined;
+  let wroteFiles = false;
+  let authBackupKept = false;
+  let configBackupKept = false;
+  // Everything from here to the saved record either completes or is undone:
+  // a failed setup must not leave a new long-lived credential behind, nor a
+  // config.toml pointing at a key that was just revoked.
   try {
     if (options.models !== false) {
       modelCatalog = await fetchCodexModels(baseUrl, key.key);
@@ -467,27 +483,50 @@ export async function runCodexApp(options: CodexAppOptions): Promise<void> {
       if (!modelCatalog.models.some((m) => m.slug === selectedModel)) throw new Error(`model "${selectedModel}" is not in this router's picker; your previous Codex setup is unchanged`);
       newConfig = upsertTopLevelString(newConfig, "model", selectedModel);
     }
+
+    await mkdir(home, { recursive: true, mode: 0o700 });
+    // Back the login up only when it is not codex-app's own: a re-run must not
+    // slide our previous key into the .pre-ditto slot, or --unset would later
+    // "restore" the codex-app login instead of removing it.
+    const authIsOurs = record !== undefined && authKind === "api-key" && authRaw === `${JSON.stringify({ OPENAI_API_KEY: record.key }, null, 2)}\n`;
+    authBackupKept = authKind !== "absent" && !authIsOurs ? await backupOnce(authPath, authBackupPath) : false;
+    configBackupKept = configRaw !== undefined ? await backupOnce(configPath, configBackupPath) : false;
+    wroteFiles = true;
+    if (modelCatalog) {
+      await writeFile(catalogPath, `${JSON.stringify(modelCatalog)}\n`, { mode: 0o600 });
+      await chmod(catalogPath, 0o600);
+    }
+    await writeFile(configPath, newConfig, { mode: 0o600 });
+    await writeFile(authPath, `${JSON.stringify({ OPENAI_API_KEY: key.key }, null, 2)}\n`, { mode: 0o600 });
+    await chmod(authPath, 0o600);
+    await chmod(configPath, 0o600);
+    await updateStoredAuth({
+      codexApp: {
+        endpointId: endpoint.id,
+        endpointSlug: endpoint.slug,
+        keyId: key.id,
+        keyHint: key.keyHint,
+        key: key.key,
+        baseUrl,
+        forcedLogin: "api",
+        modelProvider: "openai",
+        previousModelProvider,
+        model: topLevelString(newConfig, "model"),
+        previousModel,
+        ...(modelCatalog ? { modelCatalog: catalogPath, previousModelCatalog } : {}),
+        previousBaseUrl,
+        previousForcedLogin,
+        wiredAt: new Date().toISOString(),
+      },
+    });
   } catch (err) {
-    // A failed setup must not leave a new long-lived credential behind.
+    if (wroteFiles) {
+      await restoreFile(configPath, configRaw).catch(() => log(`could not restore ${configPath}; the backup is at ${configBackupPath}`));
+      await restoreFile(authPath, authRaw).catch(() => log(`could not restore ${authPath}; the backup is at ${authBackupPath}`));
+    }
     await revokeKey(endpoint.id, key.id).catch(() => log("could not revoke the new setup key; revoke it from the endpoint's Keys page"));
     throw err;
   }
-
-  await mkdir(home, { recursive: true, mode: 0o700 });
-  // Back the login up only when it is not codex-app's own: a re-run must not
-  // slide our previous key into the .pre-ditto slot, or --unset would later
-  // "restore" the codex-app login instead of removing it.
-  const authIsOurs = record !== undefined && authKind === "api-key" && authRaw === `${JSON.stringify({ OPENAI_API_KEY: record.key }, null, 2)}\n`;
-  const authBackupKept = authKind !== "absent" && !authIsOurs ? await backupOnce(authPath, authBackupPath) : false;
-  const configBackupKept = configRaw !== undefined ? await backupOnce(configPath, configBackupPath) : false;
-  if (modelCatalog) {
-    await writeFile(catalogPath, `${JSON.stringify(modelCatalog)}\n`, { mode: 0o600 });
-    await chmod(catalogPath, 0o600);
-  }
-  await writeFile(configPath, newConfig, { mode: 0o600 });
-  await writeFile(authPath, `${JSON.stringify({ OPENAI_API_KEY: key.key }, null, 2)}\n`, { mode: 0o600 });
-  await chmod(authPath, 0o600);
-  await chmod(configPath, 0o600);
   if (authBackupKept) log(`previous login backed up to ${c("bold", authBackupPath)}`);
   if (configBackupKept) log(`previous config backed up to ${c("bold", configBackupPath)}`);
 
@@ -500,26 +539,6 @@ export async function runCodexApp(options: CodexAppOptions): Promise<void> {
       log(`${c("yellow", "could not revoke the previous codex-app key")} …${record.keyHint}; it expires on its own`);
     }
   }
-
-  await updateStoredAuth({
-    codexApp: {
-      endpointId: endpoint.id,
-      endpointSlug: endpoint.slug,
-      keyId: key.id,
-      keyHint: key.keyHint,
-      key: key.key,
-      baseUrl,
-      forcedLogin: "api",
-      modelProvider: "openai",
-      previousModelProvider,
-      model: topLevelString(newConfig, "model"),
-      previousModel,
-      ...(modelCatalog ? { modelCatalog: catalogPath, previousModelCatalog } : {}),
-      previousBaseUrl,
-      previousForcedLogin,
-      wiredAt: new Date().toISOString(),
-    },
-  });
 
   log(`${c("green", "Connected")} Codex Desktop to ${c(["bold", "cyan"], endpoint.slug)}${endpoint.companyId ? " (company router)" : " (personal router)"}.`);
   if (modelCatalog) log(`${modelCatalog.models.length} models ready in the app's model picker. Your API key is saved — no copying needed.`);

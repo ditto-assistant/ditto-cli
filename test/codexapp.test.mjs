@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -385,6 +385,53 @@ for (const fixture of [{ catalogStatus: 503 }, { models: [] }]) {
     } finally { stub.close(); }
   });
 }
+
+test("a write that fails after the key is minted restores config.toml and revokes the unused key", async () => {
+  const stub = await startStub();
+  STUB_BASE = stub.base;
+  const codexDir = mkdtempSync(path.join(os.tmpdir(), "heyditto-codexapp-home-"));
+  const configDir = mkdtempSync(path.join(os.tmpdir(), "heyditto-codexapp-cfg-"));
+  const configPath = path.join(codexDir, "config.toml");
+  const authPath = path.join(codexDir, "auth.json");
+  const original = 'model_provider = "old"\nmodel = "original"\n';
+  const auth = '{"OPENAI_API_KEY":"sk-previous"}';
+  writeFileSync(configPath, original);
+  writeFileSync(authPath, auth);
+  // auth.json stays readable, so setup reaches the write phase: config.toml
+  // is written first, then the auth.json write fails with EACCES.
+  chmodSync(authPath, 0o400);
+  try {
+    const result = await run(["codex-app", "--endpoint", "alpha", "--yes"], codexDir, configDir);
+    assert.equal(result.status, 1, result.stderr);
+    assert.equal(readFileSync(configPath, "utf8"), original, "config.toml restored");
+    assert.equal(readFileSync(authPath, "utf8"), auth, "previous login untouched");
+    assert.equal(stub.mints().length, 1);
+    assert.equal(stub.revocations().length, 1, "unused key revoked");
+    assert.ok(!result.stderr.includes(MINTED_PLAINTEXT));
+  } finally {
+    chmodSync(authPath, 0o600);
+    stub.close();
+  }
+});
+
+test("codex-app --dry-run says a current model is kept only if the picker lists it", async () => {
+  const stub = await startStub();
+  STUB_BASE = stub.base;
+  const codexDir = mkdtempSync(path.join(os.tmpdir(), "heyditto-codexapp-home-"));
+  const configDir = mkdtempSync(path.join(os.tmpdir(), "heyditto-codexapp-cfg-"));
+  const configPath = path.join(codexDir, "config.toml");
+  writeFileSync(configPath, 'model = "glm-5.3-flash"\n');
+  try {
+    const result = await run(["codex-app", "--dry-run"], codexDir, configDir);
+    assert.equal(result.status, 0, result.stderr);
+    const planned = JSON.parse(result.stdout).write[configPath];
+    assert.equal(planned.model, "glm-5.3-flash");
+    assert.equal(planned.modelIfNotInPicker, "alpha");
+    assert.equal(stub.mints().length, 0, "no key minted on dry-run");
+  } finally {
+    stub.close();
+  }
+});
 
 test("adding a top-level provider does not rewrite a nested provider setting", () => {
   const original = '[profiles.other]\nmodel_provider = "other"\n';
