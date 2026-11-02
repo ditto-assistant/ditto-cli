@@ -64,7 +64,7 @@ export async function apiFetch<T>(
       response.status === 401
         ? " (is the saved key valid? run `heyditto login`)"
         : response.status === 403
-          ? " (the key is not allowed to manage inference endpoints)"
+          ? " (your account or key is not allowed to perform this action)"
           : "";
     throw new ApiError(
       `${init.method ?? "GET"} ${path} failed: HTTP ${response.status}${detail ? ` - ${detail.slice(0, 300)}` : ""}${hint}`,
@@ -92,11 +92,16 @@ export interface EndpointActivation {
   url?: string;
 }
 
+export interface RouterFailover { enabled: boolean; model: string; maxCostUsd: number }
+
 export interface InferenceEndpoint {
+  failover?: RouterFailover;
   id: string;
   slug: string;
   name: string;
   model: string;
+  /** The organization the endpoint is filed under; empty for a personal one. */
+  companyId?: string;
   systemPrompt?: string;
   spendPeriod?: string;
   spendLimitTokens?: number | null;
@@ -110,8 +115,13 @@ export interface InferenceEndpoint {
   /** Free-form per-provider settings, including the coding-agent keys. */
   providerOptions?: Record<string, unknown>;
   tools?: string[];
+  /** Router tools this endpoint never runs: names, globs, or class:<tier>. */
+  toolDeny?: string[];
+  /** Native MCP surface: Claude Code's own prompts replace Ditto's approval queue. Manager-only on an org endpoint. */
+  clientApprovals?: boolean;
   modelMode?: string;
   billingMode?: string;
+  providerKeyIds?: string[];
   routingMode?: string;
   streamGranularity?: string;
   contextCompaction?: string;
@@ -135,6 +145,7 @@ export interface InferenceEndpoint {
 
 /** Partial body for POST / PATCH /api/v5/inference/endpoints. */
 export interface EndpointInput {
+  failover?: Partial<RouterFailover>;
   name?: string;
   slug?: string;
   model?: string;
@@ -149,6 +160,7 @@ export interface EndpointInput {
   maxToolRounds?: number;
   modelMode?: string;
   billingMode?: string;
+  providerKeyIds?: string[];
   routingMode?: string;
   streamGranularity?: string;
   contextCompaction?: string;
@@ -167,6 +179,17 @@ export interface EndpointInput {
   modelRoutes?: Record<string, string>;
   aliases?: Record<string, string>;
   providerOptions?: Record<string, unknown>;
+  /** Whole-list replacement; needs endpoint policy authority on org endpoints. */
+  toolDeny?: string[];
+  /** Native MCP surface: Claude Code's own prompts replace Ditto's approval queue. Manager-only on an org endpoint. */
+  clientApprovals?: boolean;
+  /**
+   * Organization the endpoint is filed under; the organization owns and pays
+   * for it. On create it files the new endpoint there; on PATCH it moves the
+   * endpoint, and "" moves it back to the caller's personal context. The
+   * server checks manager rights on both sides of a move.
+   */
+  companyId?: string;
 }
 
 /**
@@ -272,7 +295,14 @@ export async function createEndpoint(input: EndpointInput = {}): Promise<Inferen
 }
 
 export async function updateEndpoint(id: string, patch: EndpointInput): Promise<InferenceEndpoint> {
-  return apiFetch<InferenceEndpoint>(endpointPath(id), { method: "PATCH", body: patch });
+  const body = { ...patch };
+  if (body.providerOptions) {
+    body.providerOptions = { ...body.providerOptions };
+    // The server preserves the latest typed policy under its row lock.
+    // Replaying an options snapshot could undo a concurrent opt-out.
+    delete body.providerOptions.ditto_failover;
+  }
+  return apiFetch<InferenceEndpoint>(endpointPath(id), { method: "PATCH", body });
 }
 
 export async function deleteEndpoint(id: string): Promise<void> {
@@ -803,6 +833,28 @@ export interface Company {
 export async function listCompanies(): Promise<Company[]> {
   const out = await apiFetch<{ companies?: Company[] }>("/api/v5/companies");
   return out.companies ?? [];
+}
+
+export interface CompanyMember {
+  id: string;
+  userUid: string;
+  email?: string;
+  name?: string;
+  handle?: string;
+  role: string;
+  status: string;
+}
+
+export async function listCompanyMembers(companyId: string): Promise<CompanyMember[]> {
+  // The API caps this directory at 2000; callers must treat a full page as possibly incomplete.
+  const out = await apiFetch<{ members: CompanyMember[] }>(`/api/v5/companies/${encodeURIComponent(companyId)}/members?limit=2000`);
+  return out.members;
+}
+
+export function setCompanyMemberRole(companyId: string, memberId: string, role: string): Promise<CompanyMember> {
+  return apiFetch(`/api/v5/companies/${encodeURIComponent(companyId)}/members/${encodeURIComponent(memberId)}`, {
+    method: "PATCH", body: { role },
+  });
 }
 
 /**

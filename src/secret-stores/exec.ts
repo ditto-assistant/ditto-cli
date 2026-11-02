@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Delivery, SecretStore } from "./types.js";
+import { writePrivateKey } from "./local-file.js";
 
 /**
  * Subprocess plumbing shared by every store. Generalized from the original
@@ -129,6 +130,15 @@ function substitute(args: string[], path: string): string[] {
 export function deliver(store: SecretStore, name: string, attempts: Delivery[], value: string): void {
   const failures: string[] = [];
   for (const attempt of attempts) {
+    if (attempt.kind === "local-file") {
+      try {
+        writePrivateKey(attempt.path, value);
+        return;
+      } catch (error) {
+        failures.push(`${attempt.note}: ${error instanceof Error ? error.message : "private file delivery failed"}`);
+        continue;
+      }
+    }
     const payload = attempt.payload ? attempt.payload(value) : value;
     const res = attempt.kind === "stdin" ? runStdin(store, attempt, payload) : runPath(store, attempt, payload);
     if (res.missing) {
@@ -138,7 +148,7 @@ export function deliver(store: SecretStore, name: string, attempts: Delivery[], 
     const detail = trimmedStderr(res);
     failures.push(`${attempt.note}: ${detail || `exit ${res.status}`}`);
   }
-  throw new Error(`${store.bin} could not store ${name} — ${failures.join("; ")}`);
+  throw new Error(`${store.id === "file" ? store.label : store.bin} could not store ${name} — ${failures.join("; ")}`);
 }
 
 function runStdin(store: SecretStore, attempt: Delivery & { kind: "stdin" }, payload: string): RunResult {

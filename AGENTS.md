@@ -10,8 +10,10 @@ Every commit subject AND every PR title MUST match conventional commits:
 | --- | --- |
 | `feat: <…>` | minor bump (1.x.0) |
 | `fix: <…>` | patch bump (1.1.x) |
-| `feat!: <…>` or body containing `BREAKING CHANGE:` | major bump (x.0.0) |
+| `feat: <…>` with a `BREAKING CHANGE:` commit footer | major bump (x.0.0) |
 | `chore:`, `docs:`, `refactor:`, `test:`, `ci:`, `build:`, `style:`, `perf:` | no release |
+
+The installed analyzer did not release a `feat!:` title alone in PR #121. Put `BREAKING CHANGE:` in the squash commit body for a major release.
 
 Subject is lowercase, verb-first, no trailing period.
 
@@ -62,4 +64,4 @@ Never commit `dist/` (it's in `.gitignore`; semantic-release rebuilds via `prepa
 
 ## Authentication for live testing
 
-`DITTO_API_KEY` is required for any command that hits the MCP server. Get one at <https://app.heyditto.ai/mcp/newkey> or run `ditto login`. Never commit a key.
+`DITTO_API_KEY` is required for any command that hits the MCP server. Get one at <https://app.heyditto.ai/mcp/newkey> or run `heyditto login`. Never commit a key.

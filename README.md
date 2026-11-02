@@ -1,5 +1,31 @@
 # Ditto CLI
 
+### Personal BYOK Router endpoints and local inference keys
+
+```sh
+heyditto endpoints provider-keys --output json
+heyditto endpoints models gm --output json
+heyditto endpoints create --name "Infinite Disk" --slug infinite-disk \
+  --model gm/gpt-6-luna --billing-mode byok --provider-key <saved-key-UUID>
+heyditto endpoints set infinite-disk --recall off --record off --record-trace off
+heyditto endpoints keys create infinite-disk --key-file /absolute/private/router-key --yes
+```
+
+Provider-key discovery returns only your personal vault's selection metadata,
+never raw credentials. `--provider-key` is repeatable (or comma-separated),
+replaces the selected list, and never accepts an empty list as an implicit
+"all keys". `byok` does not fall back to Ditto-funded providers. Endpoints created
+without an organization are personal; an existing saved default is unchanged
+unless you pass `--default`.
+
+`--key-file` (also `--store file --secret /absolute/private/router-key`) requires
+an existing owner-only 0700 parent directory. It creates a new 0600 file without
+overwriting existing files or following symlinks. No plaintext key is printed,
+put in argv, or returned in JSON. Delivery failure revokes the newly minted key.
+Use an endpoint key in your local app, never your management or provider key.
+On Windows use one of the external secret managers instead. Router discovery
+requires the matching server capability; an older server fails explicitly.
+
 `@heyditto/cli` — save, search, fetch, and traverse the [Ditto](https://heyditto.ai) memory graph from the shell.
 
 ```bash
@@ -17,28 +43,93 @@ heyditto subjects "memory architecture" --top-k 5
 ```bash
 npm install -g @heyditto/cli
 # or one-shot via npx
-npx -y @heyditto/cli search "what did I say about X"
+npx -y --package @heyditto/cli heyditto search "what did I say about X"
 ```
 
-The package installs two equivalent binaries: `ditto` and `heyditto`. They run the same CLI — use whichever you prefer. We recommend **`heyditto`** on macOS because Apple ships `/usr/bin/ditto` (a file-copy utility) that can shadow the npm CLI.
+The package installs the `heyditto` command. On macOS, `ditto` is Apple’s file-copy utility and is not installed by this package. Scripts that used the older `ditto` alias must switch to `heyditto`.
 
-### macOS: name collision with Apple's `/usr/bin/ditto`
+The published npm package is **`@heyditto/cli`**. Use the installed `heyditto`
+binary or the scoped `npx --package` form above; the unscoped `heyditto` npm name
+is not our published package.
 
-On macOS, Apple ships `/usr/bin/ditto` (a file-copy utility). On a default `PATH` that puts `/usr/bin` ahead of `/opt/homebrew/bin`, plain `ditto` will run Apple's tool instead of this one — which produces confusing errors like `unrecognized option '--output'`.
+### Occasional background updates
 
-Two ways to disambiguate:
+Eligible global npm installations check for a newer CLI about every six hours
+when invoked. The check and download run quietly in a finite background worker;
+your current command keeps running its selected version. A fully verified update
+takes effect on a later invocation. Help, version, offline and review `--preview`
+commands do not start a network check. JSON stdout is unchanged.
 
-```bash
-# 1. Use the alias bin shipped by this package:
-heyditto status
-
-# 2. Or check which 'ditto' binary your shell resolves first:
-type -a ditto
-# /usr/bin/ditto                    ← Apple's tool
-# /opt/homebrew/bin/ditto           ← @heyditto/cli (use this)
+```sh
+heyditto self-update status --output json
+heyditto self-update check             # verify and activate for the next invocation
+heyditto self-update disable
+heyditto self-update enable
+heyditto self-update pin               # retain the currently selected version
+heyditto self-update unpin
+DITTO_CLI_AUTO_UPDATE=0 heyditto search "a memory"  # suppress this background check
+DITTO_CLI_PINNED=1 heyditto --version   # run the installed package, bypassing cached updates
 ```
 
-You can also reorder your `PATH` so the npm global bin comes before `/usr/bin`, or invoke `@heyditto/cli` directly via its full path.
+`self-update check` uses the same bounded verification path even when automatic
+checks are disabled, and explicitly activates the verified update for the next
+invocation. A persistent pin still prevents it from installing another
+version. `heyditto --no-auto-update <command>` also suppresses a background check;
+`DISABLE_AUTOUPDATER=1` is supported. Disabling checks retains a validated version
+already selected by an earlier launch (or an explicit manual check). It ignores
+new background candidates, including a worker that finishes publishing after
+disable has acknowledged. Running commands keep their selected version. A pin
+selects its retained version even if a newer update has downloaded concurrently.
+All `self-update` controls run the pinned, previously activated or bundled
+version; they never adopt a staged candidate before executing the control.
+`status` only inspects. `enable` and `unpin` allow a later ordinary launch to
+activate a candidate; `check` can activate only after its explicit manual action.
+An ordinary launch that already selected a version under an enabled policy may
+finish and record that selection after a concurrent disable returns. Disable
+does not restart or undo commands already in progress.
+
+Manual checks return their own worker result in `manualResult`, separately from
+shared last-attempt health. If another worker is active, `check` reports `busy`
+and exits 75; retry it after that worker finishes. A missing or incomplete worker
+result exits nonzero. A concurrent change to shared health cannot turn a blocked
+manual request into a successful check.
+
+Homebrew, Nix and operating-system package locations, project installs, npm
+scripts, CI and ephemeral `npx` executions keep their package-manager version;
+the updater does not replace their files or override their ownership. Historical
+`npm install -g @heyditto/cli@<version>` intent is not recoverable reliably from
+installed npm metadata. Use the persistent pin or `DITTO_CLI_PINNED=1` when that
+global installation must remain exact. Older CLI versions need one normal npm
+upgrade before they have this updater.
+
+Updates are stored under the CLI config directory's `updates/` folder, with
+separate immutable version directories, an atomic candidate pointer and
+append-only activation markers for each
+OS, CPU architecture and libc target. Enable/disable is one shared user
+preference; pins and cached bundles are target-specific. Each control writes its
+own atomic preference file, so concurrent pin and disable commands cannot
+overwrite each other's intent. Relative
+`DITTO_CONFIG_DIR` values are resolved before starting a worker. Every
+root and locked dependency archive is restricted to the public npm registry and
+checked against SHA512 integrity; archive links, unsafe paths and special files
+are rejected. No npm configuration, credentials, project files, install scripts,
+daemon, sudo or command restart is used. Compatible prebuilt PTY packages and
+ordinary executable bits are retained for coding-agent commands.
+
+Each attempt is bounded to 60 seconds plus five seconds of worker cleanup,
+128 MiB downloaded, 512 MiB unpacked and
+50,000 files. Cached versions are retained so active commands can still read
+them; at 2 GiB per target, the updater pauses for manual cleanup instead of deleting a
+potentially active version. Immutable attempt leases also have a metadata cap.
+A crashed attempt blocks at most its six-hour window and never steals another
+worker's live lease. `self-update status` reports the bundled, selected and
+cached versions, eligibility, policy and last result. Invalid selection metadata
+falls back before execution; a cached CLI execution failure is quarantined for
+the next invocation and **never retries the command**.
+
+### macOS command name
+
+Use `heyditto` for the Ditto CLI. Apple’s `/usr/bin/ditto` is a separate file-copy utility. If an older CLI installation left a `ditto` alias, remove that alias or upgrade the package so it no longer shadows Apple’s command.
 
 ## Auth
 
@@ -80,10 +171,8 @@ init without `--name`, the name defaults to `agent` and every memory is
 labeled `agent` — generic and hard to tell apart from other agents.
 
 So: use the agent's own name, or a name the user has already chosen, and set it
-up front. Renaming after init is not yet supported from the CLI (it currently
-requires backend support — see
-[ditto-assistant/backend#1199](https://github.com/ditto-assistant/backend/issues/1199)),
-so picking the right name at init avoids a stuck label.
+up front. Renaming after init is not yet supported from the CLI, so picking the
+right name at init avoids a stuck label.
 
 ### Humans: sign in through the browser
 
@@ -173,6 +262,20 @@ heyditto search --help
 heyditto graphs add --help
 ```
 
+### `feedback`
+
+Submit a bug report or feature request to the Ditto team. Use a concise report
+without memories, private user content, credentials, or raw tool responses.
+
+```sh
+heyditto feedback "The search tool timed out twice" --title "Search timeouts" --tool search_memories
+heyditto feedback --file ./report.txt --title "Missing capability" --include-recent-traces
+```
+
+Recent request diagnostics are omitted by default. The flag opts in for the
+current session; start one with `heyditto session new` to group CLI calls.
+The command submits immediately and reports any server-side refusal.
+
 ### `save`
 
 Save a document or note to the user's memory base.
@@ -196,7 +299,59 @@ heyditto search "launch notes" --include-public --filter-username peyton
 
 ### `review`
 
-Manage Ditto Review and follow reviews from either `ditto` or `heyditto`.
+#### Review a working diff before opening a PR
+
+```sh
+heyditto review local --preview
+heyditto review local --staged --profile quick --org omniaura
+heyditto review local --base main --context-file .tmp/task.md --output json
+heyditto review local-status <run-id> --org omniaura
+heyditto review local-cancel <run-id> --org omniaura
+```
+
+`local` uses your existing login and selected organization, and the current
+checkout's GitHub origin identifies its configured Review repository. Override
+that mapping with `--repository owner/name`, or the checkout with `--directory`.
+The backend must support local Review runs and the repository must be enabled.
+The same permissions and spending policy as manual PR reviews apply.
+
+The default reviews staged, unstaged and eligible untracked changes. `--staged`
+reviews the index bytes, including when a file also has unstaged edits.
+`--base main` includes branch and working changes since the merge base with
+`main`. It cannot be combined with `--staged`. No commit, push, PR or index
+mutation is required.
+
+`--preview` is offline: it shows the selected paths, snapshot digest, file and
+byte counts, exclusions and omitted context without logging in or uploading.
+Running without `--preview` uploads the selected source changes and bounded
+surrounding tracked source to Ditto Review, which uses the existing independent
+review and verification engine. The immutable snapshot is limited to 16 MiB of
+decoded source and 4096 files per tree. Every eligible changed file must fit;
+nearby surrounding files fill the remaining budget. Binary files, symlinks and
+submodules are recorded as skipped rather than followed or executed.
+Git paths must be valid UTF-8. Unsupported path encodings abort capture before
+upload rather than changing path identity or silently omitting changes.
+
+Choose `quick` (default), `standard` or `deep`. The service returns the effective
+time and budget ceilings; queue and capture time are additional. These profiles
+are effort policies, not measured speed guarantees. `--timeout` bounds the
+whole CLI operation and requests cancellation when it expires. Ctrl-C also
+requests cancellation; use the printed run ID to inspect or cancel a run later.
+An uncertain admission is identified by its request ID and is never retried
+automatically. Use the printed recovery command with `--request-id <uuid>` to
+recover that same admission. The server reuses the original run for identical
+input and refuses changes to the source snapshot, profile or context under that
+ID, so this recovery does not start another paid attempt.
+
+Readable and JSON results identify the reviewed snapshot, findings, coverage,
+cost receipts and whether the current working tree still matches. Partial
+reviews return a nonzero exit code. Bounded surrounding context is stated
+explicitly; "no findings in reviewed scope" is not an assertion that the
+checkout is bug-free. Results are unpublished local reviews and post nothing
+to GitHub. Organization learning-memory and complete hosted repository-policy
+parity remain separate capabilities and are not implied by this command.
+
+Manage Ditto Review and follow reviews with `heyditto`.
 Commands use your selected organization (`orgs use`) or `--org`; without one,
 they use your personal workspace. Repositories must already be set up for
 Review. Workspace membership and manager permissions are enforced by the API.
@@ -212,6 +367,16 @@ heyditto review watch <run-id> --org omniaura --interval 10 --timeout 3600
 heyditto review retry <run-id> --org omniaura
 heyditto review cancel <run-id> --org omniaura
 ```
+
+Skip entire PRs from the console's repository settings or a JSON policy file:
+
+```sh
+heyditto review set owner/repo --skip-rules-file rules.json --org omniaura
+heyditto review repos --org omniaura --output json
+heyditto review set owner/repo --clear-skip-rules --org omniaura
+```
+
+The JSON object accepts `headBranches`, `baseBranches`, `titles`, `authors`, and `labels` arrays, plus `bots` (boolean). For example, `{"authors":["dependabot[bot]"],"titles":["chore(i18n):*"],"labels":["skip-review"]}`. Any match excludes the PR. `*` spans any text including slashes; `?` matches one character; brackets and all other characters are literal. Authors and labels ignore case; branches and titles match case. Each list permits 50 patterns of up to 200 UTF-8 bytes. Empty rules skip nothing, and bots are included by default. Rules skip automatic reviews. An explicit `heyditto review start`, console Review now/retry, or authorized `@ditto review` request overrides skip rules for that review, without changing the saved policy. Settings writes preserve the policy and use the repository revision to refuse concurrent edits. This requires a backend that returns `skipRules`; an unsupported backend is reported as a failed save.
 
 `start` reviews the PR's current head using the repository's saved budget and
 settings. Starting a previously completed head requests another paid attempt.
@@ -463,6 +628,7 @@ Options shared by both commands:
 | `--session <id>` | reuse a Ditto session id so traces land in an existing thread |
 | `--resume [id]` / `-c, --continue` | resume a local session (`heyditto sessions`) / the agent's most recent conversation. Claude also takes a Claude session id or title here, including sessions started in Claude Desktop or plain `claude`, and runs in the directory that session ran in; with no value, a terminal gets a searchable picker. Claude's own `-r` / `--resume` / `-c` after `--` do the same. |
 | `--yolo` / `--yellow` / `--plan` | bypass permissions / auto-accept edits / plan mode (Claude only) |
+| `--mcp` / `--no-mcp` | attach the endpoint's tools to Claude Code as its own MCP servers, or keep them on the router (default: the endpoint's `claude_tool_surface`, else MCP) |
 | `-p, --prompt <text>` | headless run: `claude -p` or `codex exec` |
 | `-m, --model <id>` | model to request (default: the agent's own model id passes through and the endpoint routes it) |
 | `-w, --worktree [name]` | run inside `<repo>/.worktrees/<name>` on a branch of that name; `.worktrees/` is added to `.gitignore` |
@@ -474,21 +640,46 @@ and Codex's own options keep working.
 
 How the wiring works:
 
+- **Every launch** names its harness and release to the router:
+  `X-Ditto-Harness: claude|codex` and `X-Ditto-Harness-Version` with the
+  version `<harness> --version` reports, exactly as printed (a pre-release
+  stays a pre-release). The router serves that release's own vendored system
+  prompt and compaction instruction. When the version cannot be read, the
+  header is left out and the router falls back to the User-Agent; a parent
+  `heyditto` session's version is never passed on to a child launch.
 - **Claude Code** gets `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` (a bearer
   token, which skips Claude's "use this API key?" prompt) and
-  `ANTHROPIC_CUSTOM_HEADERS` with the session id and harness headers, merged
-  into any custom headers you already set. Any inherited `ANTHROPIC_API_KEY`
-  is removed from the child environment.
+  `ANTHROPIC_CUSTOM_HEADERS` with the session id. Any inherited
+  `ANTHROPIC_API_KEY` is removed from the child environment.
+  With `--no-mcp`, router tools run on the server, so Claude Code's own
+  permission rules never see them. `permissions.deny` entries for `mcp__ditto__<tool>` (globs allowed;
+  a bare `mcp__ditto` denies them all) in your user, project or local
+  `settings.json` are forwarded as `X-Ditto-Tool-Deny`, and the router refuses
+  those tools for the session. The header can only add denials.
+- **Claude Code** gets the endpoint's tools as its own MCP servers by default: `ditto` for Ditto's built-ins, plus one server per
+  connected app or MCP server (`ditto-github`, `ditto-jira`, …). Claude Code
+  discovers them with its own ToolSearch and calls them natively. Every call
+  still runs on Ditto (`/v1/mcp/<server>`) with the credentials Ditto holds and
+  behind the endpoint's approval gate and deny rules, and the router is told
+  not to offer the same tools again. The session key reaches the MCP headers
+  as `${DITTO_ROUTER_MCP_KEY}`, never argv or disk. Who asks before a gated
+  call is the endpoint's choice:
+
+  | Endpoint | What happens to a gated call |
+  | --- | --- |
+  | default | Ditto holds it for approval; Claude Code does not ask a second time |
+  | `client_approvals = true` | Claude Code asks; `--yolo` runs it without asking. Deny rules still refuse |
+
+  `client_approvals` hands approval to whoever runs the session, so only an
+  organization's managers can turn it on for an org endpoint. An endpoint
+  with no tools attaches nothing, and one the MCP surface cannot serve falls
+  back to the router's tools. `--no-mcp` keeps the tools on the router (Code
+  Mode or injected tools, as described above) for one session, and
+  `claude_tool_surface = "router"` in an endpoint profile makes that the
+  endpoint's default.
 - **Codex** speaks the Responses API only, so the endpoint is injected as a
   `ditto` model provider via `-c` overrides (nothing is written to
-  `~/.codex/config.toml`) with the key in `DITTO_INFERENCE_API_KEY` and the
-  session id and harness headers in the provider's `http_headers`.
-- Every inference request names its harness in `X-Ditto-Harness` (`claude` or
-  `codex`) and, when `claude --version` / `codex --version` reports one, the
-  installed version in `X-Ditto-Harness-Version` (for example `2.1.296`). The
-  version is read once per launch; if it cannot be read, that header is left
-  out rather than guessed. The router uses them to adapt requests to the
-  harness release.
+  `~/.codex/config.toml`) with the key in `DITTO_INFERENCE_API_KEY`.
 
 ### `codex-app`
 
@@ -528,7 +719,8 @@ you to an endpoint's page there; set `DITTO_DEVELOPER_BASE` to point elsewhere):
 
 ```
 heyditto endpoints [--set-default <slug>] [--clear-default]   list (* = default)
-heyditto endpoints create [--name <n>] [--slug <s>] [--model <id>] [--default]
+heyditto endpoints create [--name <n>] [--slug <s>] [--model <id>] [--org <org>] [--default]
+heyditto endpoints move <endpoint> (--org <org> | --personal)   change who owns and pays for it
 heyditto endpoints show <endpoint>
 heyditto endpoints use <endpoint>          make it the default
 heyditto endpoints pick                    choose the default interactively
@@ -568,6 +760,9 @@ can change. `heyditto endpoints show <endpoint>` prints all of it back, and
 | `--tool-compression on\|off` | swap harness tool descriptions for stored condensed rewrites |
 | `--precompact-at <tokens>` | start a background compaction snapshot at this prompt size; `0` = off |
 | `--routing cheap\|fast\|balanced` | how a provider is picked for a model |
+| `--failover on\|off` | opt into fallback; off by default, sticky for the session |
+| `--failover-model <id\|same>` | use a different, potentially cheaper fallback model, or keep the same model |
+| `--failover-max-cost <usd>` | required ceiling for cold-cache input and bounded output across fallback attempts in each request; zero never means unlimited |
 | `--model-mode default\|passthrough` | what happens to a request model that is neither alias, route nor provider id |
 | `--billing-mode ditto\|byok\|both` | whose provider keys pay for requests |
 | `--stream-granularity final\|tool\|full` | how much server-side tool activity the stream shows |
@@ -783,6 +978,19 @@ How it works:
   dialog or `AskUserQuestion` is forwarded to the app with its options; the
   answer is typed back as the option's hotkey (or as text). Codex exposes no
   hook for its approval dialogs, so those still need the keyboard.
+- Claude Code terminal hosts advertise prompt delivery modes separately from
+  Stop. Normal busy sends remain in the CLI's FIFO; native keyboard activity
+  observed through Claude hooks also holds that FIFO until its Stop hook. Explicit `deliveryMode:
+  "steer"` bypasses that FIFO and submits the prompt with native Ctrl+Enter;
+  queued prompts remain queued. Escape still performs the independent Stop.
+  After the first successful steer, Claude Stop hooks remain uncorrelated for
+  the rest of that session. Remote receipts and later local keyboard activity
+  therefore use the existing quiet fallback (eight seconds by default), which
+  can delay completion receipts and queue draining. Physical cancellation and receipt timing are
+  separate. Headless and other harnesses reject steering. MCP Channels also
+  rejects forced steering and interruption; Claude schedules its notifications,
+  which does not establish a host FIFO or immediate-delivery guarantee.
+
 - **Headless mode** runs one `claude -p --resume <id> --output-format
   stream-json` / `codex exec resume --last` per turn, prints a compact progress
   line per event, and reports `turn.finished {exitCode}`. Ctrl+C finishes the
@@ -887,6 +1095,23 @@ Recover any time with `heyditto teleport pull <capsule> <path>`.
 After pulling, reinstall Node dependencies that were removed during offload;
 `node_modules` is not stored in the capsule.
 
+## Archive
+
+Coding-agent session history and local recovery data only grow, and they
+usually live on one laptop with no backup. `teleport archive` backs them up to
+an archive capsule. It uses no capsule slot and no Teleport quota, and its bytes
+are billed as storage on your plan.
+
+```sh
+heyditto teleport archive                     # ~/.claude/projects, ~/.codex/sessions, infinite-disk recovery data
+heyditto teleport archive --source notes=~/notes --name my-archive
+heyditto teleport archive-restore claude-code ./restored   # never overwrites
+```
+
+Each source is one tar stream cut into content-defined chunks, with each chunk
+compressed on its own. Re-running uploads only the chunks that changed, so a
+nightly run after appending to a few sessions sends a few megabytes.
+
 ## Storage mirrors
 
 Ditto stores capsules redundantly on its own storage. You can also bring your
@@ -962,7 +1187,76 @@ heyditto repo init               # scaffold .ditto/config.toml + .ditto/mise.tom
 heyditto repo validate           # exit 1 on any problem, naming the file and key
 heyditto repo show               # effective document with the layer each table came from
 heyditto teleport plan [path]      # what a push would capture, per project, with byte estimates
+heyditto repo apply [--dry-run]  # make your Router endpoints match .ditto/endpoints/*.toml
 ```
+
+### Router profiles
+
+A `.ditto/endpoints/<name>.toml` is a Router profile checked into the repository:
+model, routing, tools, and the Claude Code or Codex system prompt, which is read
+from a file next to it. `repository.default_endpoint` in `.ditto/config.toml`
+names the profile that `heyditto claude` / `codex` use when no `--endpoint` is
+given, from anywhere inside the repository. `--endpoint` always wins.
+
+```toml
+# .ditto/endpoints/dev.toml
+managed = true
+name = "dev"
+slug = "ditto-dev"                       # the endpoint slug within its owner
+model = "openai/gpt-6.1-sol"
+[settings]
+owner = "@omniaura"                      # or "personal" (the default)
+model_mode = "passthrough"
+code_mode = true
+kind_routes = { aside = "z-ai/glm-5.3-flash" }
+claude_prompt = { file = "../prompts/claude.md", mode = "replace" }
+```
+
+`owner = "@<org>"` targets that organization's endpoint, so you must be a member
+who can manage it. `owner = "personal"` creates the endpoint in your own account,
+billed to you, so anyone who clones the repository gets the same setup.
+`heyditto repo apply` creates the endpoint when it is missing and otherwise
+changes only the fields that differ. Settings the file does not name, such as a
+tool list curated in the console, are left alone. An unknown setting is an
+error, not a no-op. Edit the prompt by editing its file and running
+`heyditto repo apply`. `heyditto endpoints set <slug> --claude-prompt @file`
+still works for a one-off change, but the next apply returns the endpoint to
+what the repository says.
+
+Settings: `owner`, `claude_prompt` / `codex_prompt` (`file`, `mode`,
+`autoupdate`), `system_prompt`, `model_mode`, `routing_mode`, `billing_mode`,
+`stream_granularity`, `context_compaction`, `result_compression`,
+`speculative_compaction`, `tool_compression`, `code_mode`,
+`precompact_at_tokens`, `max_tool_rounds`, `memory_depth`, `recall`, `record`,
+`record_trace`, `record_attachments`, `trace_retention_days`, `batch`,
+`batch_max_requests`, `tools`, `tool_approval_mode`, `auto_approve_tools`,
+`tool_deny`, `claude_native_tool_blocks`, `required_connections`, `kind_routes`, `model_routes`,
+`subagent_routes`, `aliases`, `failover`.
+
+Failover is off unless explicitly enabled. For example, a repository profile can
+set `failover = { enabled = true, model = "openai/gpt-5.6-luna", max_cost_usd = 0.25 }`.
+The equivalent command is `heyditto endpoints set <slug> --failover on
+--failover-model openai/gpt-5.6-luna --failover-max-cost 0.25 --yes`.
+It uses only the endpoint's permitted provider keys and billing mode. Switching
+may refill the prompt cache, so the Router checks a conservative cold-cache quote
+before sending the request. Missing pricing, an unbounded cost, or a quote above
+the cap stops fallback. The chosen provider and model stay pinned for normal
+turns and compaction, across backend restarts, until a new session (or seven days
+of inactivity). The cap applies to each request on the fallback, not the session
+total. Endpoint/key spend limits still apply separately. A session identifier is
+required for fallback; Claude Code and Codex supply one automatically.
+
+`tool_deny` lists router tools the endpoint never runs, whatever a client asks:
+tool names, globs such as `"gmail__send_*"`, or a class (`"class:gated"`,
+`"class:write"`). Denied tools are hidden from the model, and a call to one is
+refused. On an organization endpoint, changing it needs endpoint policy
+authority.
+
+`claude_native_tool_blocks = true` writes each router tool call and its result
+into Claude Code's own transcript (`server_tool_use` / `mcp_tool_result`), so
+the router rebuilds earlier turns from the transcript instead of its memory, and
+a deploy no longer loses them. Claude Code does not draw these blocks in its live
+view; they appear in the session file and in tools that read it.
 
 Layers: workspace `.ditto/` (a parent folder of many repos) < repository `.ditto/` <
 ignored `.ditto/local.toml` < flags. Secrets are never literals: use `secret://`
@@ -976,3 +1270,92 @@ project and path: a directory named `build` is only excluded under a project who
 says so. Tracked artifact directories are flagged rather than claimed excluded.
 `heyditto offload` refuses to delete a folder when unrelated files, unknown projects or
 escaping symlinks beneath it would be lost.
+
+### Native Claude inference and remote delivery
+
+`heyditto claude` keeps using Ditto Router for inference. `--mcp` changes
+how tools are attached; it does not change the inference provider.
+
+Use your native Claude Code account while attaching only the endpoint's selected
+MCP tools:
+
+```sh
+claude auth login
+heyditto claude --mcp-only --endpoint my-tools
+```
+
+The CLI terminal bridge remains the default remote transport. The launch prints
+a direct Ditto chat link, and live launches are listed by harness in the app's
+Apps view, with Router or MCP-only labels and device presence. MCP-only launches
+are saved under Claude Code in Main Memory; the endpoint supplies tools with its
+existing deny rules and approvals. The endpoint credential is never used for
+native model inference. Missing MCP configuration fails without switching to
+Router inference.
+
+For Claude Code's Channels research preview:
+
+```sh
+heyditto claude --mcp-only --endpoint my-tools --remote-transport channels
+```
+
+This attaches a launch-scoped local stdio MCP server declaring `claude/channel`
+and explicitly selects it using Claude's development-channel flag. Claude shows
+its own opt-in prompt; organization policy must also permit Channels. A regular
+MCP tools connection alone does not enable inbound prompts. Keep a supported,
+current Claude Code version and native account signed in.
+
+The adapter pushes `notifications/claude/channel` with a turn ID. A transport
+write is not a model receipt: the session stays awaiting receipt until Claude
+calls `acknowledge`, and finishes only after `reply`. The reply is shown in the
+remote composer. Native local conversation history remains in Claude Code;
+this mode does not proxy model requests or mirror its entire transcript.
+
+Channels supports prompt text and attachments. Use the CLI transport for slash
+commands, remote permission answers, interruption and Teleport checkpoints;
+Channels cannot perform those terminal operations. Senders authenticate through
+the same owned-session host bridge as CLI remote control. Redelivery of a turn
+ID does not inject a second prompt.
+
+Claude Code launch defaults can be saved on an endpoint in the developer console
+or in a repository endpoint profile:
+
+```toml
+[settings]
+claude_inference = "native" # native Claude account; "router" uses Ditto Router
+claude_remote_transport = "channels" # "cli" uses the terminal bridge
+```
+
+`heyditto claude` reads the repository's default endpoint profile; `--endpoint`
+selects the cloud profile directly. Repository launch settings override cloud
+settings without requiring `repo apply`; `repo apply` also saves them to the
+cloud. Explicit `--mcp-only`, `--no-mcp-only`, and `--remote-transport` flags
+win for one launch. Resuming retains the previous session's choices. Channels
+requires interactive native Claude Code, an eligible signed-in account and an
+organization that allows Channels. The CLI attaches `ditto-remote` and adds the
+development channel flag in one launch; Claude's experimental-channel
+confirmation still appears. Router inference defaults to the CLI bridge.
+
+Channel distribution and approval: [Claude Code channel approval plan](docs/claude-channel-approval.md).
+
+### Organization member access
+
+Use explicit organization scope when inspecting or changing access:
+
+```sh
+heyditto orgs members --org your-team --output json
+heyditto orgs allowance @teammate --org your-team --output json
+heyditto orgs set-role @teammate member --org your-team --expected-role viewer --dry-run
+heyditto orgs set-role @teammate member --org your-team --expected-role viewer
+```
+
+`allowance` reads your own allowance when the member is omitted. Current org managers can inspect another member by exact id, email or handle. It uses Ditto MCP, exposes no company balance or purchase history, and changes no budget. MCP refusals exit with an error.
+
+`set-role` resolves exactly one member, sends only the role, and reports the previous role. `--expected-role` is a client preflight, not an atomic compare-and-set. Owner/admin authorization and last-owner/last-manager protections are enforced by the backend. Reverting a role uses the same command with the reported previous role and current authorization. Directory listing is capped at 2000 rows and reports possible truncation. Role changes refuse a directory at that cap, since an exact name lookup cannot be guaranteed complete. These commands need a full account CLI key and a backend that admits the member routes; narrowed space/tool/thread keys are refused.
+
+
+Stop also covers a steering command that races its server enqueue. Unknown
+cancellation IDs are retained for 5 minutes (at most 256 entries) in the current
+CLI session and cancel only the matching later steer. They do not cancel normal
+queued prompts or interrupt unrelated current turns. Repeated exact Stop frames
+send one physical interrupt. This intent does not survive a fresh CLI process;
+steering is not automatically replayed offline.

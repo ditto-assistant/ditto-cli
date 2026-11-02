@@ -6,6 +6,7 @@ import path from "node:path";
 import { createInterface } from "node:readline/promises";
 import {
   ApiError,
+  apiFetch,
   type InferenceEndpoint,
   type InferenceKey,
   type SelectedEndpoint,
@@ -17,15 +18,19 @@ import {
   revokeKey,
 } from "../api.js";
 import { openInBrowser } from "../browser.js";
-import { apiBaseURL, configDir, endpointURL, resolveApiKey } from "../config.js";
+import { apiBaseURL, appBaseURL, configDir, endpointURL, resolveApiKey } from "../config.js";
 import { deviceLogin } from "../device-login.js";
 import { formatActivation } from "../endpoint-format.js";
 import { readStoredAuth, saveLogin, updateStoredAuth } from "../store.js";
+import { findProfileEndpoint, repoDefaultProfile } from "../dittoconfig/profiles.js";
 import { err as c } from "../ui.js";
 import { holdNotesForTui, type NoteOptions, releaseNotes, writeNote } from "../terminal-note.js";
+import { claudeDittoDenyRules } from "./claude-deny.js";
+import { type ClaudeMcpAttachment, claudeMcpAttachment, fetchMcpCatalog, mcpApprovalNote } from "./claude-mcp.js";
 import { liftResumeFlags, planClaude } from "./claude.js";
 import { resolveClaudeResume, transcriptCwd } from "./claude-resume.js";
-import { type ClaudeTranscript, findTranscriptById, listTranscriptsIn } from "./claude-transcripts.js";
+import { type ClaudeTranscript, findTranscriptById, isUuid, listTranscriptsIn } from "./claude-transcripts.js";
+import { watchClaudeSessionTitle } from "./claude-title-sync.js";
 import { planCodex } from "./codex.js";
 import { readHarnessVersion } from "./harness-headers.js";
 import { ensureGrokHome, planGrok } from "./grok.js";
@@ -82,9 +87,50 @@ export interface LaunchOptions {
    * `claude -p` / `codex exec` turn in the session's thread until Ctrl+C.
    */
   headless?: boolean;
+  /**
+   * Claude only: attach the endpoint's tools as Claude Code MCP servers
+   * (`--mcp`) or keep them on the router (`--no-mcp`). Unset follows the
+   * endpoint's `claude_tool_surface` option, else native MCP.
+   */
+  mcp?: boolean;
+  mcpOnly?: boolean;
+  remoteTransport?: "cli" | "channels";
+}
+
+/** Explicit flags (or resumed choices) win over repo/cloud launch defaults. */
+export function resolveClaudeLaunchDefaults(options: LaunchOptions, defaults: Record<string, unknown> = {}): LaunchOptions {
+  const mcpOnly = options.mcpOnly ?? (defaults.claude_inference === "native");
+  const channelsUsable = !options.headless && remoteMode(options) === "tui";
+  const remoteTransport = options.remoteTransport ?? (mcpOnly && channelsUsable && defaults.claude_remote_transport === "channels" ? "channels" : "cli");
+  return { ...options, mcpOnly, remoteTransport };
 }
 
 const DRY_RUN_KEY = "ditto_inf_<minted-at-launch>";
+
+/**
+ * `--mcp` / `--no-mcp`, else the endpoint's `claude_tool_surface`, else native
+ * MCP: Claude Code gets an endpoint's tools as its own servers unless the
+ * endpoint keeps them on the router (`claude_tool_surface = "router"`).
+ */
+export function wantsMcp(options: Pick<LaunchOptions, "mcp">, endpoint: Pick<InferenceEndpoint, "providerOptions">): boolean {
+  if (options.mcp !== undefined) return options.mcp;
+  return endpoint.providerOptions?.claude_tool_surface !== "router";
+}
+
+/** Someone chose native MCP for this launch, rather than getting it by default. */
+function mcpChosen(options: Pick<LaunchOptions, "mcp">, endpoint: Pick<InferenceEndpoint, "providerOptions">): boolean {
+  return options.mcp === true || endpoint.providerOptions?.claude_tool_surface === "mcp";
+}
+
+/**
+ * The banner's tools field. A fallback to the router is yellow only when MCP
+ * was asked for; by default it is as quiet as the log line that explains it.
+ */
+function mcpBanner(mcp: ClaudeMcpAttachment | undefined, opts: { dryRun?: boolean; noTools?: boolean; chosen?: boolean }): string {
+  if (opts.noTools) return c("dim", "none (the endpoint has no tools)");
+  if (!mcp) return opts.dryRun ? "mcp (catalog read at launch)" : c(opts.chosen ? "yellow" : "dim", "router (MCP not attached)");
+  return `mcp ${c("dim", `(${mcp.servers} servers, ${mcp.tools} tools; ${mcpApprovalNote(mcp)})`)}`;
+}
 
 function log(line: string, options?: NoteOptions): void {
   writeNote(`${c("dim", "ditto:")} ${line}\n`, options);
@@ -266,7 +312,7 @@ async function resolveEndpoint(
  * flow with the harness as the intent so the web page can offer the endpoint
  * picker; the browser hands back the key and (optionally) the chosen endpoint.
  */
-async function ensureLoggedIn(harness: Harness): Promise<SelectedEndpoint | undefined> {
+async function ensureLoggedIn(harness: Harness, endpoint: string | undefined): Promise<SelectedEndpoint | undefined> {
   const { key } = await resolveApiKey();
   if (key) return undefined;
   if (!interactive()) {
@@ -275,13 +321,17 @@ async function ensureLoggedIn(harness: Harness): Promise<SelectedEndpoint | unde
     return undefined;
   }
   log(`no Ditto login yet — opening your browser to sign in and pick an endpoint for ${harness === "claude" ? "Claude Code" : "Codex"}.`);
-  return browserLogin(harness);
+  return browserLogin(harness, endpoint);
 }
 
-/** Runs the browser device flow for a harness and saves the result. */
-async function browserLogin(harness: Harness): Promise<SelectedEndpoint | undefined> {
+/**
+ * Runs the browser device flow for a harness and saves the result. An endpoint
+ * the command already names is shown locked in the browser instead of a picker.
+ */
+async function browserLogin(harness: Harness, endpoint: string | undefined): Promise<SelectedEndpoint | undefined> {
   const result = await deviceLogin({
     intent: harness,
+    endpoint,
     onCode: (userCode, url) => {
       process.stderr.write(`\n  ${url}\n\n  Code: ${userCode}\n\n`);
       openInBrowser(url);
@@ -400,7 +450,9 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     if (!record.harnessSessionId) resumeLast = true;
   }
 
-  let selected = options.dryRun ? undefined : await ensureLoggedIn(harness);
+  options = { ...options, mcpOnly: options.mcpOnly ?? record?.mcpOnly, remoteTransport: options.remoteTransport ?? (remoteMode(options) === "tui" ? record?.remoteTransport : undefined) };
+  const requestedEndpoint = options.endpoint ?? record?.endpointSlug;
+  let selected = options.dryRun ? undefined : await ensureLoggedIn(harness, requestedEndpoint);
   let catalog: Awaited<ReturnType<typeof listEndpoints>>;
   try {
     catalog = await listEndpoints();
@@ -411,11 +463,9 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     const { source } = await resolveApiKey();
     if (source !== "config") throw err;
     log("your saved Ditto login is no longer valid — opening your browser to sign in again.");
-    selected = await browserLogin(harness);
+    selected = await browserLogin(harness, requestedEndpoint);
     catalog = await listEndpoints();
   }
-  const endpoint = await resolveEndpoint(options.endpoint ?? record?.endpointSlug, catalog.endpoints, selected);
-  await assertEndpointActive(endpoint);
 
   let cwd = process.cwd();
   let worktreePath: string | undefined;
@@ -445,6 +495,36 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
       worktreePath = wt.path;
     }
   }
+
+  // With no --endpoint (and no resumed session's endpoint), a repository that
+  // declares `repository.default_endpoint` in .ditto/config.toml picks the
+  // profile; the saved personal default only applies outside such a repository.
+  // It is read from the directory the harness will run in, which a transcript
+  // resume or --cwd may have moved away from process.cwd().
+  let endpoint: InferenceEndpoint | undefined;
+  let repoLaunchDefaults: Record<string, unknown> | undefined;
+  if (!requestedEndpoint?.trim()) {
+    const profile = await repoDefaultProfile(cwd);
+    if (profile) {
+      endpoint = await findProfileEndpoint(profile, catalog.endpoints);
+      repoLaunchDefaults = profile.launchDefaults;
+      if (!endpoint) {
+        throw new Error(
+          `this repository's .ditto profile "${profile.name}" has no endpoint in ${profile.owner.kind === "org" ? `@${profile.owner.org}` : "your account"} yet.\n` +
+            `Create it with \`heyditto repo apply --profile ${profile.name}\` (in ${profile.repoDir}), or pass --endpoint.`,
+        );
+      }
+      log(`using ${profile.owner.kind === "org" ? `@${profile.owner.org}/` : ""}${endpoint.slug} from ${path.join(profile.repoDir, ".ditto")}`);
+    }
+  }
+  endpoint ??= await resolveEndpoint(requestedEndpoint, catalog.endpoints, selected);
+  if (harness === "claude") {
+    endpoint = { ...endpoint, providerOptions: { ...endpoint.providerOptions, ...repoLaunchDefaults } };
+    options = resolveClaudeLaunchDefaults(options, endpoint.providerOptions);
+  }
+  if (!options.mcpOnly) await assertEndpointActive(endpoint);
+  if (options.mcpOnly && (harness !== "claude" || options.mcp === false)) throw new Error("--mcp-only requires Claude Code with MCP tools enabled");
+  if (options.remoteTransport === "channels" && (!options.mcpOnly || options.headless || remoteMode(options) === "off" || options.prompt !== undefined)) throw new Error("MCP Channels requires an interactive `heyditto claude --mcp-only` session with remote control enabled");
 
   // A Claude session first seen here keeps its own id as the Ditto session id,
   // so `--resume <that id>` finds this record next time.
@@ -497,11 +577,39 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
       })
     : undefined;
 
-  // Sent as X-Ditto-Harness-Version so the router can shape requests for this
-  // exact release. Read once per launch (after sign-in, so a failed login
-  // never runs the harness) and reused by every turn; unreadable means the
-  // header is left out, never guessed.
-  const harnessVersion = harness === "grok" ? undefined : readHarnessVersion(harness);
+  // Native MCP mode reads the endpoint's tool catalog with the key just
+  // minted, so what Claude Code attaches is exactly what this key may reach.
+  // A catalog that cannot be read falls back to the router's own tools rather
+  // than launching an agent with none. Native MCP is the default, so the
+  // fallback is only flagged when someone asked for MCP; an endpoint the
+  // surface refuses (an app's) would otherwise warn on every launch.
+  const wantMcp = harness === "claude" && (options.mcpOnly || wantsMcp(options, endpoint));
+  const chosen = mcpChosen(options, endpoint);
+  let mcp: ClaudeMcpAttachment | undefined;
+  let noTools = false;
+  if (wantMcp && key?.key) {
+    try {
+      const attachment = claudeMcpAttachment(await fetchMcpCatalog(catalog.baseUrl, key.key, sessionId), sessionId, { yolo: options.yolo, toolDeny: claudeDittoDenyRules(cwd, process.env) });
+      if (attachment.tools > 0) mcp = attachment;
+      else noTools = true;
+    } catch (err) {
+      if (options.mcpOnly) {
+        if (!options.keepKey) {
+          try { await revokeKey(endpoint.id, key.id); }
+          catch { log(`could not revoke session key …${key.keyHint}; it expires in ${expiresIn}`); }
+        }
+        throw new Error(`MCP-only setup failed; no inference Router fallback: ${(err as Error).message}`);
+      }
+      const note = c(chosen ? "yellow" : "dim", "native MCP unavailable");
+      log(`${note} (${(err as Error).message}); the router keeps this endpoint's tools`);
+    }
+  }
+
+  // Sent as X-Ditto-Harness-Version so the router serves this release's own
+  // prompts. Read once per launch, after sign-in (a failed login never runs
+  // the harness), and reused by every turn. Unreadable means the header is
+  // left out, never guessed. grok has no version-specific prompts.
+  const harnessVersion = harness === "grok" ? undefined : await readHarnessVersion(harness);
 
   const plan = planFor(harness, {
     baseUrl: catalog.baseUrl,
@@ -516,17 +624,24 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     yellow: options.yellow,
     plan: options.plan,
     passthrough,
+    toolDeny: harness === "claude" ? claudeDittoDenyRules(cwd, process.env) : undefined,
+    mcp,
+    mcpOnly: options.mcpOnly,
+    remoteTransport: options.remoteTransport,
+    cwd,
     env: process.env,
   }, grokHome);
 
   const field = (name: string, value: string): string => `${c("dim", `${name}=`)}${value}`;
   const banner = [
     field("endpoint", c(["bold", "cyan"], endpoint.slug)),
-    field("model", model ?? c("dim", "(harness default → endpoint routes)")),
+    field("inference", options.mcpOnly ? "native Claude Code account (MCP only)" : "Ditto Router"),
+    field("model", model ?? c("dim", options.mcpOnly ? "(native Claude Code default)" : "(harness default → endpoint routes)")),
     field("key", key ? `…${key.keyHint || maskKey(key.key ?? "")}` : "(dry run)"),
     field("expires", `${expiresIn}${options.keepKey ? "" : c("dim", " (revoked on exit)")}`),
     budget !== undefined ? field("budget", `${budget.toLocaleString()} tokens`) : undefined,
     field("session", c("bold", sessionId)),
+    wantMcp ? field("tools", mcpBanner(mcp, { dryRun: options.dryRun, noTools, chosen })) : undefined,
   ]
     .filter(Boolean)
     .join("  ");
@@ -548,6 +663,12 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
           cwd,
           endpoint: { id: endpoint.id, slug: endpoint.slug, model: endpoint.model },
           sessionId,
+          // A dry run reads no catalog, so the plan above is the router's; say
+          // which surface a real launch would ask for, separately.
+          toolSurface: mcp ? "mcp" : "router",
+          toolSurfaceRequested: wantMcp ? "mcp" : "router",
+          inference: options.mcpOnly ? "native" : "router",
+          remoteTransport: options.remoteTransport ?? "cli",
           key: { name: keyName, expiresIn, spendLimitTokens: budget ?? null },
         },
         null,
@@ -558,6 +679,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   }
   if (!key) throw new Error("internal: key was not minted");
 
+  const explicitLaunchTitle = options.name?.trim() || record?.explicitLaunchTitle;
   const nextRecord: SessionRecord = {
     id: sessionId,
     harness,
@@ -572,12 +694,42 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     createdAt: record?.createdAt ?? now,
     lastLaunchedAt: now,
     launches: (record?.launches ?? 0) + 1,
+    mcpOnly: options.mcpOnly,
+    remoteTransport: options.remoteTransport,
+    ...(explicitLaunchTitle ? { explicitLaunchTitle } : {}),
   };
   await writeSession(nextRecord);
 
   const remote: RemoteMode = remoteMode(options);
+  const launchRegistration = {
+    sessionId, endpointId: endpoint.id, harness: harness === "claude" ? "claude-code" : harness,
+    inference: options.mcpOnly ? "native" : "router", transport: options.remoteTransport ?? "cli",
+    title: explicitLaunchTitle || `${path.basename(cwd)} · ${sessionId.slice(0, 8)}`,
+    ...(harness === "claude" && harnessSessionId && isUuid(harnessSessionId) ? { nativeSessionId: harnessSessionId } : {}),
+  };
   let exitCode: number | null = null;
+  let titleWatcher: { stop(): void } | undefined;
   try {
+    const registration = remote !== "off" ? await apiFetch<{ threadId: string; kgID: string; nativeTitleSync?: boolean }>("/api/v5/sessions/register", { method: "POST", body: launchRegistration }).catch((err) => {
+      if (options.mcpOnly) throw err;
+      log("session link unavailable; the CLI bridge will still announce this launch");
+      return undefined;
+    }) : undefined;
+    if (registration) log(`session: ${appBaseURL()}/chat/${encodeURIComponent(registration.threadId)}${registration.kgID ? `?graph=${encodeURIComponent(registration.kgID)}` : ""}`);
+    if (harness === "claude" && harnessSessionId && !explicitLaunchTitle && registration?.nativeTitleSync === true && registration.threadId) {
+      const threadId = registration.threadId;
+      titleWatcher = watchClaudeSessionTitle({ nativeSessionId: harnessSessionId, cwd, report: async (title, signal) => {
+        const result = await apiFetch<{ titleUpdated?: boolean }>("/api/v5/sessions/register", { method: "POST", signal, body: {
+          ...launchRegistration, threadId, ...title,
+        } });
+        if (typeof result.titleUpdated !== "boolean") throw new Error("Backend did not acknowledge native title synchronization");
+      } });
+    }
+    if (options.remoteTransport === "channels") {
+      const { withChannelServer } = await import("../remote/channels-plan.js");
+      const channelPlan = withChannelServer(plan, sessionId, cwd);
+      exitCode = await runInTerminal(channelPlan, cwd);
+    } else
     if (remote === "headless") {
       exitCode = await runHeadless(harness, {
         cwd,
@@ -590,6 +742,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
         options,
         record: nextRecord,
         grokHome,
+        mcp,
         claudeStarted: harness === "claude" && !resumeLast ? Boolean(transcript) : undefined,
       });
     } else if (remote === "tui") {
@@ -598,6 +751,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
       exitCode = await runInTerminal(plan, cwd);
     }
   } finally {
+    titleWatcher?.stop();
     process.stderr.write("\n");
     if (key.expiresAt && Date.parse(key.expiresAt) <= Date.now()) {
       // The gateway answers an expired key with a 401 the harness shows, not us;
@@ -731,6 +885,7 @@ async function runInTerminalWithRemote(harness: Harness, plan: HarnessPlan, ctx:
     pty = await spawnInPty(plan.command, withHookArgs(harness, plan.args, hookArgs(harness, hooks)), {
       cwd: ctx.cwd,
       env: childEnv(plan, process.env),
+      harness,
     });
   } catch (err) {
     await hooks.close();
@@ -770,6 +925,8 @@ interface HeadlessRunContext extends RemoteRunContext {
   options: LaunchOptions;
   /** grok: the launch GROK_HOME reused by every headless turn. */
   grokHome?: string;
+  /** claude: the endpoint's tools as MCP servers, attached to every turn. */
+  mcp?: ClaudeMcpAttachment;
   /** claude: the session already has a conversation, so the first turn resumes it. */
   claudeStarted?: boolean;
 }
@@ -829,6 +986,10 @@ async function runHeadless(harness: Harness, ctx: HeadlessRunContext): Promise<n
         model: ctx.model,
         yolo: ctx.options.yolo,
         yellow: ctx.options.yellow,
+        toolDeny: harness === "claude" ? claudeDittoDenyRules(ctx.cwd, process.env) : undefined,
+        mcp: ctx.mcp,
+        mcpOnly: ctx.options.mcpOnly,
+        cwd: ctx.cwd,
         env: process.env,
       },
       prompt,

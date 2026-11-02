@@ -27,6 +27,12 @@ import { spawn } from "node:child_process";
 
 const bin = process.argv[2];
 const args = process.argv.slice(3);
+// The launcher reads the harness version once per launch; answer like the
+// real binaries do and exit before anything is recorded as an invocation.
+if (args.length === 1 && args[0] === "--version") {
+  process.stdout.write(bin === "claude" ? "2.1.316 (Claude Code)\n" : "codex-cli 0.166.0\n");
+  process.exit(0);
+}
 const turnMs = Number(process.env.FAKE_TURN_MS || 300);
 const record = (entry) => appendFileSync(process.env.FAKE_HARNESS_LOG, JSON.stringify({ bin, ...entry }) + "\n");
 
@@ -66,7 +72,7 @@ function runClaudeHook(hooks, event, payload) {
           const child = spawn("sh", ["-c", command], { stdio: ["pipe", "ignore", "ignore"] });
           child.on("exit", resolve);
           child.on("error", resolve);
-          child.stdin.end(JSON.stringify({ hook_event_name: event, session_id: "fake", ...payload }));
+          child.stdin.end(JSON.stringify({ hook_event_name: event, session_id: "11111111-1111-4111-8111-111111111111", ...payload }));
         }),
     ),
   );
@@ -86,7 +92,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function headless() {
   if (bin === "claude") {
     const prompt = args[args.indexOf("-p") + 1];
-    record({ mode: "headless", args, prompt, headers: process.env.ANTHROPIC_CUSTOM_HEADERS });
+    record({ mode: "headless", args, prompt });
     process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "fake" }) + "\n");
     await sleep(turnMs);
     process.stdout.write(JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "fake answer to " + prompt }] } }) + "\n");
@@ -138,6 +144,9 @@ async function tui() {
       const answered = new Promise((resolve) => {
         turn.waitingKey = resolve;
       });
+      const permission = { tool_use_id: "fake-permission-" + Date.now(), tool_name: "Bash", tool_input: { command: "npm test" }, transcript_path: process.cwd() + "/11111111-1111-4111-8111-111111111111.jsonl" };
+      await runClaudeHook(hooks, "PreToolUse", permission);
+      await runClaudeHook(hooks, "PermissionRequest", permission);
       await runClaudeHook(hooks, "Notification", { notification_type: "permission_prompt", message: "Claude needs your permission to use Bash", title: "Permission" });
       await answered;
     }
@@ -204,12 +213,6 @@ async function tui() {
   });
   await new Promise(() => undefined);
   return exitCode ?? 0;
-}
-
-// The launcher reads the installed version once per launch (X-Ditto-Harness-Version).
-if (args[0] === "--version") {
-  process.stdout.write(bin === "claude" ? "2.1.296 (Claude Code)\n" : "codex-cli 0.162.1\n");
-  process.exit(0);
 }
 
 const isHeadless = bin === "claude" ? args.includes("-p") : args[0] === "exec";

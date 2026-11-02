@@ -18,8 +18,7 @@ export function tomlInlineTable(entries: Array<[string, string]>): string {
  * the Responses wire, so the endpoint is injected as a dedicated `ditto`
  * model provider through `-c` overrides (nothing is written to
  * ~/.codex/config.toml). The session header rides on the provider's
- * http_headers so every request lands in the same Ditto thread, next to
- * X-Ditto-Harness / X-Ditto-Harness-Version for the router.
+ * http_headers so every request lands in the same Ditto thread.
  */
 export function planCodex(input: PlanInput): HarnessPlan {
   const args: string[] = [];

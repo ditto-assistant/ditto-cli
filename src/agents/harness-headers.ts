@@ -1,36 +1,44 @@
-import { spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { HARNESS_HEADER, HARNESS_VERSION_HEADER, type Harness } from "./types.js";
 
 /**
  * Harness identification for the router. Every launch names its harness in
  * X-Ditto-Harness and, when the installed binary reports one, its version in
  * X-Ditto-Harness-Version. The version is read from `<harness> --version`
- * once per launch; anything that is not a plain X.Y.Z is dropped, because a
- * guessed version would steer the router's compatibility shaping wrong.
+ * once per launch and sent exactly as reported, pre-release suffix included
+ * ("0.163.0-alpha.2"): the router serves that release's prompts, so a
+ * rounded-off version would name a release the user does not have.
  */
 
-/** First X.Y.Z in `--version` output ("2.1.296 (Claude Code)", "codex-cli 0.162.1"). */
+/**
+ * The version in `--version` output ("2.1.316 (Claude Code)",
+ * "codex-cli 0.166.0", "codex-cli 0.163.0-alpha.2"), or undefined. A dotted
+ * triple that is part of a longer token (an IP address, a four-part number)
+ * is not a version.
+ */
 export function parseHarnessVersion(output: string | undefined): string | undefined {
-  return output?.match(/\b(\d+\.\d+\.\d+)\b/)?.[1];
+  return output?.match(/(?<![\w.])(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]*[0-9A-Za-z])?)(?![\w.])/)?.[1];
 }
 
 /**
- * Runs `<command> --version` and returns the X.Y.Z it reports, or undefined
- * when the binary is missing, fails, hangs or prints no version.
+ * Runs `<command> --version` and resolves the version it reports, or
+ * undefined when the binary is missing, fails, hangs past `timeoutMs` or
+ * prints no version. It runs asynchronously so a stalled harness never
+ * blocks the event loop. No shell is used, so on Windows an npm `.cmd` shim
+ * does not resolve and the header is left out (the router then reads the
+ * User-Agent instead).
  */
-export function readHarnessVersion(command: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
-  try {
-    const res = spawnSync(command, ["--version"], {
-      env,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: 5000,
-    });
-    if (res.error || res.status !== 0) return undefined;
-    return parseHarnessVersion(res.stdout) ?? parseHarnessVersion(res.stderr);
-  } catch {
-    return undefined;
-  }
+export function readHarnessVersion(command: string, env: NodeJS.ProcessEnv = process.env, timeoutMs = 5000): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    try {
+      execFile(command, ["--version"], { env, encoding: "utf8", timeout: timeoutMs, windowsHide: true }, (err, stdout, stderr) => {
+        if (err) return resolve(undefined);
+        resolve(parseHarnessVersion(stdout) ?? parseHarnessVersion(stderr));
+      });
+    } catch {
+      resolve(undefined);
+    }
+  });
 }
 
 /** The identification headers for one launch, in send order. */
@@ -39,23 +47,4 @@ export function harnessHeaders(harness: Harness, version: string | undefined): A
   const parsed = parseHarnessVersion(version);
   if (parsed) headers.push([HARNESS_VERSION_HEADER, parsed]);
   return headers;
-}
-
-/**
- * Merges `headers` into a newline-separated ANTHROPIC_CUSTOM_HEADERS value.
- * Every line the caller already had is kept, except one naming a header we
- * set (compared case-insensitively), which ours replaces so the request does
- * not carry two conflicting values.
- */
-export function mergeCustomHeaders(existing: string | undefined, headers: Array<[string, string]>): string {
-  const ours = new Set(headers.map(([name]) => name.toLowerCase()));
-  const kept = (existing ?? "")
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0)
-    .filter((line) => {
-      const colon = line.indexOf(":");
-      return colon === -1 || !ours.has(line.slice(0, colon).trim().toLowerCase());
-    });
-  return [...kept, ...headers.map(([name, value]) => `${name}: ${value}`)].join("\n");
 }

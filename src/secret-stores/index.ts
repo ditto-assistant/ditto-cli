@@ -1,4 +1,5 @@
 import { aws } from "./aws.js";
+import { localFile } from "./local-file.js";
 import { azure } from "./azure.js";
 import { cloudflare } from "./cloudflare.js";
 import { doppler } from "./doppler.js";
@@ -34,6 +35,7 @@ export const STORES: readonly SecretStore[] = [
   vercel,
   kubernetes,
   fly,
+  localFile,
 ];
 
 /** Human label for every flag, so "unsupported flag" errors name the flag the operator typed. */

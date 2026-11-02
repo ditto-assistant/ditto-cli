@@ -109,6 +109,30 @@ function noPatch(stub) {
   assert.equal(stub.calls.some((c) => c.method === "PATCH"), false, "nothing may be written when the input is rejected");
 }
 
+test("failover requires an explicit cap and sends a sticky cheaper-model policy", async () => {
+  const stub = await startStub();
+  try {
+    const missing = await run(stub.base, ["endpoints", "set", "alpha", "--failover", "on", "--yes"]);
+    assert.notEqual(missing.status, 0);
+    noPatch(stub);
+    const out = await run(stub.base, ["endpoints", "set", "alpha", "--failover", "on", "--failover-model", "openai/gpt-5.6-luna", "--failover-max-cost", "0.25", "--yes"]);
+    assert.equal(out.status, 0, out.stderr);
+    assert.deepEqual(patchOf(stub).failover, { enabled: true, model: "openai/gpt-5.6-luna", maxCostUsd: 0.25 });
+    assert.equal(patchOf(stub).providerOptions, undefined, "typed settings must not replace prompt options");
+  } finally { stub.close(); }
+});
+
+test("invalid fallback caps are rejected without writing", async () => {
+  for (const cap of ["NaN", "Infinity", "-1"]) {
+    const stub = await startStub();
+    try {
+      const out = await run(stub.base, ["endpoints", "set", "alpha", "--failover-max-cost", cap]);
+      assert.notEqual(out.status, 0);
+      noPatch(stub);
+    } finally { stub.close(); }
+  }
+});
+
 test("every scalar setting reaches the PATCH under its API field name", async () => {
   const stub = await startStub();
   try {

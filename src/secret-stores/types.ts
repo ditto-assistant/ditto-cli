@@ -22,6 +22,7 @@ export const STORE_IDS = [
   "vercel",
   "kubernetes",
   "fly",
+  "file",
 ] as const;
 
 export type StoreId = (typeof STORE_IDS)[number];
@@ -75,7 +76,7 @@ export type Delivery = {
   note: string;
   /** Wraps the plaintext (a JSON template, a KEY=VALUE line) before it is sent. */
   payload?: (value: string) => string;
-} & ({ kind: "stdin"; args: string[] } | { kind: "path"; args: string[] });
+} & ({ kind: "stdin"; args: string[] } | { kind: "path"; args: string[] } | { kind: "local-file"; path: string });
 
 export interface Gateway {
   /** OpenAI-compatible base, e.g. https://inference.heyditto.ai/v1 */

@@ -94,7 +94,9 @@ const BEARER_KEY_RULES = [
   { prefix: "/api/v5/tool-approvals", methods: ["GET", "POST"] },
   // Read-only: this prefix also covers member management, invitations and a
   // credits transfer that moves money, none of which belong to a stored key.
-  { prefix: "/api/v5/companies", methods: ["GET"] },
+  { prefix: "/api/v5/companies", methods: ["GET"], exact: true },
+  { prefix: "/api/v5/companies/*/members", methods: ["GET"], exact: true },
+  { prefix: "/api/v5/companies/*/members/*", methods: ["PATCH"], exact: true },
   // A `*` matches exactly one segment, so an organization's tool connections
   // are reachable for writes without opening its siblings.
   { prefix: "/api/v5/companies/*/mcp-servers", methods: null },
@@ -106,18 +108,19 @@ function bearerKeyAccepted(method, url) {
   const path = url.split("?")[0];
   return BEARER_KEY_RULES.some((rule) => {
     if (rule.methods !== null && !rule.methods.includes(method)) return false;
-    if (!rule.prefix.includes("*")) return path.startsWith(rule.prefix);
+    if (!rule.prefix.includes("*")) return rule.exact ? path === rule.prefix : path.startsWith(rule.prefix);
     const want = rule.prefix.replace(/^\/|\/$/g, "").split("/");
     const got = path.replace(/^\/|\/$/g, "").split("/");
-    if (got.length < want.length) return false;
+    if (got.length < want.length || (rule.exact && got.length !== want.length)) return false;
     return want.every((segment, i) => (segment === "*" ? !!got[i] : got[i] === segment));
   });
 }
 
-function startStub({ companies = [OMNI, KLYRO], canManage = true, canDecide = true } = {}) {
+function startStub({ companies = [OMNI, KLYRO], canManage = true, canDecide = true, directorySize = 1, allowanceError = false } = {}) {
   const calls = [];
   const connections = [structuredClone(LINEAR), structuredClone(INTERNAL)];
   const approvals = structuredClone(APPROVALS);
+  const members = Array.from({length:directorySize},(_,i)=>({id:i===0?"member-one":`member-${i}`,userUid:`user-${i}`,handle:i===0?"Teammate":`member-${i}`,email:i===0?"teammate@example.com":"",role:"viewer",status:"active"}));
   const server = http.createServer((req, res) => {
     let body = "";
     req.on("data", (chunk) => (body += chunk));
@@ -136,10 +139,28 @@ function startStub({ companies = [OMNI, KLYRO], canManage = true, canDecide = tr
       if (!token.startsWith("ditto_mcp_")) {
         return json(401, { message: "unauthorized", status: 401 });
       }
+      if (req.url === "/mcp") {
+        if (req.method !== "POST") return json(405, {});
+        if (parsed.method === "initialize") return json(200, { jsonrpc: "2.0", id: parsed.id,
+          result: { protocolVersion: parsed.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "stub", version: "0" } } });
+        if (parsed.method === "tools/call") {
+          assert.equal(parsed.params.name, "get_org_member_allowance");
+          return json(200, { jsonrpc: "2.0", id: parsed.id, result: {
+            content: [{ type: "text", text: allowanceError ? "Your current role does not permit this action." : JSON.stringify({ exists: true, enabled: true, limit_tokens: 1000, used_tokens: 200 }) }],
+            ...(allowanceError ? { isError: true } : {}),
+          } });
+        }
+        return json(202);
+      }
       if (!bearerKeyAccepted(req.method, req.url)) {
         return json(401, { message: "unauthorized", status: 401 });
       }
 
+      if (req.url === `/api/v5/companies/${OMNI.id}/members?limit=2000` && req.method === "GET") return json(200,{members});
+      if (req.url === `/api/v5/companies/${OMNI.id}/members/member-one` && req.method === "PATCH") {
+        if (!canManage) return json(403,{message:"this action requires the owner or admin role"});
+        members[0].role=parsed.role; return json(200,members[0]);
+      }
       if (req.url === "/api/v5/companies" && req.method === "GET") {
         return json(200, { companies });
       }
@@ -537,4 +558,92 @@ test("a CLI key does not reach the rest of the organization surface", () => {
   ]) {
     assert.equal(bearerKeyAccepted(method, url), false, `${method} ${url} must NOT accept a CLI key`);
   }
+});
+
+
+test("org directory and exact role change preserve scope and show the inverse", async () => {
+ const stub=await startStub();
+ try {
+  const members=await run(stub.base,["orgs","members","--org","omni-aura","--output","json"]);
+  assert.equal(members.status,0,members.stderr); assert.equal(JSON.parse(members.stdout).members[0].role,"viewer");
+  const dry=await run(stub.base,["orgs","set-role","@teammate","member","--org","omni-aura","--expected-role","viewer","--dry-run"]);
+  assert.equal(dry.status,0,dry.stderr);assert.equal(stub.calls.filter(c=>c.method==="PATCH").length,0);
+  const changed=await run(stub.base,["orgs","set-role","teammate@example.com","member","--org","omni-aura","--expected-role","viewer","--output","json"]);
+  assert.equal(changed.status,0,changed.stderr);assert.equal(JSON.parse(changed.stdout).previousRole,"viewer");
+  assert.deepEqual(stub.calls.find(c=>c.method==="PATCH"),{method:"PATCH",url:`/api/v5/companies/${OMNI.id}/members/member-one`,body:{role:"member"}});
+  const stale=await run(stub.base,["orgs","set-role","member-one","viewer","--org","omni-aura","--expected-role","viewer"]);
+  assert.equal(stale.status,1);assert.match(stale.stderr,/expected role viewer, found member/);
+ } finally {stub.close();}
+});
+
+test("member role changes preserve server denials", async()=>{
+ const stub=await startStub({canManage:false});
+ try {const r=await run(stub.base,["orgs","set-role","member-one","member","--org","omni-aura"]);assert.equal(r.status,1);assert.match(r.stderr,/403/);assert.match(r.stderr,/owner or admin/);}finally{stub.close();}
+});
+
+
+test("role selection rejects blanks and capped directories before any mutation",async()=>{
+ const stub=await startStub({directorySize:2000});
+ try {
+  for(const member of ["@"," ","member-one"]){const r=await run(stub.base,["orgs","set-role",member,"member","--org","omni-aura"]);assert.equal(r.status,1,r.stdout);}
+  assert.equal(stub.calls.filter(c=>c.method==="PATCH").length,0);
+  const listed=await run(stub.base,["orgs","members","--org","omni-aura","--output","json"]);
+  assert.equal(listed.status,0,listed.stderr);assert.equal(JSON.parse(listed.stdout).possiblyTruncated,true);
+ }finally{stub.close();}
+});
+
+test("role confirmations respect text and JSON output",async()=>{
+ const stub=await startStub();
+ try {
+  const text=await run(stub.base,["orgs","set-role","member-one","member","--org","omni-aura","--dry-run"]);
+  assert.equal(text.status,0,text.stderr);assert.match(text.stdout,/Would change.*viewer -> member/);
+  const json=await run(stub.base,["orgs","set-role","member-one","member","--org","omni-aura","--dry-run","--output","json"]);
+  assert.equal(json.status,0,json.stderr);assert.equal(JSON.parse(json.stdout).dryRun,true);
+  const changed=await run(stub.base,["orgs","set-role","member-one","member","--org","omni-aura"]);
+  assert.equal(changed.status,0,changed.stderr);assert.match(changed.stdout,/Changed.*viewer -> member/);
+ }finally{stub.close();}
+});
+
+
+test("orgs allowance resolves the exact member and reads only through MCP", async () => {
+  const stub = await startStub();
+  try {
+    const r = await run(stub.base, ["orgs", "allowance", "teammate@example.com", "--org", "omni-aura", "--output", "json"]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(JSON.parse(r.stdout).limit_tokens, 1000);
+    const call = stub.calls.find(c => c.body?.method === "tools/call");
+    assert.deepEqual(call.body.params.arguments, { org: OMNI.id, member_uid: "user-0" });
+    assert(stub.calls.every(c => c.method === "GET" || c.url === "/mcp"));
+    assert(!stub.calls.some(c => c.url.includes("/credits")));
+  } finally { stub.close(); }
+});
+
+test("orgs allowance defaults to yourself without resolving the directory", async () => {
+  const stub = await startStub();
+  try {
+    const r = await run(stub.base, ["orgs", "allowance", "--org", "omni-aura", "--output", "raw"]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(JSON.parse(r.stdout).content[0].type, "text");
+    assert.deepEqual(stub.calls.find(c => c.body?.method === "tools/call").body.params.arguments, { org: OMNI.id });
+    assert(!stub.calls.some(c => c.url.includes("/members")));
+  } finally { stub.close(); }
+});
+
+test("orgs allowance reports MCP denial with a failing exit code", async () => {
+  const stub = await startStub({ allowanceError: true });
+  try {
+    const r = await run(stub.base, ["orgs", "allowance", "--org", "omni-aura", "--output", "json"]);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /current role does not permit/);
+    assert.equal(r.stdout, "");
+  } finally { stub.close(); }
+});
+
+test("orgs allowance refuses an unresolved member before calling MCP", async () => {
+  const stub = await startStub();
+  try {
+    const r = await run(stub.base, ["orgs", "allowance", "nobody@example.com", "--org", "omni-aura"]);
+    assert.equal(r.status, 1);
+    assert(!stub.calls.some(c => c.url === "/mcp"));
+  } finally { stub.close(); }
 });

@@ -8,10 +8,10 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { liftResumeFlags, planClaude } from "../dist/agents/claude.js";
+import { claudeDittoDenyRules } from "../dist/agents/claude-deny.js";
 import { searchTranscripts } from "../dist/agents/claude-transcripts.js";
-import { parse as parseToml } from "smol-toml";
 import { planCodex, tomlInlineTable, tomlString } from "../dist/agents/codex.js";
-import { harnessHeaders, mergeCustomHeaders, parseHarnessVersion, readHarnessVersion } from "../dist/agents/harness-headers.js";
+import { harnessHeaders, parseHarnessVersion, readHarnessVersion } from "../dist/agents/harness-headers.js";
 import { GROK_MODEL_ID, GROK_SESSION_ENV, grokModelConfig, planGrok } from "../dist/agents/grok.js";
 import { listEndpointsStubHandler } from "./helpers/stub-api.mjs";
 import { apiRootOf, childEnv, stripSeparator } from "../dist/agents/types.js";
@@ -30,7 +30,7 @@ const ENDPOINTS = {
 };
 
 /** Tiny stand-in for the Ditto management API. */
-function startStub() {
+function startStub({ mcpError = false } = {}) {
   const calls = [];
   const server = http.createServer((req, res) => {
     let body = "";
@@ -43,7 +43,7 @@ function startStub() {
           res.statusCode = 401;
           return res.end(JSON.stringify({ message: "unauthorized" }));
         }
-        return res.end(JSON.stringify(ENDPOINTS));
+        return res.end(JSON.stringify(mcpError ? { ...ENDPOINTS, baseUrl: `http://127.0.0.1:${server.address().port}/v1` } : ENDPOINTS));
       }
       if (/\/keys$/.test(req.url) && req.method === "POST") {
         res.statusCode = 201;
@@ -129,10 +129,9 @@ test("claude without a key fails fast and mints nothing", () => {
 test("--dry-run claude resolves the endpoint and prints the plan (no key minted)", async () => {
   const stub = await startStub();
   try {
-    const bin = fakeVersionBin("claude", "2.1.296 (Claude Code)");
     const result = await runAsync(
       ["claude", "--dry-run", "--endpoint", "alpha", "--yellow", "--budget", "500000", "--session", "sess-1", "--", "--verbose"],
-      { DITTO_API_BASE: stub.base, DITTO_API_KEY: "ditto_mcp_test", PATH: `${bin}${path.delimiter}${process.env.PATH}` },
+      { DITTO_API_BASE: stub.base, DITTO_API_KEY: "ditto_mcp_test" },
     );
     assert.equal(result.status, 0, result.stderr);
     const plan = JSON.parse(result.stdout);
@@ -140,10 +139,8 @@ test("--dry-run claude resolves the endpoint and prints the plan (no key minted)
     assert.deepEqual(plan.args, ["--permission-mode", "acceptEdits", "--session-id", "sess-1", "--verbose"]);
     assert.equal(plan.env.ANTHROPIC_BASE_URL, "https://api.example.test");
     assert.equal(plan.env.ANTHROPIC_AUTH_TOKEN, "<key>");
-    assert.equal(
-      plan.env.ANTHROPIC_CUSTOM_HEADERS,
-      "X-Ditto-Session-Id: sess-1\nX-Ditto-Harness: claude\nX-Ditto-Harness-Version: 2.1.296",
-    );
+    // The version is whatever `claude --version` this machine has, if any.
+    assert.match(plan.env.ANTHROPIC_CUSTOM_HEADERS, /^X-Ditto-Session-Id: sess-1\nX-Ditto-Harness: claude(\nX-Ditto-Harness-Version: \d+\.\d+\.\d+\S*)?$/);
     assert.equal(plan.env.CLAUDE_CODE_AUTO_MODE_SERVER, "0");
     assert.equal(plan.env.CLAUDE_CODE_GATEWAY_HINT_HEADERS, "1");
     assert.deepEqual(plan.unsetEnv, ["ANTHROPIC_API_KEY"]);
@@ -202,29 +199,13 @@ test("launch keys default to a month-long safety expiry (revoked on exit anyway)
   }
 });
 
-/**
- * Writes a fake `claude` binary that answers `--version` like Claude Code
- * (when given one) and otherwise records argv and the custom headers it was
- * launched with, then exits 0.
- */
-function fakeClaude(version) {
+/** Writes a fake `claude` binary that records argv and exits 0. */
+function fakeClaude() {
   const dir = mkdtempSync(path.join(os.tmpdir(), "heyditto-fake-claude-"));
   const bin = path.join(dir, "claude");
-  const versionLine = version ? `if [ "$1" = "--version" ]; then echo "${version} (Claude Code)"; exit 0; fi\n` : "";
-  writeFileSync(
-    bin,
-    `#!/bin/sh\n${versionLine}printf '%s\\n' "$@" > "$FAKE_CLAUDE_LOG"\nprintf '%s' "$ANTHROPIC_CUSTOM_HEADERS" > "$FAKE_CLAUDE_LOG.headers"\nexit 0\n`,
-    { mode: 0o755 },
-  );
+  writeFileSync(bin, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$FAKE_CLAUDE_LOG\"\nexit 0\n", { mode: 0o755 });
   const log = path.join(dir, "argv.log");
-  return { log, headers: `${log}.headers`, env: (extra = {}) => ({ PATH: `${dir}${path.delimiter}${process.env.PATH}`, FAKE_CLAUDE_LOG: log, ...extra }) };
-}
-
-/** A PATH directory holding a `name` binary that prints `output` for --version. */
-function fakeVersionBin(name, output, status = 0) {
-  const dir = mkdtempSync(path.join(os.tmpdir(), `heyditto-fake-${name}-`));
-  writeFileSync(path.join(dir, name), `#!/bin/sh\necho ${JSON.stringify(output)}\nexit ${status}\n`, { mode: 0o755 });
-  return dir;
+  return { log, env: (extra = {}) => ({ PATH: `${dir}${path.delimiter}${process.env.PATH}`, FAKE_CLAUDE_LOG: log, ...extra }) };
 }
 
 /** Writes a Claude Code transcript the way Claude stores one under CLAUDE_CONFIG_DIR. */
@@ -242,7 +223,7 @@ function writeTranscript(claudeHome, cwd, id, { title, prompt = "hello there", e
 
 test("a real launch mints a 1mo key, revokes it on exit and prints a copyable resume line", async () => {
   const stub = await startStub();
-  const claude = fakeClaude("2.1.296");
+  const claude = fakeClaude();
   const claudeHome = mkdtempSync(path.join(os.tmpdir(), "heyditto-claude-home-"));
   const id = "5a1b0e0c-7f39-4c47-9a53-1f0b8c2d9e10";
   // Claude writes the transcript on the first prompt; the fake binary does not.
@@ -258,11 +239,6 @@ test("a real launch mints a 1mo key, revokes it on exit and prints a copyable re
     assert.equal(JSON.parse(post.body).expiresIn, "1mo");
     assert.ok(stub.calls.some((c) => c.method === "DELETE" && /\/keys\/key-1$/.test(c.url)), "the key was revoked on exit");
     assert.match(readFileSync(claude.log, "utf8"), new RegExp(`--session-id\\n${id}`));
-    // The harness and its installed version reach Claude Code's custom headers.
-    assert.equal(
-      readFileSync(claude.headers, "utf8"),
-      `X-Ditto-Session-Id: ${id}\nX-Ditto-Harness: claude\nX-Ditto-Harness-Version: 2.1.296`,
-    );
     // The resume command sits alone on its own line so it can be copied whole.
     assert.match(result.stderr, new RegExp(`^  heyditto claude --resume ${id}$`, "m"));
     assert.match(result.stderr, /revoked session key …ab12/);
@@ -279,10 +255,6 @@ test("a headless -p launch skips the resume epilogue", async () => {
     const result = await runAsync(["claude", "--endpoint", "alpha", "-p", "say hi"], claude.env({ DITTO_API_BASE: stub.base, DITTO_API_KEY: "ditto_mcp_test" }));
     assert.equal(result.status, 0, result.stderr);
     assert.match(readFileSync(claude.log, "utf8"), /-p\nsay hi/);
-    // This fake reports no version: the version header is omitted, not guessed.
-    const headers = readFileSync(claude.headers, "utf8");
-    assert.match(headers, /^X-Ditto-Harness: claude$/m);
-    assert.doesNotMatch(headers, /X-Ditto-Harness-Version/);
     assert.match(result.stderr, /revoked session key/);
     assert.doesNotMatch(result.stderr, /resume this session/);
   } finally {
@@ -388,12 +360,12 @@ test("endpoints lists and sets a default", async () => {
   writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ apiKey: "ditto_mcp_test", agentMode: true }));
   try {
     const env = { DITTO_API_BASE: stub.base, DITTO_CONFIG_DIR: configDir };
-    const list = await runAsync(["endpoints"], env);
+    const list = await runAsync(["endpoints"], env, configDir);
     assert.equal(list.status, 0, list.stderr);
     assert.match(list.stdout, /alpha\s+openai\/gpt-5\.6-luna\s+25,000 \/ 1,000,000 monthly\s+traces/);
     assert.match(list.stdout, /beta\s+anthropic\/claude-sonnet-5\s+0 \/ ∞/);
 
-    const set = await runAsync(["endpoints", "--set-default", "beta", "--output", "json"], env);
+    const set = await runAsync(["endpoints", "--set-default", "beta", "--output", "json"], env, configDir);
     assert.equal(set.status, 0, set.stderr);
     assert.equal(JSON.parse(set.stdout).defaultEndpoint, "beta");
     const stored = JSON.parse(readFileSync(path.join(configDir, "config.json"), "utf8"));
@@ -401,7 +373,7 @@ test("endpoints lists and sets a default", async () => {
     assert.equal(stored.agentMode, true, "merge must keep existing fields");
 
     // The default is honored when --endpoint is omitted.
-    const plan = await runAsync(["codex", "--dry-run"], env);
+    const plan = await runAsync(["codex", "--dry-run"], env, configDir);
     assert.equal(plan.status, 0, plan.stderr);
     assert.equal(JSON.parse(plan.stdout).endpoint.slug, "beta");
   } finally {
@@ -418,53 +390,63 @@ test("planClaude: resume, continue, model and header merging", () => {
   assert.equal(withModel.envSet.ANTHROPIC_MODEL, "opus");
   const merged = planClaude({ ...base, env: { ANTHROPIC_CUSTOM_HEADERS: "X-Team: a" } });
   assert.equal(merged.envSet.ANTHROPIC_CUSTOM_HEADERS, "X-Team: a\nX-Ditto-Session-Id: s1\nX-Ditto-Harness: claude");
+  // Launched from inside another heyditto session: the parent's session id and
+  // tool surface are its own, not the caller's. Its deny rules only tighten.
+  const nested = planClaude({ ...base, env: { ANTHROPIC_CUSTOM_HEADERS: "X-Team: a\nX-Ditto-Session-Id: parent\nx-ditto-tool-surface: mcp\nX-Ditto-Tool-Deny: gmail__*" } });
+  assert.equal(nested.envSet.ANTHROPIC_CUSTOM_HEADERS, "X-Team: a\nX-Ditto-Tool-Deny: gmail__*\nX-Ditto-Session-Id: s1\nX-Ditto-Harness: claude");
+  assert.equal(planClaude({ ...base, env: { ANTHROPIC_CUSTOM_HEADERS: "X-Ditto-Session-Id: parent" } }).envSet.ANTHROPIC_CUSTOM_HEADERS, "X-Ditto-Session-Id: s1\nX-Ditto-Harness: claude");
   assert.equal(childEnv(merged, { ANTHROPIC_API_KEY: "old", HOME: "/h" }).ANTHROPIC_API_KEY, undefined);
 });
 
-test("planClaude merges X-Ditto-Harness headers into the caller's ANTHROPIC_CUSTOM_HEADERS", () => {
-  const base = { baseUrl: "https://api.heyditto.ai/v1", apiKey: "k", sessionId: "s1", passthrough: [], harnessVersion: "2.1.296" };
-  const plan = planClaude({
-    ...base,
-    // The caller's headers survive; a stale copy of one we own is replaced, not duplicated.
-    env: { ANTHROPIC_CUSTOM_HEADERS: "X-Team: a\n\nx-ditto-harness: other\nX-Trace: b\n" },
-  });
-  assert.equal(
-    plan.envSet.ANTHROPIC_CUSTOM_HEADERS,
-    "X-Team: a\nX-Trace: b\nX-Ditto-Session-Id: s1\nX-Ditto-Harness: claude\nX-Ditto-Harness-Version: 2.1.296",
-  );
-  const fresh = planClaude({ ...base, env: {} });
-  assert.equal(fresh.envSet.ANTHROPIC_CUSTOM_HEADERS, "X-Ditto-Session-Id: s1\nX-Ditto-Harness: claude\nX-Ditto-Harness-Version: 2.1.296");
-  // Unreadable version: only the version header is dropped.
-  const unknown = planClaude({ ...base, harnessVersion: undefined, env: {} });
-  assert.equal(unknown.envSet.ANTHROPIC_CUSTOM_HEADERS, "X-Ditto-Session-Id: s1\nX-Ditto-Harness: claude");
-  // Anything that is not X.Y.Z is never sent as a version.
-  const garbage = planClaude({ ...base, harnessVersion: "latest", env: {} });
-  assert.doesNotMatch(garbage.envSet.ANTHROPIC_CUSTOM_HEADERS, /Harness-Version/);
+test("planClaude: forwards router deny rules as a header", () => {
+  const base = { baseUrl: "https://api.heyditto.ai/v1", apiKey: "k", sessionId: "s1", passthrough: [], env: {} };
+  assert.equal(planClaude({ ...base, toolDeny: [] }).envSet.ANTHROPIC_CUSTOM_HEADERS, "X-Ditto-Session-Id: s1\nX-Ditto-Harness: claude");
+  const denied = planClaude({ ...base, toolDeny: ["gmail__*", "class:gated"], env: { ANTHROPIC_CUSTOM_HEADERS: "X-Team: a" } });
+  assert.equal(denied.envSet.ANTHROPIC_CUSTOM_HEADERS, "X-Team: a\nX-Ditto-Session-Id: s1\nX-Ditto-Tool-Deny: gmail__*,class:gated\nX-Ditto-Harness: claude");
 });
 
-test("mergeCustomHeaders keeps foreign lines and replaces our names case-insensitively", () => {
-  assert.equal(mergeCustomHeaders(undefined, [["A", "1"]]), "A: 1");
-  assert.equal(mergeCustomHeaders("  ", [["A", "1"]]), "A: 1");
-  assert.equal(mergeCustomHeaders("B: 2\r\na: old\nnot-a-header", [["A", "1"]]), "B: 2\nnot-a-header\nA: 1");
+test("claudeDittoDenyRules: reads user, project and local settings", () => {
+  const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "ditto-deny-")));
+  const home = path.join(root, "home");
+  const cwd = path.join(root, "repo");
+  mkdirSync(home);
+  mkdirSync(path.join(cwd, ".claude"), { recursive: true });
+  const write = (file, deny) => writeFileSync(file, JSON.stringify({ permissions: { deny } }));
+  write(path.join(home, "settings.json"), ["mcp__ditto__gmail__send_email", "Bash(rm:*)"]);
+  write(path.join(cwd, ".claude", "settings.json"), ["mcp__ditto__slack__*", "mcp__ditto__bad name", "mcp__other__x", 7]);
+  write(path.join(cwd, ".claude", "settings.local.json"), ["mcp__ditto__slack__*", "mcp__ditto"]);
+  assert.deepEqual(claudeDittoDenyRules(cwd, { CLAUDE_CONFIG_DIR: home }), ["gmail__send_email", "slack__*", "*"]);
+  // Missing and malformed files contribute nothing rather than failing the launch.
+  writeFileSync(path.join(cwd, ".claude", "settings.local.json"), "{not json");
+  assert.deepEqual(claudeDittoDenyRules(cwd, { CLAUDE_CONFIG_DIR: path.join(root, "absent") }), ["slack__*"]);
 });
 
-test("harness version: parsed from --version output, omitted when unreadable", () => {
-  assert.equal(parseHarnessVersion("2.1.296 (Claude Code)\n"), "2.1.296");
-  assert.equal(parseHarnessVersion("codex-cli 0.162.1\n"), "0.162.1");
-  assert.equal(parseHarnessVersion("codex-cli 0.163.0-alpha.2"), "0.163.0");
-  assert.equal(parseHarnessVersion("Claude Code"), undefined);
-  assert.equal(parseHarnessVersion("2.1"), undefined);
-  assert.equal(parseHarnessVersion(undefined), undefined);
+test("claudeDittoDenyRules: native MCP's per-source servers map onto router rules", () => {
+  const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "ditto-deny-mcp-")));
+  const home = path.join(root, "home");
+  mkdirSync(home);
+  writeFileSync(path.join(home, "settings.json"), JSON.stringify({ permissions: { deny: ["mcp__ditto-github__delete_repo", "mcp__ditto-linear", "mcp__ditto-bad name__x", "mcp__dittoish__x"] } }));
+  assert.deepEqual(claudeDittoDenyRules(path.join(root, "nowhere"), { CLAUDE_CONFIG_DIR: home }), ["github__delete_repo", "linear__*"]);
+});
 
-  const env = (dir) => ({ ...process.env, PATH: `${dir}${path.delimiter}${process.env.PATH}` });
-  assert.equal(readHarnessVersion("claude", env(fakeVersionBin("claude", "2.1.296 (Claude Code)"))), "2.1.296");
-  assert.equal(readHarnessVersion("codex", env(fakeVersionBin("codex", "codex-cli 0.162.1"))), "0.162.1");
-  assert.equal(readHarnessVersion("claude", env(fakeVersionBin("claude", "no version here"))), undefined);
-  assert.equal(readHarnessVersion("claude", env(fakeVersionBin("claude", "2.1.296", 1))), undefined, "a failing --version is not trusted");
-  assert.equal(readHarnessVersion("heyditto-no-such-harness-binary"), undefined);
-
-  assert.deepEqual(harnessHeaders("codex", "0.162.1"), [["X-Ditto-Harness", "codex"], ["X-Ditto-Harness-Version", "0.162.1"]]);
-  assert.deepEqual(harnessHeaders("codex", undefined), [["X-Ditto-Harness", "codex"]]);
+test("claudeDittoDenyRules: a nested directory still gets the repository's rules", () => {
+  const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "ditto-deny-nested-")));
+  const repo = path.join(root, "repo");
+  const nested = path.join(repo, "packages", "app");
+  mkdirSync(path.join(repo, ".git"), { recursive: true });
+  mkdirSync(path.join(repo, ".claude"), { recursive: true });
+  mkdirSync(path.join(nested, ".claude"), { recursive: true });
+  // Above the repository root: never read.
+  mkdirSync(path.join(root, ".claude"), { recursive: true });
+  writeFileSync(path.join(root, ".claude", "settings.json"), JSON.stringify({ permissions: { deny: ["mcp__ditto__outside__*"] } }));
+  writeFileSync(path.join(repo, ".claude", "settings.json"), JSON.stringify({ permissions: { deny: ["mcp__ditto__gmail__*"] } }));
+  writeFileSync(path.join(nested, ".claude", "settings.local.json"), JSON.stringify({ permissions: { deny: ["mcp__ditto__slack__*"] } }));
+  const env = { CLAUDE_CONFIG_DIR: path.join(root, "absent") };
+  assert.deepEqual(claudeDittoDenyRules(nested, env), ["slack__*", "gmail__*"]);
+  // Outside any repository only the directory itself counts.
+  const loose = path.join(root, "loose", "deep");
+  mkdirSync(path.join(loose, ".claude"), { recursive: true });
+  assert.deepEqual(claudeDittoDenyRules(loose, env), []);
 });
 
 test("planCodex: resume forms and header override", () => {
@@ -477,54 +459,6 @@ test("planCodex: resume forms and header override", () => {
   assert.ok(last.args.includes("--last"));
   assert.ok(last.args.includes('model_providers.ditto.http_headers={"X-Ditto-Session-Id"="s1","X-Ditto-Harness"="codex"}'));
   assert.equal(tomlString('a"b'), '"a\\"b"');
-});
-
-/** The value of the `-c model_providers.ditto.http_headers=…` override, parsed as TOML. */
-function codexHttpHeaders(args) {
-  const prefix = "model_providers.ditto.http_headers=";
-  const overrides = args.filter((a, i) => args[i - 1] === "-c" && a.startsWith(prefix));
-  assert.equal(overrides.length, 1, "exactly one http_headers override");
-  return parseToml(`http_headers = ${overrides[0].slice(prefix.length)}`).http_headers;
-}
-
-test("planCodex sends X-Ditto-Harness and X-Ditto-Harness-Version in http_headers", () => {
-  const base = { baseUrl: "https://api.heyditto.ai/v1", apiKey: "k", sessionId: "s1", passthrough: [], env: {} };
-  const plan = planCodex({ ...base, harnessVersion: "0.162.1" });
-  // A valid TOML inline table that keeps the session header next to ours.
-  assert.deepEqual(codexHttpHeaders(plan.args), {
-    "X-Ditto-Session-Id": "s1",
-    "X-Ditto-Harness": "codex",
-    "X-Ditto-Harness-Version": "0.162.1",
-  });
-  // Headless turns (exec / exec resume) carry the same headers.
-  assert.deepEqual(Object.keys(codexHttpHeaders(planCodex({ ...base, harnessVersion: "0.162.1", prompt: "hi", resumeLast: true }).args)), [
-    "X-Ditto-Session-Id",
-    "X-Ditto-Harness",
-    "X-Ditto-Harness-Version",
-  ]);
-  // Unreadable version: the version header is omitted, the rest stays.
-  assert.deepEqual(codexHttpHeaders(planCodex(base).args), { "X-Ditto-Session-Id": "s1", "X-Ditto-Harness": "codex" });
-  assert.equal(tomlInlineTable([["a\"b", "c"], ["d", "e"]]), '{"a\\"b"="c","d"="e"}');
-});
-
-test("--dry-run codex reads the installed codex version once and sends it", async () => {
-  const stub = await startStub();
-  try {
-    const bin = fakeVersionBin("codex", "codex-cli 0.162.1");
-    const result = await runAsync(["codex", "--dry-run", "-e", "beta", "--session", "sess-c"], {
-      DITTO_API_BASE: stub.base,
-      DITTO_API_KEY: "ditto_mcp_test",
-      PATH: `${bin}${path.delimiter}${process.env.PATH}`,
-    });
-    assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(codexHttpHeaders(JSON.parse(result.stdout).args), {
-      "X-Ditto-Session-Id": "sess-c",
-      "X-Ditto-Harness": "codex",
-      "X-Ditto-Harness-Version": "0.162.1",
-    });
-  } finally {
-    stub.close();
-  }
 });
 
 test("helpers: separator, api root, worktree names", async () => {
@@ -802,4 +736,68 @@ test("searchTranscripts: exact title wins, then title words, then prompts; this 
   assert.deepEqual(searchTranscripts(all, "DITTO REVIEW QUALITY AND UX", "/a").map((x) => x.id), ["3", "2"]);
   assert.deepEqual(searchTranscripts(all, "review", "/a").map((x) => x.id), ["3", "4", "2", "1"]);
   assert.deepEqual(searchTranscripts(all, "", "/a").length, 4);
+});
+
+
+test("MCP setup failure honors explicit key retention", async () => {
+ for (const keep of [false,true]) {
+  const stub = await startStub({mcpError:true});
+  const claude = fakeClaude();
+  try {
+   const result = await runAsync(["claude","--endpoint","alpha","--mcp-only","-p","hello",...(keep?["--keep-key"]:[])], claude.env({DITTO_API_BASE:stub.base,DITTO_API_KEY:"ditto_mcp_test"}));
+   assert.notEqual(result.status,0);
+   assert.match(result.stderr,/MCP-only setup failed/);
+   assert.equal(stub.calls.filter(c=>c.method==="DELETE"&&/keys\/key-1$/.test(c.url)).length,keep?0:1);
+  } finally { stub.close(); }
+ }
+});
+
+test("harness version: parsed exactly as reported, never rounded or guessed", () => {
+  assert.equal(parseHarnessVersion("2.1.316 (Claude Code)\n"), "2.1.316");
+  assert.equal(parseHarnessVersion("codex-cli 0.166.0"), "0.166.0");
+  // A pre-release is its own release: rounding it to 0.163.0 would name a
+  // version the user does not have.
+  assert.equal(parseHarnessVersion("codex-cli 0.163.0-alpha.2"), "0.163.0-alpha.2");
+  assert.equal(parseHarnessVersion("1.2.3+build.7"), "1.2.3+build.7");
+  assert.equal(parseHarnessVersion("listening on 10.0.0.65"), undefined);
+  assert.equal(parseHarnessVersion("v1.2"), undefined);
+  assert.equal(parseHarnessVersion(""), undefined);
+  assert.equal(parseHarnessVersion(undefined), undefined);
+  assert.deepEqual(harnessHeaders("codex", "0.163.0-alpha.2"), [["X-Ditto-Harness", "codex"], ["X-Ditto-Harness-Version", "0.163.0-alpha.2"]]);
+  assert.deepEqual(harnessHeaders("claude", undefined), [["X-Ditto-Harness", "claude"]]);
+  assert.deepEqual(harnessHeaders("claude", "not a version"), [["X-Ditto-Harness", "claude"]]);
+  assert.equal(tomlInlineTable([["A", "1"], ["B", 'x"y']]), '{"A"="1","B"="x\\"y"}');
+});
+
+test("harness version: an async probe that omits the header on failure or a stall", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "ditto-version-"));
+  const script = (name, body) => {
+    const file = path.join(dir, name);
+    writeFileSync(file, `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+    return file;
+  };
+  assert.equal(await readHarnessVersion(script("ok", 'echo "2.1.316 (Claude Code)"')), "2.1.316");
+  assert.equal(await readHarnessVersion(script("stderr", 'echo "codex-cli 0.166.0" >&2')), "0.166.0");
+  assert.equal(await readHarnessVersion(script("fails", "echo 9.9.9; exit 3")), undefined);
+  assert.equal(await readHarnessVersion(path.join(dir, "missing")), undefined);
+  // A stalled harness resolves undefined at the timeout and never blocks the
+  // event loop: a timer scheduled meanwhile still fires.
+  let ticked = false;
+  setTimeout(() => { ticked = true; }, 20);
+  const started = Date.now();
+  assert.equal(await readHarnessVersion(script("hangs", "sleep 5"), process.env, 300), undefined);
+  assert.ok(ticked, "the event loop kept running during the probe");
+  assert.ok(Date.now() - started < 3000, "the probe gave up at its timeout");
+});
+
+test("planClaude and planCodex: harness headers, and a parent's version never leaks", () => {
+  const base = { baseUrl: "https://api.heyditto.ai/v1", apiKey: "k", sessionId: "s1", passthrough: [], env: {} };
+  assert.equal(planClaude({ ...base, harnessVersion: "2.1.316" }).envSet.ANTHROPIC_CUSTOM_HEADERS, "X-Ditto-Session-Id: s1\nX-Ditto-Harness: claude\nX-Ditto-Harness-Version: 2.1.316");
+  // Started inside another `heyditto claude` whose version this launch could
+  // not read: the parent's header is dropped, not forwarded as this one's.
+  const parent = "X-Team: a\nX-Ditto-Harness: claude\nx-ditto-harness-version: 2.1.207";
+  assert.equal(planClaude({ ...base, env: { ANTHROPIC_CUSTOM_HEADERS: parent } }).envSet.ANTHROPIC_CUSTOM_HEADERS, "X-Team: a\nX-Ditto-Session-Id: s1\nX-Ditto-Harness: claude");
+  assert.equal(planClaude({ ...base, harnessVersion: "2.1.316", env: { ANTHROPIC_CUSTOM_HEADERS: parent } }).envSet.ANTHROPIC_CUSTOM_HEADERS, "X-Team: a\nX-Ditto-Session-Id: s1\nX-Ditto-Harness: claude\nX-Ditto-Harness-Version: 2.1.316");
+  const codex = planCodex({ ...base, harnessVersion: "0.166.0" });
+  assert.ok(codex.args.includes('model_providers.ditto.http_headers={"X-Ditto-Session-Id"="s1","X-Ditto-Harness"="codex","X-Ditto-Harness-Version"="0.166.0"}'));
 });

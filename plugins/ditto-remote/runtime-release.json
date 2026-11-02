@@ -1,0 +1,12 @@
+{
+  "package": "@heyditto/cli",
+  "version": "2.41.0",
+  "gitHead": "25c16ccc0c323edd2296658e2de5914b75b3a06f",
+  "sourceMerge": "e5e41776b5f53806acc365bd3e12b5c85d88f596",
+  "tarball": "https://registry.npmjs.org/@heyditto/cli/-/cli-2.41.0.tgz",
+  "integrity": "sha512-s7StCfoUEekOYzEOv7+5EdgZ9cSVaJoXEiEnsREPZxRaCnddVz0rhauSbWBZrYQmn7w1qrjVNwddNMcT/0b28A==",
+  "sha256": "e74778b249eba04bda71ff0a7cf86ba3a34e52a88d7af914b89a330d76a1d6e2",
+  "dependencyLockSHA256": "5cf1d0d21d0946c278e30d639919f308ac8fb3559a056ddd19774486435383b3",
+  "provenance": "https://registry.npmjs.org/-/npm/v1/attestations/@heyditto%2fcli@2.41.0",
+  "releaseWorkflowRun": "https://github.com/ditto-assistant/ditto-cli/actions/runs/40989344989"
+}

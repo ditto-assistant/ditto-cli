@@ -1,5 +1,7 @@
 /** Shared types for the coding-agent launchers. Pure data, no I/O. */
 
+import type { ClaudeMcpAttachment } from "./claude-mcp.js";
+
 export type Harness = "claude" | "codex" | "grok";
 
 export const HARNESSES: readonly Harness[] = ["claude", "codex", "grok"];
@@ -32,8 +34,8 @@ export const SESSION_HEADER = "X-Ditto-Session-Id";
 
 /**
  * Headers naming the harness and its installed version on every inference
- * request. The router reads these first to pick version-specific request
- * shaping and falls back to parsing the User-Agent when they are absent.
+ * request. The router reads these first to serve the prompts of that exact
+ * release, and falls back to parsing the User-Agent when they are absent.
  */
 export const HARNESS_HEADER = "X-Ditto-Harness";
 export const HARNESS_VERSION_HEADER = "X-Ditto-Harness-Version";
@@ -50,7 +52,7 @@ export interface PlanInput {
   /** Ditto session id sent as X-Ditto-Session-Id. */
   sessionId: string;
   /**
-   * Installed harness version (X.Y.Z from `<harness> --version`), sent as
+   * Installed harness version from `<harness> --version`, sent as
    * X-Ditto-Harness-Version. Undefined when it could not be read: the header
    * is then omitted rather than guessed.
    */
@@ -68,6 +70,15 @@ export interface PlanInput {
   plan?: boolean;
   /** Extra argv forwarded verbatim to the harness. */
   passthrough: string[];
+  /** Router tool deny rules to forward (claude-deny.ts); Claude only. */
+  toolDeny?: string[];
+  /** The endpoint's tools attached as Claude Code MCP servers (claude-mcp.ts); Claude only. */
+  mcp?: ClaudeMcpAttachment;
+  /** Keep model inference on the user's native Claude Code account. */
+  mcpOnly?: boolean;
+  remoteTransport?: "cli" | "channels";
+  /** Where the harness runs; relative paths in its passthrough argv mean files there. */
+  cwd?: string;
   /** Parent environment to derive the child environment from. */
   env: NodeJS.ProcessEnv;
 }

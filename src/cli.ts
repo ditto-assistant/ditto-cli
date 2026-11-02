@@ -35,6 +35,7 @@ import { registerCodexAppCommand } from "./agents/codexapp.js";
 import { registerAppCommands } from "./app-commands.js";
 import { registerConfigCommands } from "./dittoconfig/commands.js";
 import { deviceLogin } from "./device-login.js";
+import { registerSelfUpdateCommands } from "./self-update.js";
 
 type OutputFormat = "json" | "text" | "markdown" | "raw";
 const OUTPUT_FORMATS: readonly OutputFormat[] = ["json", "text", "markdown", "raw"];
@@ -285,10 +286,12 @@ async function callAndPrint(
   name: string,
   args: Record<string, unknown>,
   format: OutputFormat,
+  failOnError = false,
 ): Promise<void> {
   const client = await getClient();
   try {
     const result = await client.callTool({ name, arguments: args });
+    if (failOnError && result.isError) throw new Error(formatToolResult(result, "text"));
     process.stdout.write(`${formatToolResult(result, format)}\n`);
   } finally {
     await client.close();
@@ -902,6 +905,7 @@ function buildProgram(): Command {
     .name("heyditto")
     .description("Save, search, fetch, and traverse Ditto memories from the shell.")
     .version(packageVersion, "-v, --version", "print the CLI version")
+    .option("--no-auto-update", "disable background CLI updates for this invocation")
     .helpCommand("help [command]", "show help for a command")
     .enablePositionalOptions()
     .showHelpAfterError()
@@ -909,9 +913,8 @@ function buildProgram(): Command {
       "after",
       `
 Notes:
-  On macOS, Apple ships /usr/bin/ditto (a file-copy utility). If 'ditto'
-  runs the wrong tool, install with 'npm i -g @heyditto/cli' and invoke as
-  'heyditto' (alias bin), or check 'type -a ditto' to disambiguate.
+  Use 'heyditto' for this CLI. On macOS, /usr/bin/ditto is Apple's
+  separate file-copy utility.
 
 Environment:
   DITTO_API_KEY     Optional override, taking precedence over the saved key.
@@ -1243,14 +1246,53 @@ your own workspace or an app workspace.`,
 
   registerEndpointCommands(program, addExamples, outputOption);
   registerAppCommands(program, addExamples, outputOption);
-  registerOrgCommands(program, addExamples, outputOption, orgOption);
+  registerOrgCommands(program, addExamples, outputOption, orgOption,
+    (name, args, output) => callAndPrint(name, args, parseOutputFormat(output), true));
   registerReviewCommands(program, addExamples, outputOption, orgOption);
+  registerSelfUpdateCommands(program, outputOption);
   registerHarnessCommands(program, addExamples);
   registerCodexAppCommand(program, addExamples);
   registerSessionCommands(program, addExamples);
   registerTeleportCommands(program, addExamples);
   registerForkCommand(program, addExamples);
   registerConfigCommands(program, addExamples);
+
+  addExamples(
+    program
+      .command("feedback")
+      .description("send a diagnostic report or feature request to the Ditto team")
+      .argument("[report]", "report text (or use --file)")
+      .requiredOption("--title <title>", "short report title")
+      .option("--file <path>", "read report text from a UTF-8 file")
+      .option("--tool <name>", "Ditto tool involved")
+      .option("--error <message>", "error observed, with private data removed")
+      .option("--expected <text>", "expected behavior")
+      .option("--include-recent-traces", "include recent request diagnostics from this session")
+      .addOption(outputOption())
+      .action(async (report: string | undefined, options: {
+        title: string; file?: string; tool?: string; error?: string; expected?: string;
+        includeRecentTraces?: boolean; output?: string;
+      }) => {
+        if (report !== undefined && options.file !== undefined) {
+          throw new Error("feedback: use report text or --file, not both");
+        }
+        if (report === undefined && options.file === undefined) {
+          throw new Error("feedback: provide report text or --file");
+        }
+        if (!options.title.trim()) throw new Error("feedback: title cannot be empty");
+        const text = options.file ? await readFile(options.file, "utf8") : report!;
+        if (!text.trim()) throw new Error("feedback: report text cannot be empty");
+        await callAndPrint("submit_feedback", {
+          title: options.title.trim(), report: text,
+          ...(options.tool ? { tool_name: options.tool } : {}),
+          ...(options.error ? { error: options.error } : {}),
+          ...(options.expected ? { expected: options.expected } : {}),
+          include_recent_traces: options.includeRecentTraces === true,
+        }, parseOutputFormat(options.output), true);
+      }),
+    `  heyditto feedback "The search tool timed out twice" --title "Search timeouts"
+  heyditto feedback --file ./report.txt --title "Missing capability" --include-recent-traces`,
+  );
 
   addExamples(
     program

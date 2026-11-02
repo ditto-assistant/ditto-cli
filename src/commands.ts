@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { gmModels, personalProviderKeys, providerKeySelection } from "./router-discovery.js";
 import { createInterface } from "node:readline/promises";
 import { Command, Option } from "commander";
 import { launchHarness, pickEndpoint } from "./agents/launch.js";
@@ -35,7 +36,9 @@ import {
   isEndpointPending,
   listChatAgents,
   listEndpoints,
+  listCompanies,
   listKeys,
+  resolveCompany,
   revokeKey,
   updateEndpoint,
 } from "./api.js";
@@ -190,6 +193,9 @@ interface EndpointCreateOptions {
   slug?: string;
   model?: string;
   default?: boolean;
+  billingMode?: string;
+  providerKey?: string[];
+  org?: string;
 }
 
 export async function cmdEndpointCreate(options: EndpointCreateOptions): Promise<void> {
@@ -197,6 +203,13 @@ export async function cmdEndpointCreate(options: EndpointCreateOptions): Promise
   if (options.name?.trim()) input.name = options.name.trim();
   if (options.slug?.trim()) input.slug = options.slug.trim().toLowerCase();
   if (options.model?.trim()) input.model = options.model.trim();
+  if (options.billingMode !== undefined) input.billingMode = options.billingMode;
+  if (options.providerKey !== undefined && !["byok", "both"].includes(options.billingMode ?? "")) throw new Error("--provider-key on create requires explicit --billing-mode byok or both");
+  if (options.providerKey !== undefined) input.providerKeyIds = providerKeySelection(options.providerKey);
+  // Only an explicit --org files the endpoint under an organization: a default
+  // set by `heyditto orgs use` must not silently move who pays for new work.
+  const company = options.org?.trim() ? await resolveCompany(options.org) : undefined;
+  if (company) input.companyId = company.id;
   const created = await createEndpoint(input);
   const stored = await readStoredAuth();
   const makeDefault = options.default || !stored?.defaultEndpoint;
@@ -204,12 +217,64 @@ export async function cmdEndpointCreate(options: EndpointCreateOptions): Promise
   if (isJSON(options)) {
     process.stdout.write(`${JSON.stringify({ ...(await endpointJSON(created)), defaultEndpoint: makeDefault ? created.slug : (stored?.defaultEndpoint ?? null) }, null, 2)}\n`);
   } else {
-    process.stdout.write(`Created endpoint ${created.slug} (model ${created.model})${makeDefault ? " — now the default" : ""}.\n`);
+    process.stdout.write(`Created endpoint ${created.slug} (model ${created.model})${company ? ` in ${company.slug}, which owns and pays for it` : ""}${makeDefault ? " — now the default" : ""}.\n`);
     if (!isEndpointPending(created)) {
       process.stdout.write(`Launch with: heyditto claude --endpoint ${created.slug}\n`);
     }
   }
   await noteActivation([created]);
+}
+
+interface EndpointMoveOptions {
+  org?: string;
+  personal?: boolean;
+  output?: string;
+}
+
+/**
+ * Move an endpoint between your personal context and an organization.
+ *
+ * Endpoints are resources like any other Ditto resource: who owns one decides
+ * who pays for it and who may manage it. The server checks manager rights on
+ * both the endpoint's current owner and the destination, so this command only
+ * resolves the destination and reports what the server decided. Keys minted on
+ * the endpoint keep working; billing follows the new owner from the next call.
+ */
+export async function cmdEndpointMove(ref: string, options: EndpointMoveOptions): Promise<void> {
+  const toOrg = options.org?.trim();
+  if (Boolean(toOrg) === Boolean(options.personal)) {
+    throw new Error("pass exactly one of --org <org> (move into an organization) or --personal (move back to you)");
+  }
+  const { endpoint } = await getEndpoint(ref);
+  const company = toOrg ? await resolveCompany(toOrg) : undefined;
+  const target = company?.id ?? "";
+  if ((endpoint.companyId ?? "") === target) {
+    const where = company ? company.slug : "your personal context";
+    if (isJSON(options)) process.stdout.write(`${JSON.stringify({ moved: false, endpoint: endpoint.slug, companyId: target || null }, null, 2)}\n`);
+    else process.stdout.write(`${endpoint.slug} is already in ${where}.\n`);
+    return;
+  }
+  const updated = await updateEndpoint(endpoint.id, { companyId: target });
+  if (isJSON(options)) {
+    process.stdout.write(`${JSON.stringify({ moved: true, ...(await endpointJSON(updated)) }, null, 2)}\n`);
+    return;
+  }
+  process.stdout.write(
+    company
+      ? `Moved ${endpoint.slug} into ${company.slug}; the organization now owns and pays for it.\n`
+      : `Moved ${endpoint.slug} back to your personal context; you now own and pay for it.\n`,
+  );
+}
+
+/** "personal", or the organization slug the endpoint is filed under. */
+async function ownerWord(endpoint: { companyId?: string }): Promise<string> {
+  if (!endpoint.companyId) return "personal";
+  try {
+    const company = (await listCompanies()).find((c) => c.id === endpoint.companyId);
+    return company ? `organization ${company.slug}` : `organization ${endpoint.companyId}`;
+  } catch {
+    return `organization ${endpoint.companyId}`;
+  }
 }
 
 export async function cmdEndpointShow(ref: string, options: { output?: string }): Promise<void> {
@@ -224,6 +289,7 @@ export async function cmdEndpointShow(ref: string, options: { output?: string })
     `name:          ${endpoint.name}`,
     `id:            ${endpoint.id}`,
     `model:         ${endpoint.model}${endpoint.modelMode ? `  (${endpoint.modelMode})` : ""}`,
+    `owner:         ${await ownerWord(endpoint)}`,
     `status:        ${endpoint.status ?? "active"}`,
     `spend:         ${spendColumn(endpoint)}`,
     `memory:        recall ${endpoint.recallEnabled === false ? "off" : "on"}, record ${endpoint.recordEnabled === false ? "off" : "on"}${endpoint.memoryDepth !== undefined ? `, depth ${endpoint.memoryDepth}` : ""}`,
@@ -303,6 +369,8 @@ function excludedProviders(value: string): string[] | null {
 function codingAgentLines(endpoint: InferenceEndpoint): string[] {
   const options = endpoint.providerOptions ?? {};
   const lines: string[] = [];
+  const failover = endpoint.failover;
+  lines.push(`failover:     ${failover?.enabled ? `on · ${failover.model || "same model"} · $${failover.maxCostUsd} per request · sticky for session` : "off · stay on the original provider"}`);
   const excluded = options[EXCLUDED_PROVIDERS_OPTION];
   if (Array.isArray(excluded) && excluded.length > 0) lines.push(`excluded:      ${excluded.join(", ")}`);
   if (options.codex_models === true) {
@@ -380,6 +448,7 @@ interface EndpointSetOptions {
   maxToolRounds?: string;
   modelMode?: string;
   billingMode?: string;
+  providerKey?: string[];
   routing?: string;
   streamGranularity?: string;
   contextCompaction?: string;
@@ -405,6 +474,9 @@ interface EndpointSetOptions {
   claudePrompt?: string;
   claudePromptMode?: string;
   claudePromptAutoupdate?: string;
+  failover?: string;
+  failoverModel?: string;
+  failoverMaxCost?: string;
   excludeProvider?: string;
   yes?: boolean;
 }
@@ -574,6 +646,7 @@ export async function cmdEndpointSet(ref: string, options: EndpointSetOptions): 
   // quoted value with stray whitespace still matches the server's enum.
   if (options.modelMode !== undefined) patch.modelMode = options.modelMode.trim();
   if (options.billingMode !== undefined) patch.billingMode = options.billingMode.trim();
+  if (options.providerKey !== undefined) patch.providerKeyIds = providerKeySelection(options.providerKey);
   if (options.routing !== undefined) patch.routingMode = options.routing.trim();
   if (options.streamGranularity !== undefined) patch.streamGranularity = options.streamGranularity.trim();
   if (options.contextCompaction !== undefined) patch.contextCompaction = options.contextCompaction.trim();
@@ -641,11 +714,25 @@ export async function cmdEndpointSet(ref: string, options: EndpointSetOptions): 
   // in providerOptions beside the coding-agent settings; `none` removes it.
   if (options.excludeProvider !== undefined) agent[EXCLUDED_PROVIDERS_OPTION] = excludedProviders(options.excludeProvider);
 
-  if (Object.keys(patch).length === 0 && Object.keys(agent).length === 0 && !touchesMaps) {
+  const failoverEnabled = onOff("--failover", options.failover);
+  const touchesFailover = failoverEnabled !== undefined || options.failoverModel !== undefined || options.failoverMaxCost !== undefined;
+  const failoverCap = options.failoverMaxCost === undefined ? undefined : Number(options.failoverMaxCost);
+  if (failoverCap !== undefined && (!Number.isFinite(failoverCap) || failoverCap < 0 || failoverCap > 1_000_000)) throw new Error("--failover-max-cost must be a finite USD amount between 0 and 1000000");
+  if (Object.keys(patch).length === 0 && Object.keys(agent).length === 0 && !touchesMaps && !touchesFailover) {
     throw new Error("nothing to change; pass at least one --flag (see `heyditto endpoints set --help`)");
   }
 
   const { endpoint } = await getEndpoint(ref);
+  if (touchesFailover) {
+    const current = endpoint.failover ?? { enabled: false, model: "", maxCostUsd: 0 };
+    patch.failover = {
+      ...(failoverEnabled !== undefined ? { enabled: failoverEnabled } : {}),
+      ...(options.failoverModel !== undefined ? { model: options.failoverModel.trim() === "same" ? "" : options.failoverModel.trim() } : {}),
+      ...(failoverCap !== undefined ? { maxCostUsd: failoverCap } : {}) };
+    const next = { ...current, ...patch.failover };
+    if (next.enabled && next.maxCostUsd < 0.000001) throw new Error("enable failover with --failover-max-cost <usd>; zero never means unlimited");
+  }
+  if (options.providerKey !== undefined && !["byok", "both"].includes(options.billingMode ?? endpoint.billingMode ?? "")) throw new Error("--provider-key requires BYOK billing; also set --billing-mode byok or both");
   // The server replaces these maps wholesale, so merge onto what the endpoint
   // has now and validate the result the way the backend will.
   const kindRoutes = mergeMap(endpoint.kindRoutes, kindEntries, options.clearKindRoutes);
@@ -673,6 +760,8 @@ export async function cmdEndpointSet(ref: string, options: EndpointSetOptions): 
   }
   // Raising or removing a spend cap lets the endpoint spend more credits.
   const raisesSpend =
+    (touchesFailover && (patch.failover?.enabled ?? endpoint.failover?.enabled) === true &&
+      (!endpoint.failover?.enabled || (patch.failover?.maxCostUsd ?? endpoint.failover.maxCostUsd) > endpoint.failover.maxCostUsd)) ||
     patch.spendLimitTokens === null ||
     (typeof patch.spendLimitTokens === "number" &&
       endpoint.spendLimitTokens != null &&
@@ -814,6 +903,7 @@ export interface KeysCreateOptions {
   vercelEnv?: string;
   k8sSecret?: string;
   flySecret?: string;
+  keyFile?: string;
   repo?: string;
   env?: string;
   org?: string;
@@ -851,6 +941,7 @@ export function shorthandsOf(options: KeysCreateOptions): Partial<Record<StoreId
     vercel: options.vercelEnv,
     kubernetes: options.k8sSecret,
     fly: options.flySecret,
+    file: options.keyFile,
   };
 }
 
@@ -870,7 +961,8 @@ function parseKeyExpiry(raw: string | undefined): KeyExpiry {
 /**
  * Mints a key on an endpoint and hands the plaintext straight to the platform
  * CLI over stdin (`gh secret set`, `gcloud secrets create --data-file=-`, …).
- * The key is never printed, logged or stored locally; when the platform CLI
+ * The key is never printed or logged; only the explicit private-file adapter
+ * stores it locally. When delivery
  * fails it is revoked again so nothing usable is left behind.
  */
 export async function cmdEndpointKeysCreate(ref: string, options: KeysCreateOptions): Promise<void> {
@@ -948,7 +1040,7 @@ export async function cmdEndpointKeysCreate(ref: string, options: KeysCreateOpti
   process.stdout.write(
     [
       `Minted key …${key.keyHint} (${key.name ?? keyName}) on ${endpoint.slug}: expires ${expiresIn}${budget !== undefined ? `, budget ${budget.toLocaleString()} tokens ${spendPeriod}` : ", no spend cap"}.`,
-      `Stored ${secretName} in ${target.describe} via ${store.bin}. The key was not printed and is not kept locally.`,
+      `Stored ${secretName} in ${target.describe} via ${store.bin}. The key was not printed${store.id === "file" ? "; its only local copy is the requested private file" : " and is not kept locally"}.`,
       "",
       ...store.usage(secretName, target, gateway),
       "",
@@ -999,6 +1091,7 @@ export function registerEndpointCommands(
 ): void {
   const endpoints = program
     .command("endpoints")
+    .alias("profiles")
     .description("manage the inference endpoints used by heyditto claude / codex")
     .summary("manage inference endpoints")
     .showHelpAfterError()
@@ -1029,12 +1122,55 @@ through the gh CLI; the plaintext never reaches your terminal.`,
       .option("--name <name>", "display name")
       .option("--slug <slug>", "url-safe slug (lowercase letters, digits, dashes)")
       .option("--model <id>", "default model id (default: the gateway's default model)")
+      .addOption(new Option("--billing-mode <mode>", "whose keys pay; byok never falls back to Ditto-funded providers").choices([...BILLING_MODES]))
+      .option("--provider-key <id>", "select a saved personal provider key UUID (repeatable or comma-separated; never a raw key)", collect)
+      .option("--org <org>", "file it under this organization (slug or id), which owns and pays for it")
       .option("--default", "make it the default for heyditto claude / codex (automatic when you have no default yet)")
       .addOption(outputOption())
       .action(cmdEndpointCreate),
     `  heyditto endpoints create
-  heyditto endpoints create --name "Work laptop" --model anthropic/claude-sonnet-5 --default`,
+  heyditto endpoints create --name "Work laptop" --model anthropic/claude-sonnet-5 --default
+  heyditto endpoints create --org omniaura --billing-mode byok --provider-key <uuid>`,
   );
+  addExamples(
+    endpoints
+      .command("move")
+      .description("move an endpoint into an organization or back to you (the owner pays for it)")
+      .argument("<endpoint>", "endpoint slug or id")
+      .option("--org <org>", "organization slug or id to move it into")
+      .option("--personal", "move it back to your personal context")
+      .addOption(outputOption())
+      .action(cmdEndpointMove),
+    `  heyditto endpoints move my-endpoint --org omniaura
+  heyditto endpoints move my-endpoint --personal`,
+  );
+  endpoints
+    .command("provider-keys")
+    .description("list your saved personal provider-key metadata, never plaintext credentials")
+    .addOption(outputOption())
+    .action(async (options: {output?: string}) => {
+      const result = await personalProviderKeys();
+      if (isJSON(options)) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      else {
+        process.stdout.write(`Personal provider keys (${result.keys.length}; credentials never shown)\n`);
+        for (const key of result.keys) process.stdout.write(`${key.provider}  ${key.configured && key.enabled ? "enabled" : "unavailable"}  ${key.id}  ${key.label ?? ""}\n`);
+      }
+    });
+  endpoints
+    .command("models")
+    .description("discover available GM models from the server catalog")
+    .argument("<provider>", "provider (currently gm)")
+    .addOption(outputOption())
+    .action(async (provider: string, options: {output?: string}) => {
+      if (provider !== "gm") throw new Error("model discovery currently supports gm");
+      const result = await gmModels();
+      if (!result || !Array.isArray(result.models)) throw new Error("Router returned an invalid GM model catalog");
+      if (isJSON(options)) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      else {
+        process.stdout.write(`GM models (${result.models.length})\n`);
+        for (const model of result.models) process.stdout.write(`${model.id}  ${model.name ?? ""}\n`);
+      }
+    });
   endpoints
     .command("show")
     .description("show one endpoint's settings")
@@ -1092,6 +1228,7 @@ through the gh CLI; the plaintext never reaches your terminal.`,
       .addOption(new Option("--routing <mode>", "how a provider is picked for a model").choices([...ROUTING_MODES]))
       .addOption(new Option("--model-mode <mode>", "what happens to an unknown request model").choices([...MODEL_MODES]))
       .addOption(new Option("--billing-mode <mode>", "whose provider keys pay for requests").choices([...BILLING_MODES]))
+      .option("--provider-key <id>", "replace selected saved provider key UUIDs (repeatable or comma-separated; never raw keys)", collect)
       .addOption(new Option("--stream-granularity <level>", "how much server-side tool activity the stream shows").choices([...STREAM_GRANULARITIES]))
       .option("--max-tool-rounds <n>", `server-side tool loop cap per request (0-${MAX_TOOL_ROUNDS})`)
       .option("--batch <on|off>", "admit batch submissions")
@@ -1099,6 +1236,9 @@ through the gh CLI; the plaintext never reaches your terminal.`,
       .option("--kind-route <kind=model>", `pin a request kind to a model (${ROUTABLE_KINDS.join(", ")}); repeatable, empty value removes one`, collect)
       .option("--model-route <requested=target>", "map a requested model id to a provider model; repeatable, empty value removes one", collect)
       .option("--alias <name=model>", "name a model on this endpoint; repeatable, empty value removes one", collect)
+      .option("--failover <on|off>", "allow sticky provider/model fallback; off by default, requires a USD cap")
+      .option("--failover-model <model|same>", "fallback model; choose a cheaper model to reduce cold-cache refill cost")
+      .option("--failover-max-cost <usd>", "maximum cold-cache quote across fallback attempts per request; positive when enabled; use --failover off to disable")
       .option("--clear-kind-routes", "remove every kind route")
       .option("--clear-model-routes", "remove every model route")
       .option("--clear-aliases", "remove every alias")
@@ -1159,6 +1299,7 @@ through the gh CLI; the plaintext never reaches your terminal.`,
       .option("--vercel-env <NAME>", "shorthand for --store vercel --secret NAME")
       .option("--k8s-secret <NAME>", "shorthand for --store kubernetes --secret NAME")
       .option("--fly-secret <NAME>", "shorthand for --store fly --secret NAME")
+      .option("--key-file <ABSOLUTE_PATH>", "store file: exclusive 0600 local file; existing private 0700 parent required, never overwrites")
       .option("--repo <owner/repo>", "github: repository for the secret (default: the repo of the current directory)")
       .option("--env <environment>", "github: deployment environment; gitlab: variable environment scope")
       .option("--org <org>", "github: organization secret; gitlab: group variable (cannot be combined with --repo/--env)")
@@ -1294,6 +1435,15 @@ export function registerHarnessCommands(program: Command, addExamples: (c: Comma
       .allowUnknownOption()
       .passThroughOptions();
     if (harness === "claude" || harness === "grok") cmd.option("--plan", "start in plan mode (--permission-mode plan)");
+    if (harness === "claude") {
+      // --mcp first, then --no-mcp: neither flag leaves the endpoint's
+      // claude_tool_surface default in charge (commander keeps it undefined).
+      cmd.option("--mcp", "attach the endpoint's tools as Claude Code MCP servers, one per app (default unless the endpoint sets claude_tool_surface = \"router\")");
+      cmd.option("--no-mcp", "keep the endpoint's tools on the router for this session (Code Mode / injected tools)");
+      cmd.option("--mcp-only", "use your native Claude Code account for inference; Ditto supplies only selected MCP tools and remote control");
+      cmd.option("--no-mcp-only", "use Ditto Router inference for this launch, overriding the saved native-account default");
+      cmd.addOption(new Option("--remote-transport <transport>", "remote prompt delivery: CLI terminal bridge (default) or MCP Channels (native account only, research preview)").choices(["cli", "channels"]));
+    }
     cmd.action(async (args: string[], options) => {
       await launchHarness(harness, args, options);
     });

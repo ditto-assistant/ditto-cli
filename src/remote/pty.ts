@@ -2,6 +2,7 @@ import { chmod } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
 import type { Harness } from "../agents/types.js";
+import type { PromptDeliveryMode } from "./protocol.js";
 
 /**
  * Runs a harness inside a pseudo-terminal this process owns, mirrored to the
@@ -69,11 +70,13 @@ export interface PtySession {
   /** Writes raw bytes to the harness's input. */
   write(data: string): void;
   /** Pastes a prompt (bracketed, so newlines survive) and submits it. */
-  inject(prompt: string): Promise<void>;
+  inject(prompt: string, mode?: PromptDeliveryMode, signal?: AbortSignal): Promise<void>;
   /** Sends the harness its interrupt key. */
   interrupt(harness: Harness): void;
   /** Milliseconds since the harness last wrote to the screen. */
   quietFor(): number;
+  /** A refused undo leaves input ownership unknown until a fresh PTY. */
+  inputBlockReason?(): string | undefined;
   /** Resolves with the exit code once the harness exits. */
   exit: Promise<number | null>;
   kill(): void;
@@ -84,6 +87,10 @@ export interface PtyOptions {
   env: NodeJS.ProcessEnv;
   /** Mirror to the real terminal (raw mode, resize). Tests can turn it off. */
   attachTerminal?: boolean;
+  /** Enables Claude-specific owned paste cancellation; physical Stop is separate. */
+  harness?: Harness;
+  /** Paste-to-submit delay; defaults to 120ms. Owned PTY tests use a longer window. */
+  pasteDelayMs?: number;
   onOutput?: (data: string) => void;
 }
 
@@ -107,6 +114,8 @@ export async function spawnInPty(command: string, args: string[], options: PtyOp
     child = spawnOnce();
   }
 
+  let inputOwnershipUncertain = false;
+  const inputBlockReason = () => inputOwnershipUncertain ? "Input changed on the device during cancellation. Review the terminal draft and relaunch the session before sending more prompts." : undefined;
   let lastOutput = Date.now();
   child.onData((data) => {
     lastOutput = Date.now();
@@ -114,13 +123,17 @@ export async function spawnInPty(command: string, args: string[], options: PtyOp
     options.onOutput?.(data);
   });
 
+  let localInputRevision = 0;
   const cleanups: Array<() => void> = [];
   if (options.attachTerminal !== false) {
     const stdin = process.stdin;
     const wasRaw = stdin.isTTY ? stdin.isRaw : false;
     if (stdin.isTTY) stdin.setRawMode(true);
     stdin.resume();
-    const onInput = (data: Buffer | string) => child.write(typeof data === "string" ? data : data.toString("utf8"));
+    const onInput = (data: Buffer | string) => {
+      localInputRevision++;
+      child.write(typeof data === "string" ? data : data.toString("utf8"));
+    };
     stdin.on("data", onInput);
     const onResize = () => child.resize(process.stdout.columns || cols, process.stdout.rows || rows);
     process.stdout.on("resize", onResize);
@@ -141,14 +154,40 @@ export async function spawnInPty(command: string, args: string[], options: PtyOp
 
   return {
     pid: child.pid,
-    write: (data) => child.write(data),
-    inject: async (prompt) => {
-      child.write(`\u001b[200~${prompt}\u001b[201~`);
-      await sleep(120);
-      child.write("\r");
+    write: (data) => { localInputRevision++; child.write(data); },
+    inject: async (prompt, mode = "queue", signal) => {
+      if (signal?.aborted) return;
+      const blocked = inputBlockReason();
+      if (blocked) throw new Error(blocked);
+      let pasted = false;
+      const pasteInputRevision = localInputRevision;
+      // Undo only this owned, nonempty paste, preserving its prior native draft.
+      // Do not undo an intervening local edit. Native undo also checks input mode.
+      // The caller still sends Escape independently to stop native execution.
+      const cancelPaste = () => {
+        if (pasted && options.harness === "claude") {
+          if (localInputRevision === pasteInputRevision) child.write("\u001f");
+          else inputOwnershipUncertain = true;
+        }
+      };
+      signal?.addEventListener("abort", cancelPaste, { once: true });
+      try {
+        child.write(`\u001b[200~${prompt}\u001b[201~`);
+        pasted = prompt.length > 0;
+        await sleep(options.pasteDelayMs ?? 120);
+        if (signal?.aborted) return;
+        pasted = false;
+        // Observed from native Claude Code 2.1.312 in a real terminal. Stop
+        // remains a separate Escape key; steering does not emulate Stop.
+        child.write(mode === "steer" ? "\u001b[13;5u" : "\r");
+      } finally {
+        pasted = false;
+        signal?.removeEventListener("abort", cancelPaste);
+      }
     },
     interrupt: (harness) => child.write(harness === "claude" ? "\u001b" : "\u0003"),
     quietFor: () => Date.now() - lastOutput,
+    inputBlockReason,
     exit,
     kill: () => child.kill(),
   };

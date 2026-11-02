@@ -1,5 +1,7 @@
-import { harnessHeaders, mergeCustomHeaders } from "./harness-headers.js";
-import { type HarnessPlan, type PlanInput, SESSION_HEADER, apiRootOf } from "./types.js";
+import { TOOL_DENY_HEADER } from "./claude-deny.js";
+import { MCP_KEY_ENV, TOOL_SURFACE_HEADER, TOOL_SURFACE_MCP, attachmentSettings, withClaudeSettings } from "./claude-mcp.js";
+import { harnessHeaders } from "./harness-headers.js";
+import { HARNESS_HEADER, HARNESS_VERSION_HEADER, type HarnessPlan, type PlanInput, SESSION_HEADER, apiRootOf } from "./types.js";
 
 /**
  * Builds the `claude` invocation.
@@ -26,14 +28,18 @@ export function planClaude(input: PlanInput): HarnessPlan {
 
   if (input.model) args.push("--model", input.model);
   if (input.prompt !== undefined) args.push("-p", input.prompt);
+  // Native MCP mode: the endpoint's tools as Claude Code's own servers, and
+  // the router told not to inject them a second time.
+  if (input.mcp) args.push("--mcp-config", input.mcp.config);
   args.push(...input.passthrough);
+  const finalArgs = input.mcp ? withClaudeSettings(args, attachmentSettings(input.mcp), { cwd: input.cwd }) : args;
 
-  // ANTHROPIC_CUSTOM_HEADERS (Claude Code >= 2.1.227) rides on every
-  // inference request; the caller's own headers are kept.
-  const headers = mergeCustomHeaders(input.env.ANTHROPIC_CUSTOM_HEADERS, [
-    [SESSION_HEADER, input.sessionId],
-    ...harnessHeaders("claude", input.harnessVersion),
-  ]);
+  const deny = input.toolDeny?.length ? `${TOOL_DENY_HEADER}: ${input.toolDeny.join(",")}` : undefined;
+  const surface = input.mcp ? `${TOOL_SURFACE_HEADER}: ${TOOL_SURFACE_MCP}` : undefined;
+  const identity = harnessHeaders("claude", input.harnessVersion).map(([name, value]) => `${name}: ${value}`);
+  const headers = [inheritedHeaders(input.env.ANTHROPIC_CUSTOM_HEADERS), `${SESSION_HEADER}: ${input.sessionId}`, deny, surface, ...identity]
+    .filter((h): h is string => Boolean(h))
+    .join("\n");
 
   const envSet: Record<string, string> = {
     ANTHROPIC_BASE_URL: apiRootOf(input.baseUrl),
@@ -41,6 +47,17 @@ export function planClaude(input: PlanInput): HarnessPlan {
     ANTHROPIC_CUSTOM_HEADERS: headers,
   };
   if (input.model) envSet.ANTHROPIC_MODEL = input.model;
+  if (input.mcp) envSet[MCP_KEY_ENV] = input.apiKey;
+  if (input.mcpOnly) {
+    // Endpoint keys are only MCP credentials in this mode. Never forward one
+    // to Anthropic or inherit a parent launch's inference gateway settings.
+    return {
+      command: "claude", args: finalArgs,
+      envSet: input.mcp ? { [MCP_KEY_ENV]: input.apiKey } : {},
+      envUnset: ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_CUSTOM_HEADERS", "ANTHROPIC_MODEL", "ANTHROPIC_API_KEY"],
+      installHint: "install Claude Code and sign in with `claude auth login`",
+    };
+  }
   // Claude Code's server-side auto-mode classifier needs the dangerous-tool-use
   // beta and `safeguards` field, which the router does not forward; a rejection
   // denies every auto-mode tool use. Decide locally unless the caller chose.
@@ -52,7 +69,7 @@ export function planClaude(input: PlanInput): HarnessPlan {
 
   return {
     command: "claude",
-    args,
+    args: finalArgs,
     envSet,
     envUnset: ["ANTHROPIC_API_KEY"],
     installHint: "install Claude Code: npm i -g @anthropic-ai/claude-code (or see https://code.claude.com)",
@@ -82,4 +99,22 @@ export function liftResumeFlags(args: string[]): { args: string[]; resume?: stri
     else out.push(a);
   }
   return { args: out, ...(resume !== undefined ? { resume } : {}), ...(cont ? { continue: true } : {}) };
+}
+
+/**
+ * Headers that describe one launch. A `heyditto claude` started inside another
+ * inherits the parent's, and a second session id would file the child's turns
+ * under the parent's thread, and a stale tool surface would leave a `--no-mcp`
+ * child with no tools at all. A parent's harness version is dropped even when
+ * this launch could not read its own, so the router never gets a stale one.
+ * Inherited deny rules stay: they only tighten.
+ */
+const LAUNCH_HEADERS = new Set([SESSION_HEADER, TOOL_SURFACE_HEADER, HARNESS_HEADER, HARNESS_VERSION_HEADER].map((h) => h.toLowerCase()));
+
+/** The caller's own custom headers, minus a parent launch's. */
+function inheritedHeaders(raw: string | undefined): string | undefined {
+  const kept = (raw ?? "")
+    .split("\n")
+    .filter((line) => line.trim() && !LAUNCH_HEADERS.has(line.split(":", 1)[0].trim().toLowerCase()));
+  return kept.length ? kept.join("\n").trim() : undefined;
 }
