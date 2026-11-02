@@ -32,6 +32,7 @@ import { resolveClaudeResume, transcriptCwd } from "./claude-resume.js";
 import { type ClaudeTranscript, findTranscriptById, isUuid, listTranscriptsIn } from "./claude-transcripts.js";
 import { watchClaudeSessionTitle } from "./claude-title-sync.js";
 import { planCodex } from "./codex.js";
+import { readHarnessVersion } from "./harness-headers.js";
 import { ensureGrokHome, planGrok } from "./grok.js";
 import { type SessionRecord, latestSession, readSession, sessionForHarnessId, writeSession } from "./sessions.js";
 import { canonicalCwd } from "../teleport/harness.js";
@@ -604,10 +605,17 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     }
   }
 
+  // Sent as X-Ditto-Harness-Version so the router serves this release's own
+  // prompts. Read once per launch, after sign-in (a failed login never runs
+  // the harness), and reused by every turn. Unreadable means the header is
+  // left out, never guessed. grok has no version-specific prompts.
+  const harnessVersion = harness === "grok" ? undefined : await readHarnessVersion(harness);
+
   const plan = planFor(harness, {
     baseUrl: catalog.baseUrl,
     apiKey: key?.key ?? DRY_RUN_KEY,
     sessionId,
+    harnessVersion,
     model,
     resumeId,
     resumeLast,
@@ -729,6 +737,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
         harnessSessionId,
         baseUrl: catalog.baseUrl,
         apiKey: key.key ?? "",
+        harnessVersion,
         model,
         options,
         record: nextRecord,
@@ -910,6 +919,8 @@ async function runInTerminalWithRemote(harness: Harness, plan: HarnessPlan, ctx:
 interface HeadlessRunContext extends RemoteRunContext {
   baseUrl: string;
   apiKey: string;
+  /** Installed harness version read at launch (X-Ditto-Harness-Version). */
+  harnessVersion?: string;
   model?: string;
   options: LaunchOptions;
   /** grok: the launch GROK_HOME reused by every headless turn. */
@@ -971,6 +982,7 @@ async function runHeadless(harness: Harness, ctx: HeadlessRunContext): Promise<n
         baseUrl: ctx.baseUrl,
         apiKey: ctx.apiKey,
         sessionId: ctx.sessionId,
+        harnessVersion: ctx.harnessVersion,
         model: ctx.model,
         yolo: ctx.options.yolo,
         yellow: ctx.options.yellow,

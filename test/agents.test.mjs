@@ -10,7 +10,8 @@ import { fileURLToPath } from "node:url";
 import { liftResumeFlags, planClaude } from "../dist/agents/claude.js";
 import { claudeDittoDenyRules } from "../dist/agents/claude-deny.js";
 import { searchTranscripts } from "../dist/agents/claude-transcripts.js";
-import { planCodex, tomlString } from "../dist/agents/codex.js";
+import { planCodex, tomlInlineTable, tomlString } from "../dist/agents/codex.js";
+import { harnessHeaders, parseHarnessVersion, readHarnessVersion } from "../dist/agents/harness-headers.js";
 import { GROK_MODEL_ID, GROK_SESSION_ENV, grokModelConfig, planGrok } from "../dist/agents/grok.js";
 import { listEndpointsStubHandler } from "./helpers/stub-api.mjs";
 import { apiRootOf, childEnv, stripSeparator } from "../dist/agents/types.js";
@@ -138,7 +139,8 @@ test("--dry-run claude resolves the endpoint and prints the plan (no key minted)
     assert.deepEqual(plan.args, ["--permission-mode", "acceptEdits", "--session-id", "sess-1", "--verbose"]);
     assert.equal(plan.env.ANTHROPIC_BASE_URL, "https://api.example.test");
     assert.equal(plan.env.ANTHROPIC_AUTH_TOKEN, "<key>");
-    assert.equal(plan.env.ANTHROPIC_CUSTOM_HEADERS, "X-Ditto-Session-Id: sess-1");
+    // The version is whatever `claude --version` this machine has, if any.
+    assert.match(plan.env.ANTHROPIC_CUSTOM_HEADERS, /^X-Ditto-Session-Id: sess-1\nX-Ditto-Harness: claude(\nX-Ditto-Harness-Version: \d+\.\d+\.\d+\S*)?$/);
     assert.equal(plan.env.CLAUDE_CODE_AUTO_MODE_SERVER, "0");
     assert.equal(plan.env.CLAUDE_CODE_GATEWAY_HINT_HEADERS, "1");
     assert.deepEqual(plan.unsetEnv, ["ANTHROPIC_API_KEY"]);
@@ -387,20 +389,20 @@ test("planClaude: resume, continue, model and header merging", () => {
   assert.deepEqual(withModel.args, ["--permission-mode", "plan", "--session-id", "s1", "--model", "opus", "-p", "hi"]);
   assert.equal(withModel.envSet.ANTHROPIC_MODEL, "opus");
   const merged = planClaude({ ...base, env: { ANTHROPIC_CUSTOM_HEADERS: "X-Team: a" } });
-  assert.equal(merged.envSet.ANTHROPIC_CUSTOM_HEADERS, "X-Team: a\nX-Ditto-Session-Id: s1");
+  assert.equal(merged.envSet.ANTHROPIC_CUSTOM_HEADERS, "X-Team: a\nX-Ditto-Session-Id: s1\nX-Ditto-Harness: claude");
   // Launched from inside another heyditto session: the parent's session id and
   // tool surface are its own, not the caller's. Its deny rules only tighten.
   const nested = planClaude({ ...base, env: { ANTHROPIC_CUSTOM_HEADERS: "X-Team: a\nX-Ditto-Session-Id: parent\nx-ditto-tool-surface: mcp\nX-Ditto-Tool-Deny: gmail__*" } });
-  assert.equal(nested.envSet.ANTHROPIC_CUSTOM_HEADERS, "X-Team: a\nX-Ditto-Tool-Deny: gmail__*\nX-Ditto-Session-Id: s1");
-  assert.equal(planClaude({ ...base, env: { ANTHROPIC_CUSTOM_HEADERS: "X-Ditto-Session-Id: parent" } }).envSet.ANTHROPIC_CUSTOM_HEADERS, "X-Ditto-Session-Id: s1");
+  assert.equal(nested.envSet.ANTHROPIC_CUSTOM_HEADERS, "X-Team: a\nX-Ditto-Tool-Deny: gmail__*\nX-Ditto-Session-Id: s1\nX-Ditto-Harness: claude");
+  assert.equal(planClaude({ ...base, env: { ANTHROPIC_CUSTOM_HEADERS: "X-Ditto-Session-Id: parent" } }).envSet.ANTHROPIC_CUSTOM_HEADERS, "X-Ditto-Session-Id: s1\nX-Ditto-Harness: claude");
   assert.equal(childEnv(merged, { ANTHROPIC_API_KEY: "old", HOME: "/h" }).ANTHROPIC_API_KEY, undefined);
 });
 
 test("planClaude: forwards router deny rules as a header", () => {
   const base = { baseUrl: "https://api.heyditto.ai/v1", apiKey: "k", sessionId: "s1", passthrough: [], env: {} };
-  assert.equal(planClaude({ ...base, toolDeny: [] }).envSet.ANTHROPIC_CUSTOM_HEADERS, "X-Ditto-Session-Id: s1");
+  assert.equal(planClaude({ ...base, toolDeny: [] }).envSet.ANTHROPIC_CUSTOM_HEADERS, "X-Ditto-Session-Id: s1\nX-Ditto-Harness: claude");
   const denied = planClaude({ ...base, toolDeny: ["gmail__*", "class:gated"], env: { ANTHROPIC_CUSTOM_HEADERS: "X-Team: a" } });
-  assert.equal(denied.envSet.ANTHROPIC_CUSTOM_HEADERS, "X-Team: a\nX-Ditto-Session-Id: s1\nX-Ditto-Tool-Deny: gmail__*,class:gated");
+  assert.equal(denied.envSet.ANTHROPIC_CUSTOM_HEADERS, "X-Team: a\nX-Ditto-Session-Id: s1\nX-Ditto-Tool-Deny: gmail__*,class:gated\nX-Ditto-Harness: claude");
 });
 
 test("claudeDittoDenyRules: reads user, project and local settings", () => {
@@ -455,7 +457,7 @@ test("planCodex: resume forms and header override", () => {
   const last = planCodex({ ...base, resumeLast: true, yellow: true });
   assert.deepEqual(last.args.slice(-6), ["-a", "on-request", "-s", "workspace-write", "--last", "--search"]);
   assert.ok(last.args.includes("--last"));
-  assert.ok(last.args.includes('model_providers.ditto.http_headers={"X-Ditto-Session-Id"="s1"}'));
+  assert.ok(last.args.includes('model_providers.ditto.http_headers={"X-Ditto-Session-Id"="s1","X-Ditto-Harness"="codex"}'));
   assert.equal(tomlString('a"b'), '"a\\"b"');
 });
 
@@ -748,4 +750,54 @@ test("MCP setup failure honors explicit key retention", async () => {
    assert.equal(stub.calls.filter(c=>c.method==="DELETE"&&/keys\/key-1$/.test(c.url)).length,keep?0:1);
   } finally { stub.close(); }
  }
+});
+
+test("harness version: parsed exactly as reported, never rounded or guessed", () => {
+  assert.equal(parseHarnessVersion("2.1.316 (Claude Code)\n"), "2.1.316");
+  assert.equal(parseHarnessVersion("codex-cli 0.166.0"), "0.166.0");
+  // A pre-release is its own release: rounding it to 0.163.0 would name a
+  // version the user does not have.
+  assert.equal(parseHarnessVersion("codex-cli 0.163.0-alpha.2"), "0.163.0-alpha.2");
+  assert.equal(parseHarnessVersion("1.2.3+build.7"), "1.2.3+build.7");
+  assert.equal(parseHarnessVersion("listening on 10.0.0.65"), undefined);
+  assert.equal(parseHarnessVersion("v1.2"), undefined);
+  assert.equal(parseHarnessVersion(""), undefined);
+  assert.equal(parseHarnessVersion(undefined), undefined);
+  assert.deepEqual(harnessHeaders("codex", "0.163.0-alpha.2"), [["X-Ditto-Harness", "codex"], ["X-Ditto-Harness-Version", "0.163.0-alpha.2"]]);
+  assert.deepEqual(harnessHeaders("claude", undefined), [["X-Ditto-Harness", "claude"]]);
+  assert.deepEqual(harnessHeaders("claude", "not a version"), [["X-Ditto-Harness", "claude"]]);
+  assert.equal(tomlInlineTable([["A", "1"], ["B", 'x"y']]), '{"A"="1","B"="x\\"y"}');
+});
+
+test("harness version: an async probe that omits the header on failure or a stall", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "ditto-version-"));
+  const script = (name, body) => {
+    const file = path.join(dir, name);
+    writeFileSync(file, `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+    return file;
+  };
+  assert.equal(await readHarnessVersion(script("ok", 'echo "2.1.316 (Claude Code)"')), "2.1.316");
+  assert.equal(await readHarnessVersion(script("stderr", 'echo "codex-cli 0.166.0" >&2')), "0.166.0");
+  assert.equal(await readHarnessVersion(script("fails", "echo 9.9.9; exit 3")), undefined);
+  assert.equal(await readHarnessVersion(path.join(dir, "missing")), undefined);
+  // A stalled harness resolves undefined at the timeout and never blocks the
+  // event loop: a timer scheduled meanwhile still fires.
+  let ticked = false;
+  setTimeout(() => { ticked = true; }, 20);
+  const started = Date.now();
+  assert.equal(await readHarnessVersion(script("hangs", "sleep 5"), process.env, 300), undefined);
+  assert.ok(ticked, "the event loop kept running during the probe");
+  assert.ok(Date.now() - started < 3000, "the probe gave up at its timeout");
+});
+
+test("planClaude and planCodex: harness headers, and a parent's version never leaks", () => {
+  const base = { baseUrl: "https://api.heyditto.ai/v1", apiKey: "k", sessionId: "s1", passthrough: [], env: {} };
+  assert.equal(planClaude({ ...base, harnessVersion: "2.1.316" }).envSet.ANTHROPIC_CUSTOM_HEADERS, "X-Ditto-Session-Id: s1\nX-Ditto-Harness: claude\nX-Ditto-Harness-Version: 2.1.316");
+  // Started inside another `heyditto claude` whose version this launch could
+  // not read: the parent's header is dropped, not forwarded as this one's.
+  const parent = "X-Team: a\nX-Ditto-Harness: claude\nx-ditto-harness-version: 2.1.207";
+  assert.equal(planClaude({ ...base, env: { ANTHROPIC_CUSTOM_HEADERS: parent } }).envSet.ANTHROPIC_CUSTOM_HEADERS, "X-Team: a\nX-Ditto-Session-Id: s1\nX-Ditto-Harness: claude");
+  assert.equal(planClaude({ ...base, harnessVersion: "2.1.316", env: { ANTHROPIC_CUSTOM_HEADERS: parent } }).envSet.ANTHROPIC_CUSTOM_HEADERS, "X-Team: a\nX-Ditto-Session-Id: s1\nX-Ditto-Harness: claude\nX-Ditto-Harness-Version: 2.1.316");
+  const codex = planCodex({ ...base, harnessVersion: "0.166.0" });
+  assert.ok(codex.args.includes('model_providers.ditto.http_headers={"X-Ditto-Session-Id"="s1","X-Ditto-Harness"="codex","X-Ditto-Harness-Version"="0.166.0"}'));
 });
