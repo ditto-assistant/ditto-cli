@@ -72,6 +72,30 @@ test("Claude normal FIFO survives immediate steering and stale Stop cannot finis
   await w.finished("queued");
 });
 
+test("a quiet Claude response stays active and keeps FIFO until its Stop hook", { timeout: 6000 }, async (t) => {
+  const w = await world(t);
+  w.send("slow"); await w.started("slow");
+  w.events.emit("hook", { source: "claude", event: "UserPromptSubmit", payload: {} });
+  w.send("queued"); await w.stub.waitFor(f => f.type === "turn.ack" && f.turnId === "queued");
+  w.quiet(); await sleep(900);
+  assert.equal(w.stub.frames.some(f => f.type === "turn.finished" && f.turnId === "slow"), false);
+  assert.equal(w.calls.length, 1, "terminal silence must not release queued input during a native turn");
+  w.events.emit("hook", { source: "claude", event: "Stop" });
+  await w.finished("slow"); await w.started("queued");
+  w.events.emit("hook", { source: "claude", event: "Stop" });
+  await w.finished("queued");
+});
+
+test("Stop retains its fallback when the native Stop hook does not arrive", { timeout: 6000 }, async (t) => {
+  const w = await world(t);
+  w.send("slow"); await w.started("slow");
+  w.events.emit("hook", { source: "claude", event: "UserPromptSubmit", payload: {} });
+  w.quiet();
+  w.stub.send({ type: "turn.interrupt", turnId: "slow" });
+  assert.equal((await w.finished("slow")).interrupted, true);
+  assert.equal(w.interrupts(), 1);
+});
+
 test("a locally typed native prompt holds remote FIFO until its Stop hook", async (t) => {
   const w = await world(t);
   w.events.emit("hook", { source: "claude", event: "UserPromptSubmit", payload: { prompt: "local synthetic input" } });

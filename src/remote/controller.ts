@@ -62,6 +62,8 @@ interface ActiveTurn {
   settledFlag: boolean;
   /** Stop hooks carry no remote turn identity, so a late old Stop is unsafe. */
   ignoreStopHook: boolean;
+  /** The current Claude prompt reached its native submit hook. */
+  submitHookObserved: boolean;
   injection: AbortController;
   submitted: boolean;
   superseded?: ActiveTurn;
@@ -304,6 +306,7 @@ export class RemoteSession {
           this.clearPending();
           this.claudePermissions.reset();
           this.nativeInputOrigin = {};
+          if (this.current && !this.stopHooksUncorrelated) this.current.submitHookObserved = true;
           this.nativeBusy = true;
           this.watchLocalQuietFallback();
           this.host.status(this.ctx.sessionId, "running");
@@ -595,7 +598,7 @@ export class RemoteSession {
       const finished = new Promise<void>((resolve) => { finish = resolve; });
       const settled = new Promise<void>((resolve) => { settle = resolve; });
       previous = this.current;
-      active = { turnId, interrupted: false, done: finish, settled, settledFlag: false, ignoreStopHook: steer, injection: injection ?? new AbortController(), submitted: false, ...(steer && previous ? { superseded: previous } : {}) };
+      active = { turnId, interrupted: false, done: finish, settled, settledFlag: false, ignoreStopHook: steer, submitHookObserved: false, injection: injection ?? new AbortController(), submitted: false, ...(steer && previous ? { superseded: previous } : {}) };
       this.current = active;
       this.host.status(this.ctx.sessionId, "running");
       if (this.pty) {
@@ -615,7 +618,7 @@ export class RemoteSession {
         }
         release();
         const quiet = entry?.source === "builtin" ? Math.min(this.ctx.quietFallbackMs ?? 8000, 1500) : undefined;
-        await Promise.race([finished, this.pty.exit, this.quietFallback(finished, quiet)]);
+        await Promise.race([finished, this.pty.exit, this.quietFallback(finished, quiet, active, entry?.source === "builtin")]);
         this.finish(turnId, { exitCode: 0, ...(active.interrupted ? { interrupted: true } : {}) });
       } else if (this.runHeadless) {
         const turn = this.runHeadless(text);
@@ -654,7 +657,7 @@ export class RemoteSession {
    * after the prompt went in, the turn counts as finished. Hooks are the
    * primary signal; a pending prompt never times out this way.
    */
-  private quietFallback(finished: Promise<void>, limitMs?: number): Promise<void> {
+  private quietFallback(finished: Promise<void>, limitMs?: number, active?: ActiveTurn, builtin = false): Promise<void> {
     const limit = limitMs ?? this.ctx.quietFallbackMs ?? 8000;
     return new Promise<void>((resolve) => {
       let settled = false;
@@ -667,6 +670,10 @@ export class RemoteSession {
         if (settled) return clearInterval(timer);
         const pty = this.pty;
         if (!pty || this.pending || this.claudePermissions.pending) return;
+        // A responsive Claude submit hook means Stop is the turn boundary.
+        // A quiet terminal can still be waiting for a long model response.
+        // Explicit interruption and builtins retain their recovery fallback.
+        if (this.ctx.harness === "claude" && !builtin && active?.submitHookObserved && !active.interrupted && !this.stopHooksUncorrelated) return;
         if (Date.now() - started > Math.min(2000, limit) && pty.quietFor() >= limit) {
           clearInterval(timer);
           resolve();

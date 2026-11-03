@@ -127,7 +127,11 @@ test("PermissionRequest holds FIFO before notification and resolved IDs replay a
   await sleep(350); assert.equal(w.stub.frames.some(f => f.type === "turn.started" && f.turnId === "queued"), false, "a native dialog is live before its delayed notification");
   w.hook("Notification", { notification_type: "permission_prompt" });
   const pending = await w.stub.waitFor(f => f.type === "prompt.request");
-  await appendFile(w.file, result("early-id", true)); await w.started("queued");
+  await appendFile(w.file, result("early-id", true));
+  await w.stub.waitFor(f => f.resolvedPromptId === pending.promptId);
+  await sleep(350);
+  assert.equal(w.stub.frames.some(f => f.type === "turn.started" && f.turnId === "queued"), false, "permission completion alone does not finish the Claude turn");
+  w.hook("Stop"); await w.started("queued");
   const from = w.stub.frames.length; w.stub.dropClients();
   await w.stub.waitFor(f => f.type === "session.status" && f.resolvedPromptId === pending.promptId, { from });
 });
@@ -160,7 +164,7 @@ test("ambiguous post-steer permissions stay held without unsafe remote answers",
 
 test("incomplete AskUserQuestion cannot discard an existing answerable permission token", { timeout: 6000 }, async t => {
   const w = await world(t); w.send("normal"); await w.started("normal"); w.hook("UserPromptSubmit");
-  // Ambiguous metadata requires the original explicit answer to release FIFO.
+  // Ambiguous metadata requires the original explicit answer to clear the dialog.
   await w.pre("one"); await w.pre("two");
   w.hook("PermissionRequest", w.payload("one"));
   w.hook("Notification", { notification_type: "permission_prompt" });
@@ -168,8 +172,8 @@ test("incomplete AskUserQuestion cannot discard an existing answerable permissio
   w.send("queued"); w.quiet();
   w.hook("PreToolUse", { tool_name: "AskUserQuestion", tool_input: {} });
   w.stub.send({ type: "prompt.answer", sessionId: native, promptId: pending.promptId, value: "1" });
-  await w.started("queued");
-  assert.ok(w.stub.frames.some(f => f.resolvedPromptId === pending.promptId));
+  await w.stub.waitFor(f => f.resolvedPromptId === pending.promptId);
+  w.hook("Stop"); await w.started("queued");
 });
 
 test("a usable replacement prompt is sent without inventing resolution of the old dialog", { timeout: 6000 }, async t => {
