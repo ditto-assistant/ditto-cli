@@ -30,7 +30,9 @@ test("Channels advertises native scheduling and refuses steering without emittin
     const deadline = Date.now() + 2000;
     while (!events.length && Date.now() < deadline) await new Promise((r) => setTimeout(r, 5));
     assert.equal(events.length, 1);
-    assert.equal(events[0].params.content, "normal native scheduling");
+    assert.match(events[0].params.content, /Call acknowledge/);
     assert.equal(stub.frames.some((f) => f.type === "turn.started"), false, "transport write is not native scheduling evidence");
+    const ack = await client.callTool({ name: "acknowledge", arguments: { turn_id: "normal" } });
+    assert.equal(JSON.parse(ack.content[0].text).prompt, "normal native scheduling");
   } finally { await client.close(); await stub.close(); await rm(cwd, { recursive: true, force: true }); }
 });
