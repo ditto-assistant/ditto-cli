@@ -27,6 +27,12 @@ import { spawn } from "node:child_process";
 
 const bin = process.argv[2];
 const args = process.argv.slice(3);
+// The launcher reads the harness version once per launch; answer like the
+// real binaries do and exit before anything is recorded as an invocation.
+if (args.length === 1 && args[0] === "--version") {
+  process.stdout.write(bin === "claude" ? "2.1.316 (Claude Code)\n" : "codex-cli 0.166.0\n");
+  process.exit(0);
+}
 const turnMs = Number(process.env.FAKE_TURN_MS || 300);
 const record = (entry) => appendFileSync(process.env.FAKE_HARNESS_LOG, JSON.stringify({ bin, ...entry }) + "\n");
 

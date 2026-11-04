@@ -640,6 +640,13 @@ and Codex's own options keep working.
 
 How the wiring works:
 
+- **Every launch** names its harness and release to the router:
+  `X-Ditto-Harness: claude|codex` and `X-Ditto-Harness-Version` with the
+  version `<harness> --version` reports, exactly as printed (a pre-release
+  stays a pre-release). The router serves that release's own vendored system
+  prompt and compaction instruction. When the version cannot be read, the
+  header is left out and the router falls back to the User-Agent; a parent
+  `heyditto` session's version is never passed on to a child launch.
 - **Claude Code** gets `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` (a bearer
   token, which skips Claude's "use this API key?" prompt) and
   `ANTHROPIC_CUSTOM_HEADERS` with the session id. Any inherited

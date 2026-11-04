@@ -1,6 +1,7 @@
 import { TOOL_DENY_HEADER } from "./claude-deny.js";
 import { MCP_KEY_ENV, TOOL_SURFACE_HEADER, TOOL_SURFACE_MCP, attachmentSettings, withClaudeSettings } from "./claude-mcp.js";
-import { type HarnessPlan, type PlanInput, SESSION_HEADER, apiRootOf } from "./types.js";
+import { harnessHeaders } from "./harness-headers.js";
+import { HARNESS_HEADER, HARNESS_VERSION_HEADER, type HarnessPlan, type PlanInput, SESSION_HEADER, apiRootOf } from "./types.js";
 
 /**
  * Builds the `claude` invocation.
@@ -35,7 +36,8 @@ export function planClaude(input: PlanInput): HarnessPlan {
 
   const deny = input.toolDeny?.length ? `${TOOL_DENY_HEADER}: ${input.toolDeny.join(",")}` : undefined;
   const surface = input.mcp ? `${TOOL_SURFACE_HEADER}: ${TOOL_SURFACE_MCP}` : undefined;
-  const headers = [inheritedHeaders(input.env.ANTHROPIC_CUSTOM_HEADERS), `${SESSION_HEADER}: ${input.sessionId}`, deny, surface]
+  const identity = harnessHeaders("claude", input.harnessVersion).map(([name, value]) => `${name}: ${value}`);
+  const headers = [inheritedHeaders(input.env.ANTHROPIC_CUSTOM_HEADERS), `${SESSION_HEADER}: ${input.sessionId}`, deny, surface, ...identity]
     .filter((h): h is string => Boolean(h))
     .join("\n");
 
@@ -103,9 +105,11 @@ export function liftResumeFlags(args: string[]): { args: string[]; resume?: stri
  * Headers that describe one launch. A `heyditto claude` started inside another
  * inherits the parent's, and a second session id would file the child's turns
  * under the parent's thread, and a stale tool surface would leave a `--no-mcp`
- * child with no tools at all. Inherited deny rules stay: they only tighten.
+ * child with no tools at all. A parent's harness version is dropped even when
+ * this launch could not read its own, so the router never gets a stale one.
+ * Inherited deny rules stay: they only tighten.
  */
-const LAUNCH_HEADERS = new Set([SESSION_HEADER, TOOL_SURFACE_HEADER].map((h) => h.toLowerCase()));
+const LAUNCH_HEADERS = new Set([SESSION_HEADER, TOOL_SURFACE_HEADER, HARNESS_HEADER, HARNESS_VERSION_HEADER].map((h) => h.toLowerCase()));
 
 /** The caller's own custom headers, minus a parent launch's. */
 function inheritedHeaders(raw: string | undefined): string | undefined {
