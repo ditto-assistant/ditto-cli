@@ -719,6 +719,7 @@ you to an endpoint's page there; set `DITTO_DEVELOPER_BASE` to point elsewhere):
 
 ```
 heyditto endpoints [--set-default <slug>] [--clear-default]   list (* = default)
+heyditto endpoints list --archived          archived endpoints and when they were archived
 heyditto endpoints create [--name <n>] [--slug <s>] [--model <id>] [--org <org>] [--default]
 heyditto endpoints move <endpoint> (--org <org> | --personal)   change who owns and pays for it
 heyditto endpoints show <endpoint>
@@ -727,7 +728,8 @@ heyditto endpoints pick                    choose the default interactively
 heyditto endpoints open [endpoint]         open the editor in the Ditto app
 heyditto endpoints set <endpoint> [settings flags — see the table below]
 heyditto endpoints usage <endpoint> [--window 7d|30d|month]   requests, tokens, spend and cap
-heyditto endpoints delete <endpoint> [--yes]
+heyditto endpoints archive <endpoint> [--yes]   stop serving; keeps threads, traces, usage, keys (alias: delete)
+heyditto endpoints unarchive <endpoint>    restore an archived endpoint
 heyditto endpoints keys <endpoint>         list keys
 heyditto endpoints keys create <endpoint> --store <destination> --secret <NAME> [scoping flags]
                                    [--name <label>] [--expires <1h…never>] [--budget <tokens>]
@@ -736,9 +738,17 @@ heyditto endpoints keys stores              which destinations this machine can 
 heyditto endpoints keys revoke <endpoint> <keyId> [--yes]
 ```
 
-Endpoints spend your Ditto credits, so deleting one, revoking a key or raising a
+Endpoints spend your Ditto credits, so archiving one, revoking a key or raising a
 spend limit asks you to type the slug back; pass `--yes` in scripts. `--output
 json` is available everywhere and includes the gateway base URL.
+
+Archiving an endpoint (`endpoints delete` is an alias) stops it serving and
+frees its slug and plan slot. Its keys stop working while it is archived; its
+threads, traces, usage and keys are kept. `heyditto endpoints unarchive <slug>`
+brings it back, and keys that were active when it was archived work again
+(unless they have since expired or been revoked). If a live endpoint has taken
+the slug in the meantime, archive or rename that one first; if you have no free
+endpoint slot, archive another endpoint or upgrade your plan.
 
 #### `endpoints set` — every setting the console has
 

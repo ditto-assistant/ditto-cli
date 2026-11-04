@@ -106,6 +106,8 @@ export interface InferenceEndpoint {
   model: string;
   /** The organization the endpoint is filed under; empty for a personal one. */
   companyId?: string;
+  /** RFC3339 time the endpoint was archived; present only on archived endpoints. */
+  archivedAt?: string;
   systemPrompt?: string;
   spendPeriod?: string;
   spendLimitTokens?: number | null;
@@ -309,8 +311,42 @@ export async function updateEndpoint(id: string, patch: EndpointInput): Promise<
   return apiFetch<InferenceEndpoint>(endpointPath(id), { method: "PATCH", body });
 }
 
+/**
+ * Archives an endpoint (the wire route is still DELETE): it stops serving and
+ * its keys stop authenticating while archived; threads, traces, usage and keys
+ * are kept, and `unarchiveEndpoint` brings it back.
+ */
 export async function deleteEndpoint(id: string): Promise<void> {
   await apiFetch<void>(endpointPath(id), { method: "DELETE" });
+}
+
+/**
+ * Archived endpoints the caller may restore: their own personal ones plus each
+ * organization's archived catalog (`?archived=true&company=<id>`), deduped by
+ * id. `limit`/`used` are the caller's live slot numbers.
+ */
+export async function listArchivedEndpoints(): Promise<InferenceEndpointsResponse> {
+  const res = await apiFetch<InferenceEndpointsResponse>(`${endpointsPath}?archived=true`);
+  const endpoints = [...(res.endpoints ?? [])];
+  for (const company of await listCompanies()) {
+    const orgRes = await apiFetch<InferenceEndpointsResponse>(
+      `${endpointsPath}?archived=true&company=${encodeURIComponent(company.id)}`,
+    );
+    for (const orgEndpoint of orgRes.endpoints ?? []) {
+      if (!endpoints.some((e) => e.id === orgEndpoint.id)) endpoints.push(orgEndpoint);
+    }
+  }
+  return {
+    baseUrl: (res.baseUrl || `${apiBase()}/v1`).replace(/\/+$/, ""),
+    endpoints,
+    limit: res.limit,
+    used: res.used,
+  };
+}
+
+/** Restores an archived endpoint; 409 endpoint_slug_taken when a live endpoint now has its slug. */
+export async function unarchiveEndpoint(id: string): Promise<InferenceEndpoint> {
+  return apiFetch<InferenceEndpoint>(`${endpointPath(id)}/unarchive`, { method: "POST" });
 }
 
 /** Finds one endpoint by slug or id from the catalog (there is no GET-by-id route). */
