@@ -94,6 +94,39 @@ key. A hard kill or a failed revocation can leave that key valid until its
 expiry; the CLI reports revocation failures. No key is saved in this launcher
 or in T3's provider settings.
 
+## Local CLIProxy inference with automatic Ditto MCP tools
+
+With CLI **3.5.0 or newer**, the same launcher can keep inference on the local
+CLIProxy while attaching the selected endpoint's tools as native MCP servers.
+Install the current packaged launcher; updating only the CLI does not replace
+an older copy of the launcher script.
+
+In the Claude provider's **Environment variables**, set:
+
+| Variable | Value |
+| --- | --- |
+| `DITTO_T3_INFERENCE` | `cliproxy` |
+| `DITTO_T3_ENDPOINT` | Your tool endpoint slug, for example `ditto-dev` |
+
+Keep **Binary path** pointed at the installed launcher and keep the provider's
+isolated **Claude config directory**. Leave **Launch arguments** empty unless
+you have other Claude options to pass. The launcher auto-detects EasyCLIProxyAPI
+through the CLI and uses `--cliproxy --mcp --no-remote-control`. Each launch
+fetches the endpoint's current tool catalog and attaches one MCP server per app,
+using a temporary endpoint key revoked on normal exit. No endpoint key belongs
+in T3 settings or a static MCP JSON file.
+
+T3's own SDK servers remain managed by T3. Verify both its tools and the Ditto
+servers in a fresh session, then perform a harmless read through one Ditto tool.
+A provider status or CLI version probe does not test MCP connectivity. Resume
+an existing session as a separate check. Tool approvals still follow the
+endpoint policy; this setting does not bypass them. Catalog setup failures stop
+CLIProxy launches rather than falling back to paid Router inference.
+
+This mode is for the Claude provider. It does not attach native MCP servers to
+T3's Codex provider. Omitting `DITTO_T3_INFERENCE` (or setting it to `router`)
+retains the original Router-inference behavior described above.
+
 ## Troubleshooting
 
 - **Missing mode flag:** the selected CLI is too old. The launcher checks

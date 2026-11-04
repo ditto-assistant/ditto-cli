@@ -51,6 +51,15 @@ if [ "$version_probe" = true ]; then
   exec "$claude_bin" "$@"
 fi
 
+# Keep Router inference as the default for existing provider instances. Local
+# inference needs native MCP attachment: no Router request will inject tools.
+inference=${DITTO_T3_INFERENCE:-router}
+case "$inference" in
+  router) required_flags='--no-mcp-only --no-mcp --no-remote-control' ;;
+  cliproxy) required_flags='--no-mcp-only --mcp --cliproxy --no-remote-control' ;;
+  *) fail "DITTO_T3_INFERENCE must be router or cliproxy" ;;
+esac
+
 heyditto_bin=$(resolve_binary "${DITTO_T3_HEYDITTO_BIN:-heyditto}" heyditto DITTO_T3_HEYDITTO_BIN)
 # heyditto launches `claude` by name. Select the same executable for that child
 # and use the Node installation alongside the selected heyditto, when present.
@@ -69,9 +78,9 @@ unset CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY
 # Old CLI versions accept unknown options as Claude passthrough. Fail before a
 # launch rather than silently forwarding our mode flags or using native auth.
 help_output=$("$heyditto_bin" claude --help 2>&1) || fail "cannot inspect heyditto; check its Node runtime and installation"
-for required_flag in --no-mcp-only --no-mcp --no-remote-control; do
+for required_flag in $required_flags; do
   printf '%s\n' "$help_output" | grep -Eq -- "(^|[[:space:],])${required_flag}([[:space:],]|$)" ||
-    fail "heyditto lacks $required_flag; install @heyditto/cli 3.4.0 or newer with its supported Node runtime"
+    fail "heyditto lacks $required_flag; update @heyditto/cli with its supported Node runtime (CLIProxy requires 3.5.0 or newer)"
 done
 
 # A restarted SDK may still supply its fresh-session flag beside --resume.
@@ -101,7 +110,11 @@ fi
 # Arguments after `--` are owned by the SDK, including stdin/stdout wire flags.
 # Fresh sessions share one native/trace id. Resume is resolved by heyditto's
 # existing --resume handling and must never be combined with its --session flag.
-set -- --no-mcp-only --no-mcp --no-remote-control -- "$@"
+if [ "$inference" = cliproxy ]; then
+  set -- --no-mcp-only --cliproxy --mcp --no-remote-control -- "$@"
+else
+  set -- --no-mcp-only --no-mcp --no-remote-control -- "$@"
+fi
 if [ "$resuming" = false ] && [ -n "$session_id" ]; then
   set -- --session "$session_id" "$@"
 fi

@@ -24,7 +24,7 @@ const args = process.argv.slice(2);
 appendFileSync(process.env.T3_TEST_CALLS, JSON.stringify(args) + "\\n");
 if (args[0] === "claude" && args[1] === "--help") {
   if (process.env.T3_TEST_HELP_ERROR === "1") process.exit(9);
-  process.stdout.write(process.env.T3_TEST_OLD === "1" ? "--mcp-only\\n" : "--no-mcp-only --no-mcp --no-remote-control\\n");
+  process.stdout.write(process.env.T3_TEST_OLD === "1" ? "--mcp-only\\n" : process.env.T3_TEST_NO_CLIPROXY === "1" ? "--no-mcp-only --no-mcp --no-remote-control\\n" : "--no-mcp-only --no-mcp --mcp --cliproxy [url] --no-remote-control\\n");
   process.exit(0);
 }
 const names = ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_CUSTOM_HEADERS", "ANTHROPIC_MODEL", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CONFIG_DIR", "PATH"];
@@ -39,10 +39,12 @@ process.stdin.on("end", () => { process.exitCode = Number(process.env.T3_TEST_EX
     DITTO_T3_HEYDITTO_BIN: fakeHeyditto,
     DITTO_T3_CLAUDE_BIN: fakeClaude,
     DITTO_T3_ENDPOINT: "",
+    DITTO_T3_INFERENCE: "router",
     T3_TEST_CAPTURE: capture,
     T3_TEST_CLAUDE_CAPTURE: claudeCapture,
     T3_TEST_CALLS: calls,
     T3_TEST_OLD: "0",
+    T3_TEST_NO_CLIPROXY: "0",
     T3_TEST_HELP_ERROR: "0",
     T3_TEST_EXIT: "0",
     ANTHROPIC_BASE_URL: "https://wrong.test",
@@ -183,4 +185,41 @@ test("invalid binaries and missing session values fail with no inference launch"
     assert.match(result.stderr, /--session-id requires a value/);
   }
   assert.deepEqual(f.calls(), [], "invalid session arguments fail before inspecting heyditto");
+});
+
+test("CLIProxy attaches endpoint MCP alongside SDK configuration and preserves protocol pipes", (t) => {
+  const f = fixture(t);
+  const sdkArgs = ["--session-id", "local-session", "--input-format", "stream-json", "--output-format", "stream-json", "--mcp-config", '{"mcpServers":{"t3":{"type":"sdk"}}}'];
+  const input = '{"type":"control_request","request_id":"init"}\n';
+  const result = f.run(sdkArgs, { DITTO_T3_INFERENCE: "cliproxy", DITTO_T3_ENDPOINT: "ditto-dev" }, input);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, input);
+  assert.deepEqual(f.capture().args, ["claude", "--endpoint", "ditto-dev", "--session", "local-session", "--no-mcp-only", "--cliproxy", "--mcp", "--no-remote-control", "--", ...sdkArgs]);
+  assert.equal(f.capture().env.CLAUDE_CONFIG_DIR, f.env.CLAUDE_CONFIG_DIR);
+  assert.equal(f.capture().env.ANTHROPIC_AUTH_TOKEN, null);
+});
+
+test("CLIProxy resume keeps its inference mode without a fresh session selector", (t) => {
+  const f = fixture(t);
+  const result = f.run(["--session-id", "fresh-id", "--resume", "existing-id", "--print"], { DITTO_T3_INFERENCE: "cliproxy" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(f.capture().args, ["claude", "--no-mcp-only", "--cliproxy", "--mcp", "--no-remote-control", "--", "--resume", "existing-id", "--print"]);
+});
+
+test("CLIProxy requires its mode flags before any session starts", (t) => {
+  const f = fixture(t);
+  const result = f.run(["--print"], { DITTO_T3_INFERENCE: "cliproxy", T3_TEST_NO_CLIPROXY: "1" });
+  assert.notEqual(result.status, 0);
+  assert.equal(result.stdout, "");
+  assert.match(result.stderr, /heyditto lacks --mcp|heyditto lacks --cliproxy/);
+  assert.deepEqual(f.calls(), [["claude", "--help"]]);
+  assert.throws(() => f.capture(), { code: "ENOENT" });
+});
+
+test("unknown inference mode cannot silently choose Router or native inference", (t) => {
+  const f = fixture(t);
+  const result = f.run(["--print"], { DITTO_T3_INFERENCE: "clirproxy" });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /DITTO_T3_INFERENCE must be router or cliproxy/);
+  assert.deepEqual(f.calls(), []);
 });
