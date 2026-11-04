@@ -59,7 +59,7 @@ export async function runChannelServer(options: { receiptTimeoutMs?: number; com
               meta: { turn_id: turn.turnId, session_id: sessionId },
             } });
           } catch {
-            if (pending.get(turn.turnId) !== delivery) return;
+            if (pending.get(turn.turnId) !== delivery || delivery.acknowledged) return;
             failures.set(turn.turnId, "Could not deliver this prompt through MCP Channels");
             deadlines.set(turn.turnId, Date.now());
             if (host.send({ type: "turn.finished", turnId: turn.turnId, error: failures.get(turn.turnId) })) forget(turn.turnId);
