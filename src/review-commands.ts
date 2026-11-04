@@ -4,6 +4,7 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { Command, Option } from "commander";
 import { ApiError, apiFetch, type Company, resolveCompany } from "./api.js";
+import { cmdReviewAccess, diagnoseLinkRefusal, guideAccessForAdd } from "./github-access.js";
 import { registerReviewFindingCommands } from "./review-findings.js";
 import { readStoredAuth } from "./store.js";
 import { captureReviewSnapshot, reviewGit } from "./review-snapshot.js";
@@ -610,6 +611,7 @@ interface AddOptions extends ScopeOptions {
   budgetCents?: string;
   fast?: string;
   verdicts?: string;
+  open?: boolean;
 }
 
 /** What a new repository starts with when a flag does not say (the Omni Aura repositories' baseline). */
@@ -674,7 +676,22 @@ export async function cmdReviewAdd(fullName: string, options: AddOptions): Promi
     ...(fast !== undefined ? { fastMode: fast } : {}),
     reviewVerdicts: verdicts,
   };
-  const saved = await apiFetch<ReviewRepository>(`/api/v5/review/repositories${scopeQuery(company)}`, { method: "PUT", body });
+  const put = () => apiFetch<ReviewRepository>(`/api/v5/review/repositories${scopeQuery(company)}`, { method: "PUT", body });
+  let saved: ReviewRepository;
+  try {
+    saved = await put();
+  } catch (error) {
+    // GitHub refused the link: if the Ditto Code app cannot reach the
+    // repository, say so and point at the page that grants it; after the
+    // person returns with access granted, retry the add once.
+    const access = await diagnoseLinkRefusal(name, error);
+    if (!access) throw error;
+    if (!(await guideAccessForAdd(access, { open: options.open, json: isJSON(options) }))) {
+      process.exitCode = 2;
+      return;
+    }
+    saved = await put();
+  }
   if (isJSON(options)) {
     process.stdout.write(`${JSON.stringify(saved, null, 2)}\n`);
     return;
@@ -755,6 +772,23 @@ export function registerReviewCommands(
   }
   addExamples(
     review
+      .command("access")
+      .description("check whether the Ditto Code GitHub App can access repositories, and open the GitHub page that grants it (GitHub App access only; not Review setup)")
+      .argument("[repositories...]", "owner/name (default: current checkout's GitHub origin)")
+      .option("--all", "you intend to grant every repository of the owner: print \"All repositories\" instead of a selection")
+      .option("--open", "open the GitHub install or configure page in your browser")
+      .option("--wait", "re-check until access is granted (for agents and scripts)")
+      .option("--interval <seconds>", "re-check interval with --wait (1-60, default 5)")
+      .option("--timeout <seconds>", "stop waiting after this many seconds (1-3600, default 600)")
+      .addOption(outputOption())
+      .action(cmdReviewAccess),
+    `  heyditto review access
+  heyditto review access ditto-assistant/homebrew-tap --open
+  heyditto review access acme/api acme/web --wait --output json
+  heyditto review access acme/api --all --open`,
+  );
+  addExamples(
+    review
       .command("add")
       .description("set a GitHub repository up for Ditto Review (you must be an admin of it, with the Ditto Code app installed)")
       .argument("<repository>", "owner/name")
@@ -763,6 +797,7 @@ export function registerReviewCommands(
       .option("--budget-cents <n>", `spend limit of one review, in cents (1-10000, default ${ADD_DEFAULT_BUDGET_CENTS})`)
       .option("--verdicts <on|off>", "approve or request changes after each review (default on)")
       .option("--fast <on|off>", "fast mode: review on GLM-5.3-FlashX (faster, about 2.5x the per-token cost)")
+      .option("--open", "if the Ditto Code app cannot access the repository, open the GitHub page that grants it")
       .addOption(orgOption())
       .addOption(outputOption())
       .action(cmdReviewAdd),
