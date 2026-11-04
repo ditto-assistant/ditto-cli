@@ -9,6 +9,8 @@
   "files": [
     "dist",
     "README.md",
+    "docs/t3-code.md",
+    "scripts/claude-router-launcher.sh",
     "LICENSE"
   ],
   "publishConfig": {

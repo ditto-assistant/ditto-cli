@@ -47,7 +47,7 @@ export function planClaude(input: PlanInput): HarnessPlan {
     ANTHROPIC_CUSTOM_HEADERS: headers,
   };
   if (input.model) envSet.ANTHROPIC_MODEL = input.model;
-  if (input.mcp) envSet[MCP_KEY_ENV] = input.apiKey;
+  if (input.mcp) envSet[MCP_KEY_ENV] = input.mcpApiKey ?? input.apiKey;
   if (input.mcpOnly) {
     // Endpoint keys are only MCP credentials in this mode. Never forward one
     // to Anthropic or inherit a parent launch's inference gateway settings.
@@ -58,10 +58,19 @@ export function planClaude(input: PlanInput): HarnessPlan {
       installHint: "install Claude Code and sign in with `claude auth login`",
     };
   }
-  // Claude Code's server-side auto-mode classifier needs the dangerous-tool-use
-  // beta and `safeguards` field, which the router does not forward; a rejection
-  // denies every auto-mode tool use. Decide locally unless the caller chose.
+  // Intermediaries do not forward Claude Code's auto-mode classifier fields.
+  // Decide locally for Router and CLIProxy inference unless the caller chose.
   if (input.env.CLAUDE_CODE_AUTO_MODE_SERVER === undefined) envSet.CLAUDE_CODE_AUTO_MODE_SERVER = "0";
+  if (input.localInference) {
+    // Cloud MCP auth never becomes the local inference credential, and a
+    // parent Router launch's custom headers/other provider modes stay out.
+    delete envSet.ANTHROPIC_CUSTOM_HEADERS;
+    return {
+      command: "claude", args: finalArgs, envSet,
+      envUnset: ["ANTHROPIC_API_KEY", "ANTHROPIC_CUSTOM_HEADERS", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", ...(!input.model ? ["ANTHROPIC_MODEL"] : []), ...(!input.mcp ? [MCP_KEY_ENV] : [])],
+      installHint: "install Claude Code: npm i -g @anthropic-ai/claude-code",
+    };
+  }
   // Claude Code only labels requests (x-claude-code-request-class: main,
   // subagent, auxiliary) for gateways when asked. The router uses the label to
   // skip memory recall on housekeeping calls such as the auto-mode classifier.

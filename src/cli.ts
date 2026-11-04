@@ -36,6 +36,7 @@ import { registerAppCommands } from "./app-commands.js";
 import { registerConfigCommands } from "./dittoconfig/commands.js";
 import { deviceLogin } from "./device-login.js";
 import { registerSelfUpdateCommands } from "./self-update.js";
+import { registerRelayCommands } from "./relay/commands.js";
 
 type OutputFormat = "json" | "text" | "markdown" | "raw";
 const OUTPUT_FORMATS: readonly OutputFormat[] = ["json", "text", "markdown", "raw"];
@@ -1253,6 +1254,7 @@ your own workspace or an app workspace.`,
   registerReviewCommands(program, addExamples, outputOption, orgOption);
   registerSelfUpdateCommands(program, outputOption);
   registerHarnessCommands(program, addExamples);
+  registerRelayCommands(program);
   registerCodexAppCommand(program, addExamples);
   registerSessionCommands(program, addExamples);
   registerTeleportCommands(program, addExamples);

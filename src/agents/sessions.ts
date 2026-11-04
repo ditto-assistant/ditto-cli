@@ -8,6 +8,8 @@ export interface SessionRecord {
   id: string;
   harness: Harness;
   mcpOnly?: boolean;
+  /** Loopback inference URL only; the proxy key is read afresh on resume. */
+  cliproxy?: string;
   remoteTransport?: "cli" | "channels";
   /** Explicit --name, retained across resumes so native titles cannot replace it. */
   explicitLaunchTitle?: string;

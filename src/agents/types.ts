@@ -49,6 +49,10 @@ export interface PlanInput {
   baseUrl: string;
   /** Plaintext endpoint key (already minted) or a placeholder for --dry-run. */
   apiKey: string;
+  /** Separate cloud MCP credential when inference is local. */
+  mcpApiKey?: string;
+  /** Direct CLIProxy inference; do not forward Router headers or auth overrides. */
+  localInference?: boolean;
   /** Ditto session id sent as X-Ditto-Session-Id. */
   sessionId: string;
   /**
