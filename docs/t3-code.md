@@ -5,6 +5,55 @@ Keep the normal Claude instance for its existing subscription. The extra
 instance uses the installed Claude Code harness, Ditto Router inference, and
 the Router's endpoint tools and optimizations.
 
+## Automatic setup
+
+Preview a dedicated Claude provider using local CLIProxy inference and the
+selected endpoint's MCP tools:
+
+```sh
+heyditto t3 setup --endpoint ditto-dev --inference cliproxy --dry-run
+```
+
+Quit T3 Code (or stop its background service yourself), then apply:
+
+```sh
+heyditto t3 setup --endpoint ditto-dev --inference cliproxy
+```
+
+Keep T3 closed until setup finishes. Reopen it and choose **Claude CLIProxy +
+Ditto** in a new chat. The command installs a private launcher, creates an
+isolated Claude config directory, and adds the `claude_ditto_cliproxy` provider.
+It preserves other providers and settings, saves an exact private backup before
+replacing settings, and can be rerun without duplicating the provider. It does
+not mint keys, copy credentials, change the saved default endpoint, stop active
+chats, or send inference requests. Session keys are minted by the launcher when
+a chat starts and revoked on normal exit.
+
+Use `--inference router` for Router inference instead. `--instance` and `--name`
+choose a separate provider id and label. An id belonging to another provider is
+refused rather than overwritten. To update a provider created by this command,
+rerun setup with its id and the new endpoint or inference mode. Its Claude home
+stays the same, and its old launcher is kept intact.
+
+`--base-dir` selects a local T3 installation, defaulting to `T3CODE_HOME` or
+`~/.t3`. Pass the base directory, not its `userdata` child. T3 must already have
+been initialized there. `--heyditto-bin` and `--claude-bin` override executable
+detection. `--json` prints a summary with paths and route choices, never the
+existing settings or their secrets.
+
+T3 CLI v0.1.7 has no provider-settings command. This shortcut updates its local
+`userdata/settings.json` while the server is stopped, rather than invoking a
+nonexistent `t3 provider` command or an undocumented live API. Apply refuses a
+live or unreadable runtime record, changed settings, linked destinations, and
+modified generated launchers. Dry runs are allowed while T3 is open. This
+file-based integration was developed against T3 v0.1.7; verify it after T3
+configuration-schema changes. It currently supports the Claude provider on
+macOS/Linux, not native MCP attachment for Codex.
+
+To undo, disable or remove this dedicated provider in T3; your previous providers
+are preserved. Setup also prints a private backup path. Restore a whole backup
+only with T3 stopped and before making later settings edits you would lose.
+
 ## Install the launcher
 
 Use `@heyditto/cli` **3.4.0 or newer** and a Node runtime supported by that
@@ -93,6 +142,39 @@ Normal process exit and forwarded termination let the CLI revoke its temporary
 key. A hard kill or a failed revocation can leave that key valid until its
 expiry; the CLI reports revocation failures. No key is saved in this launcher
 or in T3's provider settings.
+
+## Local CLIProxy inference with automatic Ditto MCP tools
+
+With CLI **3.5.0 or newer**, the same launcher can keep inference on the local
+CLIProxy while attaching the selected endpoint's tools as native MCP servers.
+Install the current packaged launcher; updating only the CLI does not replace
+an older copy of the launcher script.
+
+In the Claude provider's **Environment variables**, set:
+
+| Variable | Value |
+| --- | --- |
+| `DITTO_T3_INFERENCE` | `cliproxy` |
+| `DITTO_T3_ENDPOINT` | Your tool endpoint slug, for example `ditto-dev` |
+
+Keep **Binary path** pointed at the installed launcher and keep the provider's
+isolated **Claude config directory**. Leave **Launch arguments** empty unless
+you have other Claude options to pass. The launcher auto-detects EasyCLIProxyAPI
+through the CLI and uses `--cliproxy --mcp --no-remote-control`. Each launch
+fetches the endpoint's current tool catalog and attaches one MCP server per app,
+using a temporary endpoint key revoked on normal exit. No endpoint key belongs
+in T3 settings or a static MCP JSON file.
+
+T3's own SDK servers remain managed by T3. Verify both its tools and the Ditto
+servers in a fresh session, then perform a harmless read through one Ditto tool.
+A provider status or CLI version probe does not test MCP connectivity. Resume
+an existing session as a separate check. Tool approvals still follow the
+endpoint policy; this setting does not bypass them. Catalog setup failures stop
+CLIProxy launches rather than falling back to paid Router inference.
+
+This mode is for the Claude provider. It does not attach native MCP servers to
+T3's Codex provider. Omitting `DITTO_T3_INFERENCE` (or setting it to `router`)
+retains the original Router-inference behavior described above.
 
 ## Troubleshooting
 
