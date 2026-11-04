@@ -243,15 +243,21 @@ test("uncertain terminal exit replays its receipt and close after a temporary di
   assert.equal(w.session.host.isConnected, false);
   w.endTerminal();
   const closing = w.session.stop();
+  // A delivery already dispatched by the socket can race a disconnect and
+  // terminal shutdown. Both errors must survive until the host reconnects.
+  w.session.host.options.handlers.onTurn({ type: "turn.deliver", sessionId: "owned-session", turnId: "closing-delivery", text: "closing-delivery" });
   await sleep(60);
   assert.equal(w.stub.frames.some(f => f.type === "turn.finished" && f.turnId === "slow"), false);
   w.stub.refuseConnections(false);
   const receipt = await w.finished("slow");
+  const closingReceipt = await w.stub.waitFor(f => f.type === "turn.finished" && f.turnId === "closing-delivery", { timeout: 1000 });
   const closed = await w.stub.waitFor(f => f.type === "session.closed" && f._conn === receipt._conn);
   await closing;
   const onConnection = w.stub.frames.filter(f => f._conn === receipt._conn);
   assert.ok(onConnection.findIndex(f => f.type === "session.announce") < onConnection.indexOf(receipt));
   assert.ok(onConnection.indexOf(receipt) < onConnection.indexOf(closed));
+  assert.match(closingReceipt.error, /session is closing/);
+  assert.ok(onConnection.indexOf(closingReceipt) < onConnection.indexOf(closed));
   assert.equal(w.stub.frames.filter(f => f.type === "turn.finished" && f.turnId === "slow").length, 1);
 });
 

@@ -78,7 +78,7 @@ export class HostClient {
   private readonly sessions = new Map<string, SessionAnnounceFrame>();
   private readonly resolvedPrompts = new Map<string, string>();
   private readonly catalogs = new Map<string, SessionCommandsFrame>();
-  private readonly finalSessions = new Map<string, TurnFinishedFrame>();
+  private readonly finalSessions = new Map<string, Map<string, TurnFinishedFrame>>();
   private readonly finalWaiters = new Set<() => void>();
   private readonly seenTurns: string[] = [];
   private readonly seenSet = new Set<string>();
@@ -323,19 +323,27 @@ export class HostClient {
     this.send({ type: "session.closed", sessionId });
   }
 
-  /** Keep a final receipt and its session until both frames can be sent, in order. */
+  /** Keep final receipts and their session until all frames can be sent, in order. */
   finalizeSession(sessionId: string, receipt: TurnFinishedFrame): void {
-    if (!this.finalSessions.has(sessionId)) this.finalSessions.set(sessionId, receipt);
+    let receipts = this.finalSessions.get(sessionId);
+    if (!receipts) {
+      receipts = new Map();
+      this.finalSessions.set(sessionId, receipts);
+    }
+    if (!receipts.has(receipt.turnId)) receipts.set(receipt.turnId, receipt);
     this.flushFinalSessions();
   }
 
   private flushFinalSessions(): void {
     if (!this.connected) return;
-    for (const [sessionId, receipt] of this.finalSessions) {
+    for (const [sessionId, receipts] of this.finalSessions) {
       try {
         // If the socket drops between frames, replaying the same turn receipt
         // on the next connection is safe; the backend handles turn IDs idempotently.
-        if (!this.send(receipt) || !this.send({ type: "session.closed", sessionId })) return;
+        for (const receipt of receipts.values()) {
+          if (!this.send(receipt)) return;
+        }
+        if (!this.send({ type: "session.closed", sessionId })) return;
       } catch {
         return;
       }
