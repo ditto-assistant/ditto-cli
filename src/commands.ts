@@ -1542,6 +1542,7 @@ export function registerHarnessCommands(program: Command, addExamples: (c: Comma
       .allowUnknownOption()
       .passThroughOptions();
     if (harness === "claude" || harness === "codex") {
+      cmd.addOption(new Option("--inference <mode>", "inference provider for this launch; overrides endpoint and resumed defaults (native: Claude only)").choices(["router", "native", "cliproxy"]));
       cmd.option("--cliproxy [url]", "use a local CLIProxy for inference (detect EasyCLIProxyAPI, or CLIPROXY_BASE_URL/CLIPROXY_API_KEY); Ditto supplies tools and remote control");
       cmd.option("--no-cliproxy", "use the normal inference mode, overriding a resumed CLIProxy session");
     }
