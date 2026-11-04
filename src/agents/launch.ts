@@ -26,7 +26,7 @@ import { findProfileEndpoint, repoDefaultProfile } from "../dittoconfig/profiles
 import { err as c } from "../ui.js";
 import { holdNotesForTui, type NoteOptions, releaseNotes, writeNote } from "../terminal-note.js";
 import { claudeDittoDenyRules } from "./claude-deny.js";
-import { type ClaudeMcpAttachment, claudeMcpAttachment, fetchMcpCatalog, mcpApprovalNote } from "./claude-mcp.js";
+import { type ClaudeMcpAttachment, claudeMcpAttachment, fetchMcpCatalog, mcpApprovalNote, mcpUnavailableLines } from "./claude-mcp.js";
 import { liftResumeFlags, planClaude } from "./claude.js";
 import { resolveClaudeResume, transcriptCwd } from "./claude-resume.js";
 import { type ClaudeTranscript, findTranscriptById, isUuid, listTranscriptsIn } from "./claude-transcripts.js";
@@ -597,9 +597,11 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   let noTools = false;
   if (wantMcp && key?.key) {
     try {
-      const attachment = claudeMcpAttachment(await fetchMcpCatalog(catalog.baseUrl, key.key, sessionId), sessionId, { yolo: options.yolo, toolDeny: claudeDittoDenyRules(cwd, process.env) });
+      const mcpCatalog = await fetchMcpCatalog(catalog.baseUrl, key.key, sessionId);
+      const attachment = claudeMcpAttachment(mcpCatalog, sessionId, { yolo: options.yolo, toolDeny: claudeDittoDenyRules(cwd, process.env) });
       if (attachment.tools > 0) mcp = attachment;
       else noTools = true;
+      for (const line of mcpUnavailableLines(mcpCatalog)) log(c("yellow", line));
     } catch (err) {
       if (options.mcpOnly) {
         if (!options.keepKey) {

@@ -13,6 +13,7 @@ import {
   claudeServerName,
   fetchMcpCatalog,
   mcpApprovalNote,
+  mcpUnavailableLines,
   mergeSettings,
   sweepStaleSettings,
   withClaudeSettings,
@@ -56,6 +57,26 @@ test("claudeMcpAttachment: one http server per source, the key only as a variabl
   assert.equal(mcp.servers, 2);
   assert.equal(mcp.tools, 3);
   assert.equal(mcp.gated, 1);
+});
+
+test("mcpUnavailableLines names each dropped connection and where to reconnect it (DITTO-1639)", () => {
+  assert.deepEqual(mcpUnavailableLines({}), [], "a backend that predates the field says nothing");
+  const lines = mcpUnavailableLines({
+    unavailable: [
+      { serverId: "srv-1", name: "SN118 Backroom", prefix: "sn118_backroom", reason: "oauth_not_connected", reconnectUrl: "https://app.heyditto.ai/connections/mcp?reconnect=srv-1", personal: true },
+      { serverId: "srv-2", name: "", prefix: "jira", reason: "oauth_error", personal: false },
+    ],
+  });
+  assert.equal(lines.length, 2);
+  assert.match(lines[0], /^SN118 Backroom is disconnected \(sign-in expired or revoked\)/);
+  assert.match(lines[0], /reconnect: https:\/\/app\.heyditto\.ai\/connections\/mcp\?reconnect=srv-1$/);
+  assert.match(lines[1], /^jira is disconnected \(sign-in could not be refreshed\).*ask whoever connected it/);
+});
+
+test("claudeMcpAttachment: a dropped connection's status-only server is still attached", () => {
+  const mcp = claudeMcpAttachment({ endpoint: "e", approvalMode: "park", clientApprovals: false, servers: [{ name: "sn118_backroom", url: "https://r/v1/mcp/sn118_backroom", tools: [{ name: "connection_status", tier: "read", approval: false }] }] }, "sess");
+  assert.equal(mcp.servers, 1);
+  assert.ok(JSON.parse(mcp.config).mcpServers["ditto-sn118_backroom"], "the session keeps the server so its status tool explains the drop");
 });
 
 test("claudeMcpAttachment: Ditto holds gated calls, so Claude Code is not asked twice", () => {
