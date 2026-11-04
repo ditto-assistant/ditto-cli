@@ -618,6 +618,11 @@ heyditto claude --resume "Fix login bug"       # resume by title, as `claude --r
 heyditto claude -- --verbose                   # anything after -- goes to the agent
 ```
 
+Ditto's flags work in any order, before or after the agent's own: `heyditto
+claude --verbose --resume <id> --yolo` uses `--resume` and `--yolo` and
+forwards `--verbose`. To pass the agent a flag that Ditto also defines
+(`--help`, `-c`, `-p`, `--model`), put it after `--`.
+
 Options shared by both commands:
 
 | Flag | Meaning |

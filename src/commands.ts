@@ -1539,8 +1539,12 @@ export function registerHarnessCommands(program: Command, addExamples: (c: Comma
       .option("--dry-run", "print the command, args and env (key masked) without minting a key")
       .option("--no-remote-control", "do not announce this session to the Ditto app (no prompts from your phone)")
       .option("--headless", "no terminal UI: run each prompt sent from the Ditto app as one turn until Ctrl+C")
-      .allowUnknownOption()
-      .passThroughOptions();
+      // Our own flags are recognised wherever they appear; anything else
+      // (unknown flags, prompt words) is forwarded to the harness in order.
+      // passThroughOptions() would stop at the first unknown arg and silently
+      // forward every Ditto flag after it, so `--verbose --endpoint x` lost
+      // the endpoint. `--` still forwards everything after it verbatim.
+      .allowUnknownOption();
     if (harness === "claude" || harness === "codex") {
       cmd.option("--cliproxy [url]", "use a local CLIProxy for inference (detect EasyCLIProxyAPI, or CLIPROXY_BASE_URL/CLIPROXY_API_KEY); Ditto supplies tools and remote control");
       cmd.option("--no-cliproxy", "use the normal inference mode, overriding a resumed CLIProxy session");
