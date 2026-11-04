@@ -17,7 +17,8 @@ import { HARNESS_HEADER, HARNESS_VERSION_HEADER, type Harness } from "./types.js
  * is not a version.
  */
 export function parseHarnessVersion(output: string | undefined): string | undefined {
-  return output?.match(/(?<![\w.])(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]*[0-9A-Za-z])?)(?![\w.])/)?.[1];
+  // semver: core, then an optional -pre-release, then an optional +build.
+  return output?.match(/(?<![\w.])(\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)(?![\w.])/)?.[1];
 }
 
 /**

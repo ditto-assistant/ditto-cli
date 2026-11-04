@@ -467,6 +467,14 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     catalog = await listEndpoints();
   }
 
+  // Sent as X-Ditto-Harness-Version so the router serves this release's own
+  // prompts. Started only now that sign-in has succeeded (a failed login
+  // never runs the harness) and awaited where the plan is built, so the
+  // probe overlaps the key and MCP setup below instead of delaying the
+  // launch. It never rejects: unreadable means the header is left out,
+  // never guessed. grok has no version-specific prompts.
+  const harnessVersionProbe = harness === "grok" ? Promise.resolve(undefined) : readHarnessVersion(harness);
+
   let cwd = process.cwd();
   let worktreePath: string | undefined;
   if (options.cwd) {
@@ -605,11 +613,8 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     }
   }
 
-  // Sent as X-Ditto-Harness-Version so the router serves this release's own
-  // prompts. Read once per launch, after sign-in (a failed login never runs
-  // the harness), and reused by every turn. Unreadable means the header is
-  // left out, never guessed. grok has no version-specific prompts.
-  const harnessVersion = harness === "grok" ? undefined : await readHarnessVersion(harness);
+  // Read once per launch and reused by every turn.
+  const harnessVersion = await harnessVersionProbe;
 
   const plan = planFor(harness, {
     baseUrl: catalog.baseUrl,

@@ -759,6 +759,8 @@ test("harness version: parsed exactly as reported, never rounded or guessed", ()
   // version the user does not have.
   assert.equal(parseHarnessVersion("codex-cli 0.163.0-alpha.2"), "0.163.0-alpha.2");
   assert.equal(parseHarnessVersion("1.2.3+build.7"), "1.2.3+build.7");
+  // Pre-release and build metadata together are kept whole.
+  assert.equal(parseHarnessVersion("codex-cli 1.2.3-rc.1+build.5"), "1.2.3-rc.1+build.5");
   assert.equal(parseHarnessVersion("listening on 10.0.0.65"), undefined);
   assert.equal(parseHarnessVersion("v1.2"), undefined);
   assert.equal(parseHarnessVersion(""), undefined);
