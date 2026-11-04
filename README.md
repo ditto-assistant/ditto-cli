@@ -245,7 +245,10 @@ heyditto session list [--all]
 heyditto session use <id>
 heyditto session current
 heyditto session end
-heyditto agents [--output <format>]
+heyditto agents [--space <alias>] [--output <format>]
+heyditto agents threads [agent] [--space <alias>]
+heyditto agents send <message...> [--agent <id>] [--thread <id>] [--space <alias>] [--wait <seconds>]
+heyditto agents message <message-id> [--wait <seconds>]
 heyditto logout
 heyditto status [--output <format>]
 heyditto config
@@ -900,9 +903,23 @@ saved one and never sends a name). Sessions are tracked locally in
 
 ### `agents`
 
-List your Ditto agents (`GET /api/v5/chat-agents`): id, kind (`main`, `chat`,
-`inference_endpoint`, `mcp`, `connector`), name, thread count, last activity and
-the live connections (API keys, OAuth grants, endpoints) writing into each.
+Thin wrappers over the MCP agent-chat tools (`list_agents`,
+`list_agent_threads`, `send_message_to_agent`, `get_agent_message`).
+`heyditto agents` lists your Ditto agents: your Main Agent and the agents you
+created. Connected chats (Slack, Telegram, WhatsApp DMs), MCP sessions and model
+endpoints are not agents and are not listed. `--space <alias>` uses another
+space you can read instead, such as a company space (`heyditto knowledge-graphs`
+lists the aliases). Reading needs viewer access; sending needs editor access.
+
+```bash
+heyditto agents --space omniaura/feedback-triager
+heyditto agents send --space omniaura/feedback-triager --agent <id> --wait 300 "which issue has the most reporters?"
+heyditto agents message <message-id> --wait 300   # collect a late answer
+```
+
+`send` runs as an ordinary turn of that agent, with its instructions, memory and
+connected apps; it appears in the agent's thread in the app and bills as a
+normal message.
 
 ### `review` — Ditto Review from the shell
 

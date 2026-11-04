@@ -9,7 +9,6 @@ import {
   ApiError,
   BILLING_MODES,
   CONTEXT_COMPACTION_LEVELS,
-  type ChatAgent,
   type EndpointInput,
   type EndpointUsage,
   type InferenceEndpoint,
@@ -37,7 +36,6 @@ import {
   getEndpointUsage,
   isEndpointPending,
   listArchivedEndpoints,
-  listChatAgents,
   listEndpoints,
   listCompanies,
   listKeys,
@@ -1734,29 +1732,74 @@ ${SESSION_ENV} to pin a session for one shell or script.`,
 // Chat agents: `heyditto agents`
 // ---------------------------------------------------------------------------
 
-function connectionsColumn(a: ChatAgent): string {
-  const live = (a.connections ?? []).filter((c) => !c.revokedAt);
-  return live.map((c) => `${c.kind}${c.name ? `:${c.name}` : ""}`).join(", ");
+/** One agent as the MCP list_agents tool returns it. */
+export interface MCPAgentSummary {
+  id: string;
+  name: string;
+  main_thread_id?: string;
+  status?: string;
+  thread_count?: number;
+  pinned?: boolean;
+  last_activity_at?: string | null;
 }
 
-export async function cmdAgents(options: SessionOutputOptions): Promise<void> {
-  const agents = await listChatAgents();
-  if (jsonOut(options)) {
-    process.stdout.write(`${JSON.stringify({ agents }, null, 2)}\n`);
-    return;
-  }
+/** list_agents: the Ditto agents only, never connected-chat DMs or endpoints. */
+export function printAgents(out: { agents?: MCPAgentSummary[]; space?: string }): void {
+  const agents = out.agents ?? [];
   if (agents.length === 0) {
     process.stdout.write("No agents yet.\n");
     return;
   }
-  const rows = agents.map((a) => [
-    a.id,
-    a.kind,
-    a.name,
-    String(a.threadCount ?? ""),
-    relativeAge(a.lastActivityAt ?? a.updatedAt),
-    connectionsColumn(a),
-  ]);
-  const header = ["ID", "KIND", "NAME", "THREADS", "LAST ACTIVITY", "CONNECTIONS"];
-  printTable(header, rows);
+  if (out.space) process.stdout.write(`Space: ${out.space}\n`);
+  printTable(
+    ["ID", "NAME", "THREADS", "LAST ACTIVITY"],
+    agents.map((a) => [a.id, a.name, String(a.thread_count ?? ""), relativeAge(a.last_activity_at)]),
+  );
+}
+
+/** list_agent_threads. */
+export function printAgentThreads(out: { threads?: { id: string; title?: string; kind?: string; last_activity_at?: string | null; url?: string }[] }): void {
+  const threads = out.threads ?? [];
+  if (threads.length === 0) {
+    process.stdout.write("No threads.\n");
+    return;
+  }
+  printTable(
+    ["ID", "TITLE", "KIND", "LAST ACTIVITY", "URL"],
+    threads.map((t) => [t.id, t.title ?? "", t.kind ?? "", relativeAge(t.last_activity_at), t.url ?? ""]),
+  );
+}
+
+/** send_message_to_agent / get_agent_message result. */
+export interface AgentMessageResult {
+  message_id: string;
+  status: string;
+  thread_id?: string;
+  agent_id?: string;
+  url?: string;
+  answer?: string;
+  instructions?: string;
+  failure?: { code?: string; message?: string; ref?: string };
+}
+
+/** Prints the answer, or how to collect it. Returns the exit code. */
+export function printAgentMessage(out: AgentMessageResult): number {
+  if (out.status === "completed" && out.answer) {
+    process.stdout.write(`${out.answer}\n`);
+    return 0;
+  }
+  if (out.status === "failed") {
+    const f = out.failure;
+    process.stderr.write(`error: the agent could not answer${f?.message ? `: ${f.message}` : ""}${f?.ref ? ` (ref ${f.ref})` : ""}\n`);
+    return 1;
+  }
+  if (out.status === "pending" || out.status === "running" || out.status === "queued") {
+    process.stdout.write(`${out.status}: message ${out.message_id}\n`);
+    process.stdout.write(`collect the answer with: heyditto agents message ${out.message_id} --wait 300\n`);
+    if (out.url) process.stdout.write(`or open: ${out.url}\n`);
+    return 0;
+  }
+  process.stdout.write(`${out.status}${out.instructions ? `: ${out.instructions}` : ""}\n`);
+  if (out.url) process.stdout.write(`${out.url}\n`);
+  return 0;
 }
