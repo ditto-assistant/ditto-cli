@@ -215,7 +215,7 @@ export class RemoteSession {
     this.host.send({ type: "turn.ack", turnId: frame.turnId });
     if (this.stopped) {
       const error = "This remote session is closing.";
-      if (this.uncertainCompletion && frame.sessionId === this.ctx.sessionId) {
+      if (this.uncertainCompletion) {
         this.host.finalizeSession(this.ctx.sessionId, { type: "turn.finished", turnId: frame.turnId, error });
       } else this.finish(frame.turnId, { error });
       return;
