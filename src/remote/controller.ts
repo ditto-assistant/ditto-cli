@@ -38,6 +38,8 @@ export interface RemoteSessionContext {
   checkpoint?: (cwd: string) => Promise<number>;
   /** Milliseconds of screen silence after which a TUI turn counts as finished when no hook fired. */
   quietFallbackMs?: number;
+  /** Upper bound for waiting on a missing Claude Stop hook; tests can shorten it. */
+  hookCompletionTimeoutMs?: number;
   hostOptions?: Partial<HostClientOptions>;
 }
 
@@ -89,6 +91,9 @@ export class RemoteSession {
   // bounded steering intent; it never cancels ordinary queued input.
   private readonly canceledSteers = new Map<string, number>();
   private nativeBusy = false;
+  // A timed-out native turn may still be running. Reject queued input rather
+  // than treating silence as evidence that it is safe to type another prompt.
+  private uncertainCompletion?: { turnId: string; nativeEpoch: number };
   private stopHooksUncorrelated = false;
   private nativeEpoch = 0;
   private nativeIdleTimer?: NodeJS.Timeout;
@@ -193,6 +198,10 @@ export class RemoteSession {
       this.finish(frame.turnId, { error: "unknown session on this host" });
       return;
     }
+    if (this.uncertainCompletion) {
+      this.finish(frame.turnId, { error: "Claude's turn could not be confirmed complete. Check the terminal and restart the session before sending again." });
+      return;
+    }
     if (frame.deliveryMode !== undefined && frame.deliveryMode !== "queue" && frame.deliveryMode !== "steer") {
       this.finish(frame.turnId, { unsupported: "Unknown prompt delivery mode" });
       return;
@@ -240,6 +249,10 @@ export class RemoteSession {
 
   private onInterrupt(turnId: string): void {
     const current = this.current;
+    if (!current && this.uncertainCompletion?.turnId === turnId) {
+      this.pty?.interrupt(this.ctx.harness);
+      return;
+    }
     // An uncertain editor refuses every future remote paste, so there is no
     // remote successor to target. Explicit Stop still interrupts this PTY.
     if (!current && this.pty?.inputBlockReason?.()) {
@@ -380,6 +393,12 @@ export class RemoteSession {
   }
   private turnEnded(): void {
     if (this.stopHooksUncorrelated || this.current?.ignoreStopHook) return;
+    if (this.uncertainCompletion) {
+      // A local submit after the timeout changes the input epoch; its Stop
+      // cannot safely prove which native turn completed.
+      if (this.uncertainCompletion.nativeEpoch !== this.nativeEpoch) return;
+      this.uncertainCompletion = undefined;
+    }
     this.nativeIdle();
     this.clearPending();
     this.claudePermissions.reset();
@@ -510,10 +529,16 @@ export class RemoteSession {
     this.draining = true;
     try {
       while (this.queue.length > 0 && !this.stopped) {
+        if (this.uncertainCompletion) {
+          const frame = this.queue.shift() as TurnDeliverFrame;
+          this.finish(frame.turnId, { error: "Claude's turn could not be confirmed complete. Check the terminal and restart the session before sending again." });
+          continue;
+        }
         // A steering turn bypasses this FIFO, but its completion still gates
         // later normal input. Superseded runs cannot drain over the new turn.
         if (this.steering) await this.steering;
         if (this.current) await this.current.settled;
+        if (this.uncertainCompletion) continue;
         // A local keyboard prompt has no remote receipt but still occupies
         // native Claude. Hold ordinary remote input until its Stop hook.
         if (this.nativeBusy) await new Promise<void>((resolve) => this.idleWaiters.add(resolve));
@@ -618,8 +643,15 @@ export class RemoteSession {
         }
         release();
         const quiet = entry?.source === "builtin" ? Math.min(this.ctx.quietFallbackMs ?? 8000, 1500) : undefined;
-        await Promise.race([finished, this.pty.exit, this.quietFallback(finished, quiet, active, entry?.source === "builtin")]);
-        this.finish(turnId, { exitCode: 0, ...(active.interrupted ? { interrupted: true } : {}) });
+        const outcome = await Promise.race([
+          finished.then(() => "finished" as const),
+          this.pty.exit.then(() => "exited" as const),
+          this.quietFallback(finished, quiet, active, entry?.source === "builtin"),
+        ]);
+        if (outcome === "uncertain") {
+          this.uncertainCompletion = { turnId, nativeEpoch: this.nativeEpoch };
+          this.finish(turnId, { error: "Claude's turn could not be confirmed complete. Check the terminal and restart the session before sending again." });
+        } else this.finish(turnId, { exitCode: 0, ...(active.interrupted ? { interrupted: true } : {}) });
       } else if (this.runHeadless) {
         const turn = this.runHeadless(text);
         active.headless = turn;
@@ -642,10 +674,10 @@ export class RemoteSession {
       // cleanup and Stop receipt must never clear the replacement's state.
       if (active && this.current === active) {
         this.current = undefined;
-        this.nativeIdle();
+        if (!this.uncertainCompletion) this.nativeIdle();
         this.clearPending();
         this.claudePermissions.reset();
-        this.host.status(this.ctx.sessionId, "idle");
+        this.host.status(this.ctx.sessionId, this.uncertainCompletion ? "running" : "idle");
       }
       settle();
     }
@@ -657,13 +689,13 @@ export class RemoteSession {
    * after the prompt went in, the turn counts as finished. Hooks are the
    * primary signal; a pending prompt never times out this way.
    */
-  private quietFallback(finished: Promise<void>, limitMs?: number, active?: ActiveTurn, builtin = false): Promise<void> {
+  private quietFallback(finished: Promise<void>, limitMs?: number, active?: ActiveTurn, builtin = false): Promise<"finished" | "uncertain"> {
     const limit = limitMs ?? this.ctx.quietFallbackMs ?? 8000;
-    return new Promise<void>((resolve) => {
+    return new Promise<"finished" | "uncertain">((resolve) => {
       let settled = false;
       void finished.then(() => {
         settled = true;
-        resolve();
+        resolve("finished");
       });
       const started = Date.now();
       const timer = setInterval(() => {
@@ -673,10 +705,16 @@ export class RemoteSession {
         // A responsive Claude submit hook means Stop is the turn boundary.
         // A quiet terminal can still be waiting for a long model response.
         // Explicit interruption and builtins retain their recovery fallback.
-        if (this.ctx.harness === "claude" && !builtin && active?.submitHookObserved && !active.interrupted && !this.stopHooksUncorrelated) return;
+        if (this.ctx.harness === "claude" && !builtin && active?.submitHookObserved && !active.interrupted && !this.stopHooksUncorrelated) {
+          if (!this.claudePermissions.toolBusy && Date.now() - started >= (this.ctx.hookCompletionTimeoutMs ?? 15 * 60_000) && pty.quietFor() >= limit) {
+            clearInterval(timer);
+            resolve("uncertain");
+          }
+          return;
+        }
         if (Date.now() - started > Math.min(2000, limit) && pty.quietFor() >= limit) {
           clearInterval(timer);
-          resolve();
+          resolve("finished");
         }
       }, 250);
       timer.unref?.();

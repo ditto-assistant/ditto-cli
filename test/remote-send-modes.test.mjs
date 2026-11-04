@@ -10,7 +10,7 @@ import { spawnInPty } from "../dist/remote/pty.js";
 import { startHostStub } from "./helpers/host-stub.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-async function world(t, { harness = "claude", mode = "tui", inject } = {}) {
+async function world(t, { harness = "claude", mode = "tui", inject, hookCompletionTimeoutMs } = {}) {
   const cwd = await mkdtemp(path.join(os.tmpdir(), "ditto-send-modes-"));
   const prior = process.env.DITTO_CONFIG_DIR;
   process.env.DITTO_CONFIG_DIR = path.join(cwd, "config");
@@ -21,7 +21,7 @@ async function world(t, { harness = "claude", mode = "tui", inject } = {}) {
   let interrupts = 0;
   let quiet = 0;
   const pty = { pid: 1, write(data) { writes.push(data); }, inject: async (...args) => { calls.push(args); await inject?.(...args); }, interrupt() { interrupts++; }, quietFor: () => quiet, exit: new Promise(() => {}), kill() {} };
-  const session = new RemoteSession({ harness, mode, cwd, sessionId: "owned-session", apiKey: "ditto_mcp_test", baseUrl: stub.base, log() {}, quietFallbackMs: 400 }, { events });
+  const session = new RemoteSession({ harness, mode, cwd, sessionId: "owned-session", apiKey: "ditto_mcp_test", baseUrl: stub.base, log() {}, quietFallbackMs: 400, hookCompletionTimeoutMs }, { events });
   if (mode === "tui") session.attachTui(pty);
   t.after(async () => { session.stop(); await stub.close(); if (prior === undefined) delete process.env.DITTO_CONFIG_DIR; else process.env.DITTO_CONFIG_DIR = prior; await rm(cwd, { recursive: true, force: true }); });
   await session.start();
@@ -94,6 +94,35 @@ test("Stop retains its fallback when the native Stop hook does not arrive", { ti
   w.stub.send({ type: "turn.interrupt", turnId: "slow" });
   assert.equal((await w.finished("slow")).interrupted, true);
   assert.equal(w.interrupts(), 1);
+});
+
+test("a lost Stop hook fails queued prompts closed and permits recovery on a correlated late Stop", { timeout: 6000 }, async (t) => {
+  const w = await world(t, { hookCompletionTimeoutMs: 600 });
+  w.send("slow"); await w.started("slow");
+  w.events.emit("hook", { source: "claude", event: "UserPromptSubmit", payload: {} });
+  w.send("queued"); await w.stub.waitFor(f => f.type === "turn.ack" && f.turnId === "queued");
+  w.quiet();
+  assert.match((await w.finished("slow")).error, /could not be confirmed complete/);
+  assert.match((await w.finished("queued")).error, /could not be confirmed complete/);
+  assert.equal(w.calls.length, 1, "silence never releases queued input");
+  w.send("later"); assert.match((await w.finished("later")).error, /restart the session/);
+  w.stub.send({ type: "turn.interrupt", turnId: "slow" });
+  await sleep(30); assert.equal(w.interrupts(), 1, "physical Stop remains available");
+  w.events.emit("hook", { source: "claude", event: "Stop" });
+  w.send("recovered"); await w.started("recovered");
+  w.events.emit("hook", { source: "claude", event: "Stop" });
+  await w.finished("recovered");
+});
+
+test("a local submit after a lost hook prevents an unrelated Stop from clearing uncertainty", { timeout: 6000 }, async (t) => {
+  const w = await world(t, { hookCompletionTimeoutMs: 600 });
+  w.send("slow"); await w.started("slow");
+  w.events.emit("hook", { source: "claude", event: "UserPromptSubmit", payload: {} });
+  w.quiet(); await w.finished("slow");
+  w.events.emit("hook", { source: "claude", event: "UserPromptSubmit", payload: { prompt: "local" } });
+  w.events.emit("hook", { source: "claude", event: "Stop" });
+  w.send("later"); assert.match((await w.finished("later")).error, /could not be confirmed complete/);
+  assert.equal(w.calls.length, 1);
 });
 
 test("a locally typed native prompt holds remote FIFO until its Stop hook", async (t) => {
