@@ -176,9 +176,10 @@ test("a stalled notification expires, a late event cannot be acknowledged, and c
 
 test("a late notification write failure does not revoke an acknowledged turn", async () => {
  const stub = await startHostStub();
+ const configDir = mkdtempSync(path.join(os.tmpdir(), "ditto-channel-race-"));
  const url = new URL("../dist/remote/channel-server.js", import.meta.url).href;
  const script = `import {Server} from "@modelcontextprotocol/sdk/server/index.js"; const original=Server.prototype.notification; let rejectLate; Server.prototype.notification=async function(event){ const id=event.params?.meta?.turn_id; if(id==="failed-before") throw new Error("synthetic early failure"); if(id==="late-failure"){const late=new Promise((_,reject)=>{rejectLate=reject}); await original.call(this,event); await late; return;} if(id==="trigger-failure") rejectLate(new Error("synthetic late failure")); await original.call(this,event); }; const {runChannelServer}=await import(${JSON.stringify(url)}); await runChannelServer({receiptTimeoutMs:5000,completionTimeoutMs:5000});`;
- const transport = new StdioClientTransport({command:process.execPath,args:["--input-type=module","-e",script],cwd:process.cwd(),env:{...process.env,DITTO_API_BASE:stub.base,DITTO_API_KEY:"ditto_mcp_test",DITTO_CONFIG_DIR:mkdtempSync(path.join(os.tmpdir(),"ditto-channel-race-")),DITTO_REMOTE_SESSION_ID:"race-session",DITTO_REMOTE_CWD:os.tmpdir()},stderr:"pipe"});
+ const transport = new StdioClientTransport({command:process.execPath,args:["--input-type=module","-e",script],cwd:process.cwd(),env:{...process.env,DITTO_API_BASE:stub.base,DITTO_API_KEY:"ditto_mcp_test",DITTO_CONFIG_DIR:configDir,DITTO_REMOTE_SESSION_ID:"race-session",DITTO_REMOTE_CWD:os.tmpdir()},stderr:"pipe"});
  const client = new Client({name:"claude-code",version:"test"});
  let receive, trigger; const received = new Promise(resolve=>receive=resolve); const triggered = new Promise(resolve=>trigger=resolve);
  client.setNotificationHandler(z.object({method:z.literal("notifications/claude/channel"),params:z.object({content:z.string(),meta:z.record(z.string(),z.string())})}), event=>{ if(event.params.meta.turn_id==="late-failure") receive(event); if(event.params.meta.turn_id==="trigger-failure") trigger(event); });
@@ -198,5 +199,5 @@ test("a late notification write failure does not revoke an acknowledged turn", a
   stub.send({...turn,turnId:"failed-before"});
   const failed=await stub.waitFor(frame=>frame.type==="turn.finished" && frame.turnId==="failed-before");
   assert.ok(failed.error,"a write failure before acknowledgement must still fail the turn");
- } finally { await client.close(); await stub.close(); }
+ } finally { try { await client.close(); await stub.close(); } finally { await rm(configDir, { recursive: true, force: true }); } }
 });
