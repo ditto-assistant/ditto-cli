@@ -96,7 +96,7 @@ test("Stop retains its fallback when the native Stop hook does not arrive", { ti
   assert.equal(w.interrupts(), 1);
 });
 
-test("a lost Stop hook fails queued prompts closed and permits recovery on a correlated late Stop", { timeout: 6000 }, async (t) => {
+test("a lost Stop hook fails queued prompts closed and cannot be cleared by a late Stop", { timeout: 6000 }, async (t) => {
   const w = await world(t, { hookCompletionTimeoutMs: 600 });
   w.send("slow"); await w.started("slow");
   w.events.emit("hook", { source: "claude", event: "UserPromptSubmit", payload: {} });
@@ -109,9 +109,8 @@ test("a lost Stop hook fails queued prompts closed and permits recovery on a cor
   w.stub.send({ type: "turn.interrupt", turnId: "slow" });
   await sleep(30); assert.equal(w.interrupts(), 1, "physical Stop remains available");
   w.events.emit("hook", { source: "claude", event: "Stop" });
-  w.send("recovered"); await w.started("recovered");
-  w.events.emit("hook", { source: "claude", event: "Stop" });
-  await w.finished("recovered");
+  w.send("after-stop"); assert.match((await w.finished("after-stop")).error, /restart the session/);
+  assert.equal(w.calls.length, 1, "an unscoped Stop cannot clear uncertainty");
 });
 
 test("a local submit after a lost hook prevents an unrelated Stop from clearing uncertainty", { timeout: 6000 }, async (t) => {

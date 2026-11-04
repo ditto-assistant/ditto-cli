@@ -93,7 +93,7 @@ export class RemoteSession {
   private nativeBusy = false;
   // A timed-out native turn may still be running. Reject queued input rather
   // than treating silence as evidence that it is safe to type another prompt.
-  private uncertainCompletion?: { turnId: string; nativeEpoch: number };
+  private uncertainCompletion?: { turnId: string };
   private stopHooksUncorrelated = false;
   private nativeEpoch = 0;
   private nativeIdleTimer?: NodeJS.Timeout;
@@ -393,12 +393,9 @@ export class RemoteSession {
   }
   private turnEnded(): void {
     if (this.stopHooksUncorrelated || this.current?.ignoreStopHook) return;
-    if (this.uncertainCompletion) {
-      // A local submit after the timeout changes the input epoch; its Stop
-      // cannot safely prove which native turn completed.
-      if (this.uncertainCompletion.nativeEpoch !== this.nativeEpoch) return;
-      this.uncertainCompletion = undefined;
-    }
+    // Stop hooks do not identify a turn. Once completion is uncertain, a late
+    // hook cannot prove whether it belongs to this turn or earlier activity.
+    if (this.uncertainCompletion) return;
     this.nativeIdle();
     this.clearPending();
     this.claudePermissions.reset();
@@ -649,7 +646,7 @@ export class RemoteSession {
           this.quietFallback(finished, quiet, active, entry?.source === "builtin"),
         ]);
         if (outcome === "uncertain") {
-          this.uncertainCompletion = { turnId, nativeEpoch: this.nativeEpoch };
+          this.uncertainCompletion = { turnId };
           this.finish(turnId, { error: "Claude's turn could not be confirmed complete. Check the terminal and restart the session before sending again." });
         } else this.finish(turnId, { exitCode: 0, ...(active.interrupted ? { interrupted: true } : {}) });
       } else if (this.runHeadless) {
