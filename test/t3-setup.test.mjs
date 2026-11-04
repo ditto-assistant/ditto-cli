@@ -4,7 +4,9 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { createServer } from "node:http";
 import { Command } from "commander";
+import { chooseEndpoint } from "../dist/agents/launch.js";
 import { applyT3Setup, planT3Setup, registerT3Commands } from "../dist/t3/setup.js";
 
 function fixture(t) {
@@ -175,4 +177,31 @@ test("T3 setup without --endpoint fails on local problems before choosing an end
   registerT3Commands(program, { chooseEndpoint: async () => { called = true; return { slug: "x" }; } });
   await assert.rejects(program.parseAsync(["node", "heyditto", "t3", "setup", "--base-dir", f.base, "--claude-bin", f.options.claudeBin, "--heyditto-bin", f.options.heydittoBin]), /Cannot parse T3 settings/);
   assert.equal(called, false);
+});
+
+test("a read-only endpoint choice on a terminal never offers to create an endpoint", async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "ditto-choose-endpoint-"));
+  const calls = [];
+  const server = createServer((req, res) => {
+    calls.push(`${req.method} ${req.url}`);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(req.url === "/api/v5/inference/endpoints" ? { baseUrl: "http://127.0.0.1/v1", endpoints: [] } : {}));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const saved = { env: { ...process.env }, stdin: process.stdin.isTTY, stderr: process.stderr.isTTY };
+  t.after(() => {
+    server.close();
+    rmSync(root, { recursive: true, force: true });
+    for (const key of ["DITTO_API_BASE", "DITTO_API_KEY", "DITTO_CONFIG_DIR"]) saved.env[key] === undefined ? delete process.env[key] : (process.env[key] = saved.env[key]);
+    process.stdin.isTTY = saved.stdin;
+    process.stderr.isTTY = saved.stderr;
+  });
+  Object.assign(process.env, { DITTO_API_BASE: `http://127.0.0.1:${server.address().port}`, DITTO_API_KEY: "ditto_mcp_synthetic", DITTO_CONFIG_DIR: path.join(root, "config") });
+  // A terminal is what makes the create prompt reachable; without the guard
+  // this call would wait on stdin for the answer instead of rejecting.
+  process.stdin.isTTY = true;
+  process.stderr.isTTY = true;
+  await assert.rejects(chooseEndpoint("claude", true), /no inference endpoints yet/);
+  assert.deepEqual(calls.filter((c) => c.startsWith("POST")), []);
+  assert.equal(existsSync(path.join(root, "config")), false);
 });
