@@ -1322,11 +1322,18 @@ inference:
 
 ```sh
 heyditto claude --cliproxy --endpoint my-tools
+heyditto claude --resume <session-id> --inference cliproxy --yolo --endpoint my-tools
 heyditto codex --cliproxy --endpoint my-tools --model gpt-6-luna
 heyditto claude --cliproxy http://127.0.0.1:8317/v1 --dry-run --endpoint my-tools
 ```
 
-`--cliproxy` detects EasyCLIProxyAPI's saved host, port and API access key. It
+`--inference cliproxy` and `--cliproxy` detect EasyCLIProxyAPI's saved host, port
+and API access key. An explicit `--inference` overrides saved session and endpoint
+inference defaults while retaining the selected endpoint's MCP tools and remote
+control. Claude and Codex support `router` and `cliproxy`; Claude also supports
+`native` (the same inference mode as `--mcp-only`). Conflicting explicit selectors
+fail before discovery or key minting. Use `--cliproxy <url>` alongside
+`--inference cliproxy` to select a specific local proxy. The CLI
 reads the GUI configuration from the platform's `com.cpa.gui` application-data
 directory. Set `CLIPROXY_CONFIG` for another EasyCLIProxyAPI TOML file, or use
 `CLIPROXY_BASE_URL` and `CLIPROXY_API_KEY` for a standalone CLIProxy installation.

@@ -9,7 +9,7 @@ import test from "node:test";
 import { cliProxyBaseUrl, cliProxyConfigPaths, cliProxyModel, resolveCliProxy } from "../dist/agents/cliproxy.js";
 import { planClaude } from "../dist/agents/claude.js";
 import { planCodex } from "../dist/agents/codex.js";
-import { resolveClaudeLaunchDefaults } from "../dist/agents/launch.js";
+import { resolveClaudeLaunchDefaults, resolveInferenceOptions } from "../dist/agents/launch.js";
 import { MCP_KEY_ENV, claudeMcpAttachment } from "../dist/agents/claude-mcp.js";
 import { childEnv } from "../dist/agents/types.js";
 import { startHeadlessTurn } from "../dist/remote/headless.js";
@@ -41,12 +41,12 @@ async function proxyServer({ status = 200, redirect, models = MODELS } = {}) {
   });
 }
 
-async function cloudServer({ mcpError = false } = {}) {
+async function cloudServer({ mcpError = false, slug = "alpha" } = {}) {
   return server((req, res, instance) => {
     const json = (status, value) => { res.statusCode = status; res.end(JSON.stringify(value)); };
     if (req.url === "/api/v5/inference/endpoints") return json(200, {
       baseUrl: `http://127.0.0.1:${instance.address().port}/v1`,
-      endpoints: [{ id: "alpha-id", slug: "alpha", name: "Alpha", model: "openai/gpt-6-luna", status: "active", providerOptions: { claude_inference: "native" } }],
+      endpoints: [{ id: "alpha-id", slug, name: "Alpha", model: "openai/gpt-6-luna", status: "active", providerOptions: { claude_inference: "native" } }],
     });
     if (listEndpointsStubHandler(req, json)) return;
     if (req.url === "/api/v5/inference/endpoints/alpha-id/keys" && req.method === "POST") return json(201, { id: "key-1", key: CLOUD_KEY, keyHint: "cloud" });
@@ -192,6 +192,78 @@ test("dry-run detects CLIProxy, overrides a native default, and prints neither l
   } finally { proxy.close(); cloud.close(); }
 });
 
+test("explicit inference choices preserve launch controls and reject incompatible flags", () => {
+  const controls = { resume: "session", endpoint: "subnet", yolo: true, remoteControl: true, mcp: true };
+  const selected = resolveInferenceOptions("claude", { ...controls, inference: "cliproxy" });
+  assert.deepEqual(selected, { ...controls, inference: "cliproxy", cliproxy: true, mcpOnly: false, remoteTransport: "cli" });
+  assert.equal(resolveInferenceOptions("claude", { inference: "cliproxy", cliproxy: "http://127.0.0.1:8317" }).cliproxy, "http://127.0.0.1:8317");
+  assert.equal(resolveInferenceOptions("claude", { inference: "native" }).mcpOnly, true);
+  assert.equal(resolveInferenceOptions("codex", { inference: "router" }).cliproxy, false);
+});
+
+test("the exact resumed native-session command consumes --inference and retains MCP, resume and yolo", async () => {
+  const id = "11111111-1111-4111-8111-111111111111";
+  const proxy = await proxyServer(); const cloud = await cloudServer({ slug: "subnet" }); const f = fixture(proxy.url);
+  const sessions = path.join(f.configDir, "sessions"); mkdirSync(sessions);
+  const record = { id, harness: "claude", harnessSessionId: id, mcpOnly: true, remoteTransport: "channels", endpointId: "alpha-id", endpointSlug: "subnet", cwd: f.root, createdAt: new Date().toISOString(), lastLaunchedAt: new Date().toISOString(), launches: 1 };
+  const sessionFile = path.join(sessions, `${id}.json`); writeFileSync(sessionFile, JSON.stringify(record));
+  const project = path.join(f.env.CLAUDE_CONFIG_DIR, "projects", f.root.replace(/[^A-Za-z0-9]/g, "-")); mkdirSync(project, { recursive: true });
+  const transcriptFile = path.join(project, `${id}.jsonl`);
+  const transcript = JSON.stringify({ type: "user", sessionId: id, cwd: f.root, message: { role: "user", content: "synthetic resume fixture" } }) + "\n";
+  writeFileSync(transcriptFile, transcript);
+  try {
+    for (const selector of [["--inference", "cliproxy"], ["--cliproxy"]]) {
+      const result = await run(["claude", "--resume", id, ...selector, "--yolo", "--endpoint", "subnet", "--dry-run"], { ...f.env, DITTO_API_BASE: cloud.url });
+      assert.equal(result.status, 0, result.stderr);
+      const plan = JSON.parse(result.stdout);
+      assert.equal(plan.inference, "cliproxy"); assert.equal(plan.endpoint.slug, "subnet");
+      assert.equal(plan.toolSurfaceRequested, "mcp"); assert.equal(plan.remoteTransport, "cli");
+      assert.equal(plan.args[plan.args.indexOf("--resume") + 1], id);
+      assert.ok(plan.args.includes("--dangerously-skip-permissions"));
+      assert.ok(!plan.args.includes("--inference") && !plan.args.includes("cliproxy") && !plan.args.includes("--cliproxy"));
+      assert.equal(plan.env.ANTHROPIC_BASE_URL, proxy.url);
+      assert.equal(plan.env.ANTHROPIC_AUTH_TOKEN, "<key>");
+    }
+    const proxyCalls = proxy.calls.length;
+    const routed = await run(["claude", "--resume", id, "--inference", "router", "--dry-run"], { ...f.env, DITTO_API_BASE: cloud.url });
+    assert.equal(routed.status, 0, routed.stderr);
+    assert.equal(JSON.parse(routed.stdout).inference, "router"); assert.equal(JSON.parse(routed.stdout).remoteTransport, "cli");
+    const localRecord = { ...record, mcpOnly: false, cliproxy: `${proxy.url}/v1`, remoteTransport: "cli" };
+    writeFileSync(sessionFile, JSON.stringify(localRecord));
+    const native = await run(["claude", "--resume", id, "--inference", "native", "--dry-run"], { ...f.env, DITTO_API_BASE: cloud.url });
+    assert.equal(native.status, 0, native.stderr); assert.equal(JSON.parse(native.stdout).inference, "native");
+    assert.equal(readFileSync(sessionFile, "utf8"), JSON.stringify(localRecord));
+    writeFileSync(sessionFile, JSON.stringify(record));
+    assert.equal(proxy.calls.length, proxyCalls, "explicit router/native never probe the saved local proxy");
+    assert.ok(proxy.calls.length > 0 && proxy.calls.every(call => call.url === "/v1/models"));
+    assert.ok(cloud.calls.every(call => call.method === "GET"), "dry-run neither mints a key nor registers remote control");
+    assert.equal(readFileSync(sessionFile, "utf8"), JSON.stringify(record));
+    assert.equal(readFileSync(transcriptFile, "utf8"), transcript);
+    assert.deepEqual(readdirSync(sessions), [`${id}.json`], "dry-run creates no other session");
+  } finally { proxy.close(); cloud.close(); }
+});
+
+test("invalid inference selections fail before resume lookup, proxy discovery, cloud calls or harness launch", async () => {
+  const proxy = await proxyServer(); const cloud = await cloudServer(); const f = fixture(proxy.url);
+  try {
+    for (const args of [
+      ["claude", "--inference", "invalid"], ["claude", "--inference="],
+      ["claude", "--inference", "cliproxy", "--mcp-only"], ["claude", "--inference", "cliproxy", "--no-cliproxy"],
+      ["claude", "--inference", "router", "--cliproxy"], ["claude", "--inference", "router", "--mcp-only"],
+      ["claude", "--inference", "native", "--cliproxy"], ["claude", "--inference", "native", "--no-mcp-only"],
+      ["codex", "--inference", "native"], ["claude", "--inference", "cliproxy", "--budget", "1"],
+    ]) {
+      const result = await run([...args, "--resume", "missing-fixture", "--dry-run"], { ...f.env, DITTO_API_BASE: cloud.url });
+      assert.notEqual(result.status, 0); assert.equal(result.stdout, "");
+      assert.match(result.stderr, /inference|conflicts|budget/); assert.doesNotMatch(result.stderr, /no .*session.*missing-fixture/);
+    }
+    const missing = await run(["claude", "--dry-run", "--inference"], { ...f.env, DITTO_API_BASE: cloud.url });
+    assert.notEqual(missing.status, 0); assert.match(missing.stderr, /argument missing/);
+    assert.equal(proxy.calls.length, 0); assert.equal(cloud.calls.length, 0);
+    assert.equal(existsSync(path.join(f.configDir, "sessions")), false);
+  } finally { proxy.close(); cloud.close(); }
+});
+
 test("real launch gives each destination its own key, persists URL only, and revokes the MCP key", async () => {
   const proxy = await proxyServer(); const cloud = await cloudServer(); const f = fixture(proxy.url);
   try {
@@ -237,6 +309,12 @@ test("Codex resume retains CLIProxy and an explicit --no-cliproxy switches back"
     assert.equal(resumed.status, 0, resumed.stderr); assert.equal(JSON.parse(resumed.stdout).inference, "cliproxy");
     const router = await run(["codex", "--resume", "resume-local", "--no-cliproxy", "--dry-run"], env);
     assert.equal(router.status, 0, router.stderr); assert.equal(JSON.parse(router.stdout).inference, "router");
+    const explicitRouter = await run(["codex", "--resume", "resume-local", "--inference", "router", "--dry-run"], env);
+    assert.equal(explicitRouter.status, 0, explicitRouter.stderr); assert.equal(JSON.parse(explicitRouter.stdout).inference, "router");
+    const explicitProxy = await run(["codex", "--resume", "resume-local", "--inference", "cliproxy", "--dry-run"], env);
+    assert.equal(explicitProxy.status, 0, explicitProxy.stderr);
+    const explicitPlan = JSON.parse(explicitProxy.stdout); assert.equal(explicitPlan.inference, "cliproxy");
+    assert.ok(!explicitPlan.args.includes("--inference") && !explicitPlan.args.includes("cliproxy"));
     const clash = await run(["claude", "--cliproxy", "--mcp-only", "--dry-run"], env);
     assert.equal(clash.status, 1); assert.match(clash.stderr, /choose either/);
   } finally { proxy.close(); cloud.close(); }

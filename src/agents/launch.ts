@@ -95,9 +95,40 @@ export interface LaunchOptions {
    */
   mcp?: boolean;
   mcpOnly?: boolean;
+  /** Explicit inference selection, overriding endpoint and resumed defaults. */
+  inference?: "router" | "native" | "cliproxy";
   /** Direct inference through a loopback CLIProxy; URL is persisted, keys are not. */
   cliproxy?: string | boolean;
   remoteTransport?: "cli" | "channels";
+}
+
+/** Normalize mode aliases before resume lookup, discovery, sign-in or key minting. */
+export function resolveInferenceOptions(harness: Harness, options: LaunchOptions): LaunchOptions {
+  if (typeof options.cliproxy === "string" && !options.cliproxy.trim()) {
+    throw new Error("--cliproxy requires a loopback URL; pass --cliproxy alone to auto-detect");
+  }
+  const mode = options.inference;
+  if (mode !== undefined && !["router", "native", "cliproxy"].includes(mode)) {
+    throw new Error("--inference must be router, native or cliproxy");
+  }
+  if (mode === "native" && harness !== "claude") throw new Error("--inference native requires Claude Code");
+  if (mode === "cliproxy" && options.cliproxy === false) throw new Error("--inference cliproxy conflicts with --no-cliproxy");
+  if (mode && mode !== "cliproxy" && options.cliproxy) throw new Error(`--inference ${mode} conflicts with --cliproxy`);
+  if (mode && mode !== "native" && options.mcpOnly === true) throw new Error(`--inference ${mode} conflicts with --mcp-only`);
+  if (mode === "native" && options.mcpOnly === false) throw new Error("--inference native conflicts with --no-mcp-only");
+  const normalized = mode === undefined ? options : {
+    ...options,
+    cliproxy: mode === "cliproxy" ? options.cliproxy ?? true : false,
+    mcpOnly: mode === "native",
+  };
+  if (normalized.cliproxy && normalized.mcpOnly) throw new Error("choose either --cliproxy or --mcp-only");
+  if (normalized.cliproxy && harness === "grok") throw new Error("--cliproxy is supported for claude and codex");
+  if (normalized.cliproxy && normalized.budget !== undefined) throw new Error("--budget cannot cap CLIProxy subscription inference; configure limits in your local proxy instead");
+  // Channels belongs to native inference. A new explicit selection must not
+  // inherit that transport from the previous native session.
+  return normalized.cliproxy || mode === "router"
+    ? { ...normalized, remoteTransport: normalized.remoteTransport ?? "cli" }
+    : normalized;
 }
 
 /** Explicit flags (or resumed choices) win over repo/cloud launch defaults. */
@@ -413,12 +444,7 @@ function waitForExit(child: ChildProcess, command: string, cwd: string): Promise
 
 /** Launches a coding harness against a Ditto inference endpoint with a temporary key. */
 export async function launchHarness(harness: Harness, rawArgs: string[], options: LaunchOptions): Promise<void> {
-  // An explicit empty value (often an unset shell variable) still requests
-  // CLIProxy. Reject it before any launch/setup work rather than treating it
-  // as a false boolean and silently using Router inference.
-  if (typeof options.cliproxy === "string" && !options.cliproxy.trim()) {
-    throw new Error("--cliproxy requires a loopback URL; pass --cliproxy alone to auto-detect");
-  }
+  options = resolveInferenceOptions(harness, options);
   let passthrough = stripSeparator(rawArgs);
   if (harness === "claude") {
     const lifted = liftResumeFlags(passthrough);
