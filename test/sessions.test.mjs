@@ -194,36 +194,3 @@ test("MCP requests carry X-Ditto-Session-Id, and the name exactly once", async (
   }
 });
 
-test("agents lists chat agents from /api/v5/chat-agents", async () => {
-  const dir = mkdtempSync(path.join(os.tmpdir(), "heyditto-sess-"));
-  const calls = [];
-  const server = http.createServer((req, res) => {
-    calls.push({ url: req.url, auth: req.headers.authorization });
-    res.setHeader("content-type", "application/json");
-    res.end(
-      JSON.stringify({
-        agents: [
-          { id: "main", kind: "main", name: "Main Agent", mainThreadId: "main", status: "active", threadCount: 3, lastActivityAt: new Date().toISOString(), createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z", connections: [] },
-          { id: "external:inference-abc", kind: "inference_endpoint", name: "work", mainThreadId: "external:inference-abc", status: "active", threadCount: 7, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z", connections: [{ id: "c1", agentId: "external:inference-abc", kind: "inference_endpoint", refId: "e1", name: "work", createdAt: "2026-01-01T00:00:00Z" }, { id: "c2", agentId: "external:inference-abc", kind: "mcp_api_key", refId: "12", name: "laptop", createdAt: "2026-01-01T00:00:00Z", revokedAt: "2026-02-01T00:00:00Z" }] },
-        ],
-      }),
-    );
-  });
-  await new Promise((r) => server.listen(0, "127.0.0.1", r));
-  const base = `http://127.0.0.1:${server.address().port}`;
-  try {
-    const r = await runAsync(["agents"], dir, { DITTO_API_KEY: "ditto_mcp_test", DITTO_API_BASE: base });
-    assert.equal(r.status, 0, r.stderr);
-    assert.equal(calls[0].url, "/api/v5/chat-agents");
-    assert.equal(calls[0].auth, "Bearer ditto_mcp_test");
-    assert.match(r.stdout, /^ID\s+KIND\s+NAME\s+THREADS\s+LAST ACTIVITY\s+CONNECTIONS/m);
-    assert.match(r.stdout, /main\s+main\s+Main Agent\s+3/);
-    assert.match(r.stdout, /inference_endpoint:work$/m);
-    assert.doesNotMatch(r.stdout, /laptop/, "revoked connections are hidden");
-    const j = await runAsync(["agents", "--output", "json"], dir, { DITTO_API_KEY: "ditto_mcp_test", DITTO_API_BASE: base });
-    assert.equal(JSON.parse(j.stdout).agents.length, 2);
-  } finally {
-    server.closeAllConnections();
-    server.close();
-  }
-});

@@ -17,7 +17,10 @@ import {
 } from "./config.js";
 import { clearStoredKey, readStoredAuth, saveLogin, writeStoredAuth } from "./store.js";
 import {
-  cmdAgents,
+  printAgents,
+  printAgentThreads,
+  printAgentMessage,
+  type AgentMessageResult,
   cmdSessions,
   cmdSessionsRm,
   registerEndpointCommands,
@@ -298,6 +301,79 @@ async function callAndPrint(
   } finally {
     await client.close();
   }
+}
+
+/**
+ * Calls one MCP tool and returns its JSON result for the command to render
+ * itself (`--output text`), or prints it the way callAndPrint does for the
+ * machine formats. A tool error exits non-zero with the tool's own message.
+ */
+async function callToolRendered<T>(
+  name: string,
+  args: Record<string, unknown>,
+  format: OutputFormat,
+  render: (out: T) => number | void,
+): Promise<void> {
+  const client = await getClient();
+  // The server may hold a call open for wait_seconds (up to 300): the SDK's
+  // 60 s default request timeout would cut a long --wait short.
+  const wait = typeof args.wait_seconds === "number" ? args.wait_seconds : 45;
+  let result: Awaited<ReturnType<Client["callTool"]>>;
+  try {
+    result = await client.callTool({ name, arguments: args }, undefined, { timeout: (wait + 30) * 1000 });
+  } finally {
+    await client.close();
+  }
+  if (result.isError) {
+    process.stderr.write(`error: ${formatToolResult(result, "text")}\n`);
+    process.exit(1);
+  }
+  const text = extractTextBlock(result);
+  let parsed: T | undefined;
+  try {
+    const value: unknown = JSON.parse(text ?? "");
+    parsed = value !== null && typeof value === "object" ? (value as T) : undefined;
+  } catch {
+    parsed = undefined;
+  }
+  if (format !== "text" || parsed === undefined) {
+    process.stdout.write(`${formatToolResult(result, format)}\n`);
+  }
+  // A failed agent turn fails the command in every output format.
+  if ((parsed as { status?: unknown } | undefined)?.status === "failed" && format !== "text") process.exit(1);
+  if (format !== "text" || parsed === undefined) return;
+  const code = render(parsed);
+  if (typeof code === "number" && code !== 0) process.exit(code);
+}
+
+interface AgentChatOptions extends CommonOptions {
+  space?: string;
+  agent?: string;
+  thread?: string;
+  wait?: string;
+  clientMessageId?: string;
+}
+
+/** --wait for the agent tools: whole seconds, 0 (return at once) to 300. */
+function parseAgentWait(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  const n = /^\d+$/.test(value) ? Number(value) : Number.NaN;
+  if (!Number.isInteger(n) || n < 0 || n > 300) throw new Error("--wait must be a whole number of seconds from 0 to 300");
+  return n;
+}
+
+function agentChatArgs(options: AgentChatOptions): Record<string, unknown> {
+  const args: Record<string, unknown> = {};
+  if (options.space) args.space = options.space;
+  if (options.agent) args.agent = options.agent;
+  if (options.thread) args.thread = options.thread;
+  const wait = parseAgentWait(options.wait);
+  if (wait !== undefined) args.wait_seconds = wait;
+  return args;
+}
+
+function spaceOption(): Option {
+  return new Option("--space <alias>", "space whose agents to use, e.g. a company space (heyditto knowledge-graphs lists them); default: your own");
 }
 
 async function readKeyFromStdin(): Promise<string> {
@@ -1300,15 +1376,64 @@ your own workspace or an app workspace.`,
   heyditto feedback --file ./report.txt --title "Missing capability" --include-recent-traces`,
   );
 
+  const agents = program
+    .command("agents")
+    .description("list and talk to your Ditto agents (connected chats and model endpoints are not agents)")
+    .summary("list and message Ditto agents");
   addExamples(
-    program
-      .command("agents")
-      .description("list your Ditto agents (threads, activity, connections)")
-      .summary("list Ditto agents")
+    agents
+      .command("list", { isDefault: true })
+      .description("list Ditto agents: your Main Agent and the agents you created, or a space's")
+      .addOption(spaceOption())
       .addOption(outputOption())
-      .action(cmdAgents),
+      .action(async (options: AgentChatOptions) => {
+        await callToolRendered("list_agents", agentChatArgs(options), parseOutputFormat(options.output), printAgents);
+      }),
     `  heyditto agents
-  heyditto agents --output json`,
+  heyditto agents --space omniaura/feedback-triager --output json`,
+  );
+  addExamples(
+    agents
+      .command("threads [agent]")
+      .description("list one agent's threads (default: Main Agent)")
+      .addOption(spaceOption())
+      .addOption(outputOption())
+      .action(async (agent: string | undefined, options: AgentChatOptions) => {
+        await callToolRendered("list_agent_threads", agentChatArgs({ ...options, agent }), parseOutputFormat(options.output), printAgentThreads);
+      }),
+    `  heyditto agents threads agent-research`,
+  );
+  addExamples(
+    agents
+      .command("send <message...>")
+      .description("ask a Ditto agent (default: Main Agent) and print its answer; it runs with the agent's instructions, memory and apps, and bills as a normal message")
+      .option("--agent <id>", "agent id from heyditto agents (default: main)")
+      .option("--thread <id>", "continue a specific thread of the agent")
+      .addOption(spaceOption())
+      .option("--wait <seconds>", "how long to wait for the answer (default 45, max 300; 0 returns at once)")
+      .option("--client-message-id <id>", "idempotency key: re-sending the same id does not queue a second message")
+      .addOption(outputOption())
+      .action(async (parts: string[], options: AgentChatOptions) => {
+        const args = { ...agentChatArgs(options), message: parts.join(" ") };
+        if (options.clientMessageId) Object.assign(args, { client_message_id: options.clientMessageId });
+        await callToolRendered<AgentMessageResult>("send_message_to_agent", args, parseOutputFormat(options.output), printAgentMessage);
+      }),
+    `  heyditto agents send "what should I work on today?"
+  heyditto agents send --space omniaura/feedback-triager --wait 300 "which GitHub issue has the most reporters?"`,
+  );
+  addExamples(
+    agents
+      .command("message <message-id>")
+      .description("check a message sent with heyditto agents send, and print the answer once it is ready")
+      .option("--wait <seconds>", "wait up to this many seconds (max 300) for the answer")
+      .addOption(outputOption())
+      .action(async (messageId: string, options: AgentChatOptions) => {
+        const args: Record<string, unknown> = { message_id: messageId };
+        const wait = parseAgentWait(options.wait);
+        if (wait !== undefined) args.wait_seconds = wait;
+        await callToolRendered<AgentMessageResult>("get_agent_message", args, parseOutputFormat(options.output), printAgentMessage);
+      }),
+    `  heyditto agents message 6f1c2a8e-3b4d-4e5f-8a9b-0c1d2e3f4a5b --wait 300`,
   );
 
   const sessions = program
