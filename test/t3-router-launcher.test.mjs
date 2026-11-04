@@ -14,9 +14,10 @@ function fixture(t) {
   const fakeClaude = path.join(root, "claude");
   const fakeHeyditto = path.join(root, "heyditto");
   const capture = path.join(root, "capture.json");
+  const claudeCapture = path.join(root, "claude-capture.json");
   const calls = path.join(root, "calls.jsonl");
   const interpreter = `#!${process.execPath}\n`;
-  writeFileSync(fakeClaude, interpreter + `process.stdout.write("2.1.318 (Claude Code)\\n");\n`);
+  writeFileSync(fakeClaude, interpreter + `import { writeFileSync } from "node:fs"; writeFileSync(process.env.T3_TEST_CLAUDE_CAPTURE, JSON.stringify(process.argv.slice(2))); process.stdout.write("2.1.318 (Claude Code)\\n");\n`);
   writeFileSync(fakeHeyditto, interpreter + `
 import { appendFileSync, writeFileSync } from "node:fs";
 const args = process.argv.slice(2);
@@ -39,6 +40,7 @@ process.stdin.on("end", () => { process.exitCode = Number(process.env.T3_TEST_EX
     DITTO_T3_CLAUDE_BIN: fakeClaude,
     DITTO_T3_ENDPOINT: "",
     T3_TEST_CAPTURE: capture,
+    T3_TEST_CLAUDE_CAPTURE: claudeCapture,
     T3_TEST_CALLS: calls,
     T3_TEST_OLD: "0",
     T3_TEST_HELP_ERROR: "0",
@@ -58,6 +60,7 @@ process.stdin.on("end", () => { process.exitCode = Number(process.env.T3_TEST_EX
     root,
     env,
     capture: () => JSON.parse(readFileSync(capture, "utf8")),
+    claudeArgs: () => JSON.parse(readFileSync(claudeCapture, "utf8")),
     calls: () => {
       try { return readFileSync(calls, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse); }
       catch (error) { if (error.code === "ENOENT") return []; throw error; }
@@ -70,12 +73,21 @@ process.stdin.on("end", () => { process.exitCode = Number(process.env.T3_TEST_EX
 
 test("T3 version probes run only Claude, including binary paths with spaces", (t) => {
   const f = fixture(t);
-  for (const flag of ["--version", "-v"]) {
-    const result = f.run([flag], { DITTO_T3_HEYDITTO_BIN: "/does/not/exist" });
+  for (const args of [["--version"], ["-v"], ["--version", "--output-format", "json"], ["--settings", "config with spaces.json", "-v"]]) {
+    const result = f.run(args, { DITTO_T3_HEYDITTO_BIN: "/does/not/exist" });
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout, "2.1.318 (Claude Code)\n");
+    assert.deepEqual(f.claudeArgs(), args);
   }
   assert.deepEqual(f.calls(), []);
+});
+
+test("a version-like argument after the SDK separator does not bypass heyditto", (t) => {
+  const f = fixture(t);
+  const result = f.run(["--", "--version"]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, "");
+  assert.deepEqual(f.calls(), [["claude", "--help"], ["claude", "--no-mcp-only", "--no-mcp", "--no-remote-control", "--", "--", "--version"]]);
 });
 
 test("T3 stream protocol and argv survive, with isolated auth and a shared fresh session id", (t) => {
@@ -102,14 +114,27 @@ test("T3 session-id equals spelling maps to the trace id without requiring an en
   assert.deepEqual(f.capture().args, ["claude", "--session", "session-2", "--no-mcp-only", "--no-mcp", "--no-remote-control", "--", "--session-id=session-2", "--print"]);
 });
 
-test("T3 resume and continue never add a conflicting heyditto --session", (t) => {
+test("T3 resume and continue remove SDK session-id flags without changing other argv", (t) => {
   const f = fixture(t);
+  const other = ["--input-format", "stream-json", "--output-format", "stream-json", "--settings", '{"text":"spaces and \\"quotes\\""}', "", "literal * wildcard", "line one\nline two"];
   for (const resume of [["--resume", "session-1"], ["--resume=session-1"], ["-r", "session-1"], ["--continue"], ["-c"]]) {
-    const sdkArgs = ["--session-id", "session-1", ...resume];
-    const result = f.run(sdkArgs);
-    assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(f.capture().args, ["claude", "--no-mcp-only", "--no-mcp", "--no-remote-control", "--", ...sdkArgs]);
+    for (const session of [["--session-id", "session-1"], ["--session-id=session-1"]]) {
+      for (const sdkArgs of [[...session, ...other, ...resume], [...resume, ...other, ...session]]) {
+        const result = f.run(sdkArgs);
+        assert.equal(result.status, 0, result.stderr);
+        const preserved = sdkArgs.filter((arg, index) => !arg.startsWith("--session-id") && !(index > 0 && sdkArgs[index - 1] === "--session-id"));
+        assert.deepEqual(f.capture().args, ["claude", "--no-mcp-only", "--no-mcp", "--no-remote-control", "--", ...preserved]);
+      }
+    }
   }
+});
+
+test("resume filtering preserves positional session-id text after the SDK separator", (t) => {
+  const f = fixture(t);
+  const sdkArgs = ["--session-id=ignored-fresh-id", "--resume", "existing-id", "--", "--session-id", "literal positional text"];
+  const result = f.run(sdkArgs);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(f.capture().args, ["claude", "--no-mcp-only", "--no-mcp", "--no-remote-control", "--", "--resume", "existing-id", "--", "--session-id", "literal positional text"]);
 });
 
 test("an old or broken CLI fails before inference and never falls back to Claude", (t) => {
@@ -139,8 +164,11 @@ test("invalid binaries and missing session values fail with no inference launch"
     assert.notEqual(result.status, 0);
     assert.equal(result.stdout, "");
   }
-  const result = f.run(["--session-id"]);
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /--session-id requires a value/);
-  assert.deepEqual(f.calls(), [["claude", "--help"]]);
+  const invalidArgs = [["--session-id"], ["--session-id="], ["--session-id", ""], ["--session-id", "--resume", "abc"], ["--session-id", "--continue"], ["--session-id=-bad"]];
+  for (const args of invalidArgs) {
+    const result = f.run(args);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /--session-id requires a value/);
+  }
+  assert.deepEqual(f.calls(), invalidArgs.map(() => ["claude", "--help"]));
 });

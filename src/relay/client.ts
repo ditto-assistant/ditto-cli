@@ -78,20 +78,25 @@ export class RelayConnection {
     } catch {
       // Provider errors can contain user prompts or tokens. Never relay an
       // exception message; the Router supplies a public error and reference.
-      if (!controller.signal.aborted) await this.send({ type: "error", id }).catch(() => {});
+      const cancelled = controller.signal.aborted;
+      controller.abort();
+      if (!cancelled) await this.send({ type: "error", id }).catch(() => {});
     } finally {
+      controller.abort();
       this.requests.delete(id);
     }
   }
 }
 
-export async function connectRelay(url: string, accountKey: string, proxy: CliProxy, signal: AbortSignal, ready: () => void, welcomeTimeoutMs = 15_000): Promise<void> {
+export async function connectRelay(url: string, accountKey: string, proxy: CliProxy, signal: AbortSignal, ready: () => void, welcomeTimeoutMs = 15_000,
+  options: { heartbeatMs?: number; pongTimeoutMs?: number; maxInboundBytes?: number } = {}): Promise<void> {
   if (signal.aborted) return;
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(url, { headers: { Authorization: `Bearer ${accountKey}` } } as unknown as string[]);
     let welcomed = false;
     let settled = false;
     let heartbeat: NodeJS.Timeout | undefined;
+    let lastPong = Date.now();
     const send = async (frame: RelayFrame) => {
       const started = Date.now();
       while (socket.bufferedAmount > 1024 * 1024) {
@@ -116,16 +121,22 @@ export async function connectRelay(url: string, accountKey: string, proxy: CliPr
     const deadline = setTimeout(() => finish(true), welcomeTimeoutMs);
     signal.addEventListener("abort", stop, { once: true });
     socket.addEventListener("message", (event) => {
-      if (typeof event.data !== "string" || event.data.length > 12 * 1024 * 1024) { finish(true); return; }
+      if (typeof event.data !== "string" || Buffer.byteLength(event.data, "utf8") > (options.maxInboundBytes ?? 12 * 1024 * 1024)) { finish(true); return; }
       let frame: RelayFrame;
       try { frame = JSON.parse(event.data) as RelayFrame; } catch { finish(true); return; }
       if (!welcomed) {
         if (frame?.type !== "welcome") { finish(true); return; }
         welcomed = true;
         clearTimeout(deadline);
-        heartbeat = setInterval(() => { void send({ type: "ping" }).catch(() => finish(true)); }, 20_000);
+        lastPong = Date.now();
+        heartbeat = setInterval(() => {
+          if (Date.now() - lastPong >= (options.pongTimeoutMs ?? 60_000)) { finish(true); return; }
+          void send({ type: "ping" }).catch(() => finish(true));
+        }, options.heartbeatMs ?? 20_000);
         ready();
-      } else if (frame?.type !== "pong") {
+      } else if (frame?.type === "pong") {
+        lastPong = Date.now();
+      } else {
         void connection.receive(frame).catch(() => finish(true));
       }
     });

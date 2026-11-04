@@ -58,6 +58,9 @@ export function planClaude(input: PlanInput): HarnessPlan {
       installHint: "install Claude Code and sign in with `claude auth login`",
     };
   }
+  // Intermediaries do not forward Claude Code's auto-mode classifier fields.
+  // Decide locally for Router and CLIProxy inference unless the caller chose.
+  if (input.env.CLAUDE_CODE_AUTO_MODE_SERVER === undefined) envSet.CLAUDE_CODE_AUTO_MODE_SERVER = "0";
   if (input.localInference) {
     // Cloud MCP auth never becomes the local inference credential, and a
     // parent Router launch's custom headers/other provider modes stay out.
@@ -68,10 +71,6 @@ export function planClaude(input: PlanInput): HarnessPlan {
       installHint: "install Claude Code: npm i -g @anthropic-ai/claude-code",
     };
   }
-  // Claude Code's server-side auto-mode classifier needs the dangerous-tool-use
-  // beta and `safeguards` field, which the router does not forward; a rejection
-  // denies every auto-mode tool use. Decide locally unless the caller chose.
-  if (input.env.CLAUDE_CODE_AUTO_MODE_SERVER === undefined) envSet.CLAUDE_CODE_AUTO_MODE_SERVER = "0";
   // Claude Code only labels requests (x-claude-code-request-class: main,
   // subagent, auxiliary) for gateways when asked. The router uses the label to
   // skip memory recall on housekeeping calls such as the auto-mode classifier.

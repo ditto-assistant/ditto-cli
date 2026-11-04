@@ -19,11 +19,17 @@ resolve_binary() {
 
 claude_bin=$(resolve_binary "${DITTO_T3_CLAUDE_BIN:-claude}" Claude DITTO_T3_CLAUDE_BIN)
 
-# T3 refreshes versions periodically. This path does not contact Ditto or mint a key.
-if [ "$#" -eq 1 ]; then
-  case "$1" in
-    --version|-v) exec "$claude_bin" "$@" ;;
+# T3 refreshes versions periodically. This path does not contact Ditto or mint a
+# key, including when its probe supplies extra output/configuration flags.
+version_probe=false
+for argument in "$@"; do
+  [ "$argument" = -- ] && break
+  case "$argument" in
+    --version|-v) version_probe=true ;;
   esac
+done
+if [ "$version_probe" = true ]; then
+  exec "$claude_bin" "$@"
 fi
 
 heyditto_bin=$(resolve_binary "${DITTO_T3_HEYDITTO_BIN:-heyditto}" heyditto DITTO_T3_HEYDITTO_BIN)
@@ -54,17 +60,46 @@ take_session_id=false
 resuming=false
 for argument in "$@"; do
   if [ "$take_session_id" = true ]; then
-    session_id=$argument
+    case "$argument" in
+      ''|-*) fail "--session-id requires a value" ;;
+      *) session_id=$argument ;;
+    esac
     take_session_id=false
     continue
   fi
   case "$argument" in
+    --) break ;;
     --session-id) take_session_id=true ;;
+    --session-id=|--session-id=-*) fail "--session-id requires a value" ;;
     --session-id=*) session_id=${argument#--session-id=} ;;
     --resume|--resume=*|-r|-r?*|--continue|-c) resuming=true ;;
   esac
 done
 [ "$take_session_id" = false ] || fail "--session-id requires a value"
+
+# A restarted SDK may still supply its fresh-session flag beside --resume.
+# Claude rejects that combination. Remove both session-id spellings only on
+# resume, rotating exactly the original argv entries so spaces, empty values,
+# newlines and ordering survive without eval, text serialization or splitting.
+if [ "$resuming" = true ]; then
+  remaining=$#
+  options_ended=false
+  while [ "$remaining" -gt 0 ]; do
+    argument=$1
+    shift
+    remaining=$((remaining - 1))
+    if [ "$options_ended" = true ]; then
+      set -- "$@" "$argument"
+      continue
+    fi
+    case "$argument" in
+      --) options_ended=true; set -- "$@" "$argument" ;;
+      --session-id) shift; remaining=$((remaining - 1)) ;;
+      --session-id=*) ;;
+      *) set -- "$@" "$argument" ;;
+    esac
+  done
+fi
 
 # Arguments after `--` are owned by the SDK, including stdin/stdout wire flags.
 # Fresh sessions share one native/trace id. Resume is resolved by heyditto's

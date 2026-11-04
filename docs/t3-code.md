@@ -81,8 +81,10 @@ the served trace when verifying the model actually used.
 4. Confirm the original Claude provider still uses its normal configuration.
 
 The launcher preserves T3's stream-json stdin/stdout protocol. It gives a fresh
-T3 native session the same Ditto trace id, and lets the CLI resolve resumed
-sessions. It uses `--no-mcp` because T3 manages its own MCP servers through the
+T3 native session the same Ditto trace id. On resume or continue it removes the
+SDK's fresh-session flag before letting the CLI resolve the existing session;
+Claude cannot use both selectors together. Missing or empty session IDs fail
+before launch. It uses `--no-mcp` because T3 manages its own MCP servers through the
 Claude SDK; endpoint tools stay on the Router. It uses `--no-remote-control`
 because the SDK owns the process pipes: T3 retains its own remote-control path,
 while this launcher does not attach Ditto's terminal bridge.

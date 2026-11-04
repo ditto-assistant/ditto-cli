@@ -89,6 +89,21 @@ test("cloud cancellation aborts local inference", async (t) => {
   await didClose;
 });
 
+test("failed response delivery aborts upstream before removing its controller", { timeout: 5_000 }, async (t) => {
+  let closeFetch;
+  const fetchClosed = new Promise((resolve) => { closeFetch = resolve; });
+  const baseUrl = await server(t, (_req, res) => {
+    res.on("close", closeFetch);
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.write("data: an ongoing subscription request\n\n");
+  });
+  const connection = new RelayConnection({ baseUrl, apiKey: "private-test-key", models: ["test"] }, async () => { throw new Error("simulated backpressure failure"); });
+  await connection.receive(request());
+  // No connection.close() is called: once receive returns, only its own
+  // cleanup can end this fetch; the old orphaned controller cannot be found.
+  await fetchClosed;
+});
+
 async function cloudServer(t, connected) {
   const httpServer = http.createServer();
   const sockets = new Set();
@@ -156,6 +171,47 @@ test("real cloud socket must welcome within a bounded time", { timeout: 5_000 },
   const url = await cloudServer(t, () => {});
   const proxy = { baseUrl: "http://127.0.0.1:1/v1", apiKey: "local-key-fixture", models: ["test"] };
   await assert.rejects(connectRelay(url, "account-key-fixture", proxy, new AbortController().signal, () => assert.fail("unwelcomed socket became ready"), 30), /connection failed/);
+});
+
+test("missing pongs close a half-open relay", { timeout: 5_000 }, async (t) => {
+  let pings = 0;
+  const url = await cloudServer(t, (socket) => {
+    socket.on("message", (raw) => { if (JSON.parse(raw.toString()).type === "ping") pings++; });
+    socket.send(JSON.stringify({ type: "welcome" }));
+  });
+  const proxy = { baseUrl: "http://127.0.0.1:1/v1", apiKey: "local-key-fixture", models: ["test"] };
+  await assert.rejects(connectRelay(url, "account-key-fixture", proxy, new AbortController().signal, () => {}, 1_000,
+    { heartbeatMs: 20, pongTimeoutMs: 100 }), /connection failed/);
+  assert.ok(pings > 0, "the connection was established and heartbeats actually ran");
+});
+
+test("pongs refresh the relay liveness deadline", { timeout: 5_000 }, async (t) => {
+  let answeredPings = 0;
+  const url = await cloudServer(t, (socket) => {
+    socket.on("message", (raw) => {
+      if (JSON.parse(raw.toString()).type === "ping" && answeredPings < 12) {
+        answeredPings++;
+        socket.send(JSON.stringify({ type: "pong" }));
+      }
+    });
+    socket.send(JSON.stringify({ type: "welcome" }));
+  });
+  const proxy = { baseUrl: "http://127.0.0.1:1/v1", apiKey: "local-key-fixture", models: ["test"] };
+  await assert.rejects(connectRelay(url, "account-key-fixture", proxy, new AbortController().signal, () => {}, 1_000,
+    { heartbeatMs: 25, pongTimeoutMs: 200 }), /connection failed/);
+  assert.equal(answeredPings, 12, "the relay must survive beyond the initial deadline while pongs continue");
+});
+
+test("inbound limit counts UTF-8 bytes before parsing a multibyte pong", { timeout: 5_000 }, async (t) => {
+  const frame = JSON.stringify({ type: "pong", padding: "€".repeat(20) });
+  assert.ok(frame.length <= 64 && Buffer.byteLength(frame, "utf8") > 64, "fixture must distinguish code units from wire bytes");
+  const url = await cloudServer(t, (socket) => {
+    socket.send(JSON.stringify({ type: "welcome" }));
+    socket.send(frame);
+  });
+  const proxy = { baseUrl: "http://127.0.0.1:1/v1", apiKey: "local-key-fixture", models: ["test"] };
+  await assert.rejects(connectRelay(url, "account-key-fixture", proxy, new AbortController().signal, () => {}, 1_000,
+    { maxInboundBytes: 64 }), /connection failed/);
 });
 
 test("relay --enable configures a cross-vendor default before authenticated connection", { timeout: 10_000 }, async (t) => {

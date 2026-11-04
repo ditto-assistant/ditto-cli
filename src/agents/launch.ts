@@ -380,6 +380,12 @@ function waitForExit(child: ChildProcess, command: string, cwd: string): Promise
 
 /** Launches a coding harness against a Ditto inference endpoint with a temporary key. */
 export async function launchHarness(harness: Harness, rawArgs: string[], options: LaunchOptions): Promise<void> {
+  // An explicit empty value (often an unset shell variable) still requests
+  // CLIProxy. Reject it before any launch/setup work rather than treating it
+  // as a false boolean and silently using Router inference.
+  if (typeof options.cliproxy === "string" && !options.cliproxy.trim()) {
+    throw new Error("--cliproxy requires a loopback URL; pass --cliproxy alone to auto-detect");
+  }
   let passthrough = stripSeparator(rawArgs);
   if (harness === "claude") {
     const lifted = liftResumeFlags(passthrough);
@@ -459,6 +465,9 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     mcpOnly: options.cliproxy ? options.mcpOnly : options.mcpOnly ?? record?.mcpOnly,
     remoteTransport: options.remoteTransport ?? (remoteMode(options) === "tui" ? record?.remoteTransport : undefined),
   };
+  if (typeof options.cliproxy === "string" && !options.cliproxy.trim()) {
+    throw new Error("The saved CLIProxy URL is empty; pass --cliproxy to auto-detect or --no-cliproxy to change inference mode");
+  }
   if (options.cliproxy && options.mcpOnly) throw new Error("choose either --cliproxy or --mcp-only");
   if (options.cliproxy && harness === "grok") throw new Error("--cliproxy is supported for claude and codex");
   if (options.cliproxy && options.budget !== undefined) throw new Error("--budget cannot cap CLIProxy subscription inference; configure limits in your local proxy instead");

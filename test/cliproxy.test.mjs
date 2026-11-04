@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -141,6 +141,39 @@ test("Claude plans keep local inference auth separate from cloud MCP auth and di
   const codex = planCodex({ baseUrl: "http://127.0.0.1:8317/v1", apiKey: LOCAL_KEY, localInference: true, sessionId: "s", passthrough: [], env: {} });
   assert.ok(codex.args.includes('model_providers.ditto.http_headers={}'));
   assert.equal(codex.envSet.DITTO_INFERENCE_API_KEY, LOCAL_KEY);
+});
+
+test("local inference classifies auto-mode tools locally while preserving an explicit caller choice", () => {
+  const input = { baseUrl: "http://127.0.0.1:8317/v1", apiKey: LOCAL_KEY, localInference: true, sessionId: "s", passthrough: [], env: {} };
+  assert.equal(planClaude(input).envSet.CLAUDE_CODE_AUTO_MODE_SERVER, "0");
+  for (const choice of ["0", "1"]) {
+    const env = { CLAUDE_CODE_AUTO_MODE_SERVER: choice };
+    const plan = planClaude({ ...input, env });
+    assert.equal(plan.envSet.CLAUDE_CODE_AUTO_MODE_SERVER, undefined, "the plan must not replace an explicit value");
+    assert.equal(childEnv(plan, env).CLAUDE_CODE_AUTO_MODE_SERVER, choice);
+  }
+});
+
+test("explicit empty or blank CLIProxy values fail before any cloud, proxy or harness activity", async () => {
+  const proxy = await proxyServer(); const cloud = await cloudServer(); const f = fixture(proxy.url);
+  const marker = path.join(f.root, "harness-was-invoked");
+  for (const harness of ["claude", "codex"]) {
+    writeFileSync(path.join(f.root, "bin", harness), `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(marker)}, 'unexpected');\n`, { mode: 0o755 });
+  }
+  try {
+    for (const harness of ["claude", "codex"]) {
+      for (const value of ["", "   ", "\t"]) {
+        const result = await run([harness, `--cliproxy=${value}`, "--endpoint", "alpha", "-p", "test"], { ...f.env, DITTO_API_BASE: cloud.url });
+        assert.equal(result.status, 1, result.stderr);
+        assert.match(result.stderr, /--cliproxy requires a loopback URL/);
+        assert.equal(result.stdout, "");
+      }
+    }
+    assert.equal(cloud.calls.length, 0, "an explicit local request cannot fall back to the cloud");
+    assert.equal(proxy.calls.length, 0, "invalid values fail before proxy preflight");
+    assert.equal(existsSync(marker), false, "not even a harness version probe runs");
+    assert.equal(existsSync(path.join(f.configDir, "sessions")), false, "invalid values create no session");
+  } finally { proxy.close(); cloud.close(); }
 });
 
 test("dry-run detects CLIProxy, overrides a native default, and prints neither local nor cloud credential", async () => {
