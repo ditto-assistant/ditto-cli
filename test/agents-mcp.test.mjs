@@ -37,7 +37,7 @@ const replies = {
     : args.wait_seconds === 0
       ? { message_id: "m-1", status: "pending", url: "https://app.heyditto.ai/chat/agent-triage" }
       : { message_id: "m-1", status: "completed", answer: "ditto-app#2137 has the most reporters." },
-  get_agent_message: (args) => args.message_id === "gone" ? null : ({ message_id: "m-1", status: "completed", answer: "ditto-app#2137 has the most reporters." }),
+  get_agent_message: (args) => args.message_id === "gone" ? null : args.message_id === "empty" ? { message_id: "empty", status: "completed" } : ({ message_id: "m-1", status: "completed", answer: "ditto-app#2137 has the most reporters." }),
 };
 
 test("agents commands call the MCP agent-chat tools", async () => {
@@ -116,6 +116,20 @@ test("agents commands call the MCP agent-chat tools", async () => {
     r = await run(["agents", "send", "--client-message-id", "k-1", "--wait", "0", "hi"], base, dir);
     assert.equal(r.code, 0, r.stderr);
     assert.equal(last().arguments.client_message_id, "k-1");
+
+    // A completed turn that returned no answer is not a success.
+    r = await run(["agents", "message", "empty"], base, dir);
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, /completed but returned no answer/);
+
+    // Out-of-range waits are refused before anything is called.
+    for (const wait of ["-100", "301", "1.5", "1e2", ""]) {
+      const before = calls.length;
+      r = await run(["agents", "send", "--wait", wait, "hi"], base, dir);
+      assert.notEqual(r.code, 0, `--wait ${wait}`);
+      assert.match(r.stderr, /--wait must be a whole number of seconds from 0 to 300/);
+      assert.equal(calls.length, before, `--wait ${wait} called a tool`);
+    }
 
     // A tool error exits 1 with the tool's own message.
     r = await run(["agents", "message", "gone"], base, dir);

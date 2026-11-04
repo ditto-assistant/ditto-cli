@@ -354,12 +354,20 @@ interface AgentChatOptions extends CommonOptions {
   clientMessageId?: string;
 }
 
+/** --wait for the agent tools: whole seconds, 0 (return at once) to 300. */
+function parseAgentWait(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  const n = /^\d+$/.test(value) ? Number(value) : Number.NaN;
+  if (!Number.isInteger(n) || n < 0 || n > 300) throw new Error("--wait must be a whole number of seconds from 0 to 300");
+  return n;
+}
+
 function agentChatArgs(options: AgentChatOptions): Record<string, unknown> {
   const args: Record<string, unknown> = {};
   if (options.space) args.space = options.space;
   if (options.agent) args.agent = options.agent;
   if (options.thread) args.thread = options.thread;
-  const wait = parseIntegerOption(options.wait, "--wait");
+  const wait = parseAgentWait(options.wait);
   if (wait !== undefined) args.wait_seconds = wait;
   return args;
 }
@@ -1421,7 +1429,7 @@ your own workspace or an app workspace.`,
       .addOption(outputOption())
       .action(async (messageId: string, options: AgentChatOptions) => {
         const args: Record<string, unknown> = { message_id: messageId };
-        const wait = parseIntegerOption(options.wait, "--wait");
+        const wait = parseAgentWait(options.wait);
         if (wait !== undefined) args.wait_seconds = wait;
         await callToolRendered<AgentMessageResult>("get_agent_message", args, parseOutputFormat(options.output), printAgentMessage);
       }),

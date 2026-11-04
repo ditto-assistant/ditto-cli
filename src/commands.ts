@@ -1788,6 +1788,12 @@ export function printAgentMessage(out: AgentMessageResult): number {
     process.stdout.write(`${out.answer}\n`);
     return 0;
   }
+  // Completed without an answer is fine only with instructions (a Ditto Code
+  // task's job result, an answer to read in the app); otherwise it is missing.
+  if (out.status === "completed" && !out.instructions) {
+    process.stderr.write(`error: message ${out.message_id} completed but returned no answer${out.url ? `; open ${out.url}` : ""}\n`);
+    return 1;
+  }
   if (out.status === "failed") {
     const f = out.failure;
     process.stderr.write(`error: the agent could not answer${f?.message ? `: ${f.message}` : ""}${f?.ref ? ` (ref ${f.ref})` : ""}\n`);
