@@ -7,6 +7,7 @@ import test from "node:test";
 import { createServer } from "node:http";
 import { Command } from "commander";
 import { chooseEndpoint } from "../dist/agents/launch.js";
+import { saveLogin } from "../dist/store.js";
 import { applyT3Setup, planT3Setup, registerT3Commands } from "../dist/t3/setup.js";
 
 function fixture(t) {
@@ -215,4 +216,36 @@ test("T3 setup without --endpoint refuses a running T3 before choosing an endpoi
   await assert.rejects(program.parseAsync(["node", "heyditto", "t3", "setup", "--base-dir", f.base, "--claude-bin", f.options.claudeBin, "--heyditto-bin", f.options.heydittoBin]), /T3 is running/);
   assert.equal(called, false);
   assert.equal(readFileSync(f.settings, "utf8"), f.original);
+});
+
+test("an endpoint choice with an expired saved login signs in again, except in a dry run", async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "ditto-choose-expired-"));
+  const calls = [];
+  const server = createServer((req, res) => {
+    calls.push(`${req.method} ${req.url}`);
+    res.writeHead(req.url === "/api/v5/inference/endpoints" ? 401 : 503, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ message: "unavailable" }));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const saved = { env: { ...process.env }, stdin: process.stdin.isTTY, stderr: process.stderr.isTTY };
+  t.after(() => {
+    server.close();
+    rmSync(root, { recursive: true, force: true });
+    for (const key of ["DITTO_API_BASE", "DITTO_API_KEY", "DITTO_CONFIG_DIR"]) saved.env[key] === undefined ? delete process.env[key] : (process.env[key] = saved.env[key]);
+    process.stdin.isTTY = saved.stdin;
+    process.stderr.isTTY = saved.stderr;
+  });
+  delete process.env.DITTO_API_KEY;
+  Object.assign(process.env, { DITTO_API_BASE: `http://127.0.0.1:${server.address().port}`, DITTO_CONFIG_DIR: path.join(root, "config") });
+  await saveLogin("ditto_mcp_expired");
+  t.mock.method(process.stderr, "write", () => true);
+  process.stdin.isTTY = true;
+  process.stderr.isTTY = true;
+  const deviceCode = "POST /api/v2/mcp/device-code";
+  // The device-code stub fails before any browser would open; reaching it is
+  // the evidence that the 401 started a new sign-in instead of escaping.
+  await assert.rejects(chooseEndpoint("claude", true));
+  assert.equal(calls.includes(deviceCode), false, "a dry run must not start a sign-in");
+  await assert.rejects(chooseEndpoint("claude", false));
+  assert.equal(calls.at(-1), deviceCode);
 });

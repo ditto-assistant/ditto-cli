@@ -318,9 +318,29 @@ async function resolveEndpoint(
  * `readOnly` (a dry run) never creates an endpoint or saves a default.
  */
 export async function chooseEndpoint(harness: Harness, readOnly = false): Promise<InferenceEndpoint> {
-  const selected = readOnly ? undefined : await ensureLoggedIn(harness, undefined);
-  const catalog = await listEndpoints();
+  const { selected, catalog } = await signInAndListEndpoints(harness, undefined, readOnly);
   return resolveEndpoint(undefined, catalog.endpoints, selected, readOnly);
+}
+
+/** Signs in when needed and lists endpoints; a dry run never opens the browser. */
+async function signInAndListEndpoints(
+  harness: Harness,
+  requestedEndpoint: string | undefined,
+  dryRun: boolean,
+): Promise<{ selected: SelectedEndpoint | undefined; catalog: Awaited<ReturnType<typeof listEndpoints>> }> {
+  let selected = dryRun ? undefined : await ensureLoggedIn(harness, requestedEndpoint);
+  try {
+    return { selected, catalog: await listEndpoints() };
+  } catch (err) {
+    // A saved key that lapsed (device-flow keys expire) sends the user back
+    // through the browser instead of a dead 401.
+    if (!(err instanceof ApiError) || err.status !== 401 || dryRun || !interactive()) throw err;
+    const { source } = await resolveApiKey();
+    if (source !== "config") throw err;
+    log("your saved Ditto login is no longer valid — opening your browser to sign in again.");
+    selected = await browserLogin(harness, requestedEndpoint);
+    return { selected, catalog: await listEndpoints() };
+  }
 }
 
 /**
@@ -490,20 +510,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   if (proxy) options = { ...options, cliproxy: proxy.baseUrl, mcpOnly: false };
 
   const requestedEndpoint = options.endpoint ?? record?.endpointSlug;
-  let selected = options.dryRun ? undefined : await ensureLoggedIn(harness, requestedEndpoint);
-  let catalog: Awaited<ReturnType<typeof listEndpoints>>;
-  try {
-    catalog = await listEndpoints();
-  } catch (err) {
-    // A saved key that lapsed (device-flow keys expire) sends the user back
-    // through the browser instead of a dead 401.
-    if (!(err instanceof ApiError) || err.status !== 401 || options.dryRun || !interactive()) throw err;
-    const { source } = await resolveApiKey();
-    if (source !== "config") throw err;
-    log("your saved Ditto login is no longer valid — opening your browser to sign in again.");
-    selected = await browserLogin(harness, requestedEndpoint);
-    catalog = await listEndpoints();
-  }
+  const { selected, catalog } = await signInAndListEndpoints(harness, requestedEndpoint, Boolean(options.dryRun));
 
   // Sent as X-Ditto-Harness-Version so the router serves this release's own
   // prompts. Started only now that sign-in has succeeded (a failed login
