@@ -39,7 +39,7 @@ export function planCodex(input: PlanInput): HarnessPlan {
     "-c",
     `model_provider=${tomlString("ditto")}`,
     "-c",
-    `model_providers.ditto.name=${tomlString("Ditto")}`,
+    `model_providers.ditto.name=${tomlString(input.localInference ? "CLIProxy" : "Ditto")}`,
     "-c",
     `model_providers.ditto.base_url=${tomlString(input.baseUrl)}`,
     "-c",
@@ -47,7 +47,7 @@ export function planCodex(input: PlanInput): HarnessPlan {
     "-c",
     `model_providers.ditto.wire_api=${tomlString("responses")}`,
     "-c",
-    `model_providers.ditto.http_headers=${tomlInlineTable([[SESSION_HEADER, input.sessionId], ...harnessHeaders("codex", input.harnessVersion)])}`,
+    `model_providers.ditto.http_headers=${tomlInlineTable(input.localInference ? [] : [[SESSION_HEADER, input.sessionId], ...harnessHeaders("codex", input.harnessVersion)])}`,
   );
   if (input.model) args.push("-m", input.model);
 

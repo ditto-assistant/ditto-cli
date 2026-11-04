@@ -32,6 +32,7 @@ import { resolveClaudeResume, transcriptCwd } from "./claude-resume.js";
 import { type ClaudeTranscript, findTranscriptById, isUuid, listTranscriptsIn } from "./claude-transcripts.js";
 import { watchClaudeSessionTitle } from "./claude-title-sync.js";
 import { planCodex } from "./codex.js";
+import { cliProxyModel, resolveCliProxy } from "./cliproxy.js";
 import { readHarnessVersion } from "./harness-headers.js";
 import { ensureGrokHome, planGrok } from "./grok.js";
 import { type SessionRecord, latestSession, readSession, sessionForHarnessId, writeSession } from "./sessions.js";
@@ -94,12 +95,14 @@ export interface LaunchOptions {
    */
   mcp?: boolean;
   mcpOnly?: boolean;
+  /** Direct inference through a loopback CLIProxy; URL is persisted, keys are not. */
+  cliproxy?: string | boolean;
   remoteTransport?: "cli" | "channels";
 }
 
 /** Explicit flags (or resumed choices) win over repo/cloud launch defaults. */
 export function resolveClaudeLaunchDefaults(options: LaunchOptions, defaults: Record<string, unknown> = {}): LaunchOptions {
-  const mcpOnly = options.mcpOnly ?? (defaults.claude_inference === "native");
+  const mcpOnly = options.cliproxy ? false : options.mcpOnly ?? (defaults.claude_inference === "native");
   const channelsUsable = !options.headless && remoteMode(options) === "tui";
   const remoteTransport = options.remoteTransport ?? (mcpOnly && channelsUsable && defaults.claude_remote_transport === "channels" ? "channels" : "cli");
   return { ...options, mcpOnly, remoteTransport };
@@ -450,7 +453,20 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     if (!record.harnessSessionId) resumeLast = true;
   }
 
-  options = { ...options, mcpOnly: options.mcpOnly ?? record?.mcpOnly, remoteTransport: options.remoteTransport ?? (remoteMode(options) === "tui" ? record?.remoteTransport : undefined) };
+  options = {
+    ...options,
+    cliproxy: options.cliproxy ?? (options.mcpOnly !== undefined ? false : record?.cliproxy),
+    mcpOnly: options.cliproxy ? options.mcpOnly : options.mcpOnly ?? record?.mcpOnly,
+    remoteTransport: options.remoteTransport ?? (remoteMode(options) === "tui" ? record?.remoteTransport : undefined),
+  };
+  if (options.cliproxy && options.mcpOnly) throw new Error("choose either --cliproxy or --mcp-only");
+  if (options.cliproxy && harness === "grok") throw new Error("--cliproxy is supported for claude and codex");
+  if (options.cliproxy && options.budget !== undefined) throw new Error("--budget cannot cap CLIProxy subscription inference; configure limits in your local proxy instead");
+  // Check the local proxy before sign-in or minting any cloud key. A failure
+  // must never silently switch inference back to the paid Router.
+  const proxy = options.cliproxy ? await resolveCliProxy(options.cliproxy) : undefined;
+  if (proxy) options = { ...options, cliproxy: proxy.baseUrl, mcpOnly: false };
+
   const requestedEndpoint = options.endpoint ?? record?.endpointSlug;
   let selected = options.dryRun ? undefined : await ensureLoggedIn(harness, requestedEndpoint);
   let catalog: Awaited<ReturnType<typeof listEndpoints>>;
@@ -530,7 +546,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     endpoint = { ...endpoint, providerOptions: { ...endpoint.providerOptions, ...repoLaunchDefaults } };
     options = resolveClaudeLaunchDefaults(options, endpoint.providerOptions);
   }
-  if (!options.mcpOnly) await assertEndpointActive(endpoint);
+  if (!options.mcpOnly && !proxy) await assertEndpointActive(endpoint);
   if (options.mcpOnly && (harness !== "claude" || options.mcp === false)) throw new Error("--mcp-only requires Claude Code with MCP tools enabled");
   if (options.remoteTransport === "channels" && (!options.mcpOnly || options.headless || remoteMode(options) === "off" || options.prompt !== undefined)) throw new Error("MCP Channels requires an interactive `heyditto claude --mcp-only` session with remote control enabled");
 
@@ -550,7 +566,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   // claude-* ids). Earlier releases pinned Codex sessions to the endpoint
   // slug; that pin is dropped on resume so they pass through too.
   const recordedModel = record?.model === endpoint.slug ? undefined : record?.model;
-  const model = options.model ?? recordedModel;
+  const model = proxy ? cliProxyModel(proxy, harness as "claude" | "codex", options.model ?? recordedModel) : options.model ?? recordedModel;
   const now = new Date().toISOString();
 
   if (!(await isDirectory(cwd))) throw new Error(`launch directory ${cwd} does not exist`);
@@ -603,12 +619,12 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
       else noTools = true;
       for (const line of mcpUnavailableLines(mcpCatalog)) log(c("yellow", line));
     } catch (err) {
-      if (options.mcpOnly) {
+      if (options.mcpOnly || proxy) {
         if (!options.keepKey) {
           try { await revokeKey(endpoint.id, key.id); }
           catch { log(`could not revoke session key …${key.keyHint}; it expires in ${expiresIn}`); }
         }
-        throw new Error(`MCP-only setup failed; no inference Router fallback: ${(err as Error).message}`);
+        throw new Error(`${proxy ? "CLIProxy MCP" : "MCP-only"} setup failed; no inference Router fallback: ${(err as Error).message}`);
       }
       const note = c(chosen ? "yellow" : "dim", "native MCP unavailable");
       log(`${note} (${(err as Error).message}); the router keeps this endpoint's tools`);
@@ -619,8 +635,10 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   const harnessVersion = await harnessVersionProbe;
 
   const plan = planFor(harness, {
-    baseUrl: catalog.baseUrl,
-    apiKey: key?.key ?? DRY_RUN_KEY,
+    baseUrl: proxy?.baseUrl ?? catalog.baseUrl,
+    apiKey: proxy?.apiKey ?? key?.key ?? DRY_RUN_KEY,
+    mcpApiKey: key?.key ?? DRY_RUN_KEY,
+    localInference: Boolean(proxy),
     sessionId,
     harnessVersion,
     model,
@@ -642,7 +660,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   const field = (name: string, value: string): string => `${c("dim", `${name}=`)}${value}`;
   const banner = [
     field("endpoint", c(["bold", "cyan"], endpoint.slug)),
-    field("inference", options.mcpOnly ? "native Claude Code account (MCP only)" : "Ditto Router"),
+    field("inference", proxy ? `CLIProxy (${proxy.baseUrl})` : options.mcpOnly ? "native Claude Code account (MCP only)" : "Ditto Router"),
     field("model", model ?? c("dim", options.mcpOnly ? "(native Claude Code default)" : "(harness default → endpoint routes)")),
     field("key", key ? `…${key.keyHint || maskKey(key.key ?? "")}` : "(dry run)"),
     field("expires", `${expiresIn}${options.keepKey ? "" : c("dim", " (revoked on exit)")}`),
@@ -653,11 +671,12 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     .filter(Boolean)
     .join("  ");
   log(banner);
-  log(`traces: ${c(["underline", "cyan"], endpointURL(endpoint.id))}`);
+  if (proxy) log("inference stays on CLIProxy; Ditto provides MCP tools/remote control, without Router inference optimizations or inference traces");
+  else log(`traces: ${c(["underline", "cyan"], endpointURL(endpoint.id))}`);
 
   if (options.dryRun) {
     const env = Object.fromEntries(
-      Object.entries(plan.envSet).map(([k, v]) => [k, v === DRY_RUN_KEY ? "<key>" : v]),
+      Object.entries(plan.envSet).map(([k, v]) => [k, v === DRY_RUN_KEY || v === proxy?.apiKey ? "<key>" : v]),
     );
     process.stdout.write(
       `${JSON.stringify(
@@ -672,9 +691,9 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
           sessionId,
           // A dry run reads no catalog, so the plan above is the router's; say
           // which surface a real launch would ask for, separately.
-          toolSurface: mcp ? "mcp" : "router",
-          toolSurfaceRequested: wantMcp ? "mcp" : "router",
-          inference: options.mcpOnly ? "native" : "router",
+          toolSurface: mcp ? "mcp" : proxy ? "none" : "router",
+          toolSurfaceRequested: wantMcp ? "mcp" : proxy ? "none" : "router",
+          inference: proxy ? "cliproxy" : options.mcpOnly ? "native" : "router",
           remoteTransport: options.remoteTransport ?? "cli",
           key: { name: keyName, expiresIn, spendLimitTokens: budget ?? null },
         },
@@ -702,6 +721,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     lastLaunchedAt: now,
     launches: (record?.launches ?? 0) + 1,
     mcpOnly: options.mcpOnly,
+    cliproxy: proxy?.baseUrl,
     remoteTransport: options.remoteTransport,
     ...(explicitLaunchTitle ? { explicitLaunchTitle } : {}),
   };
@@ -710,7 +730,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   const remote: RemoteMode = remoteMode(options);
   const launchRegistration = {
     sessionId, endpointId: endpoint.id, harness: harness === "claude" ? "claude-code" : harness,
-    inference: options.mcpOnly ? "native" : "router", transport: options.remoteTransport ?? "cli",
+    inference: proxy || options.mcpOnly ? "native" : "router", transport: options.remoteTransport ?? "cli",
     title: explicitLaunchTitle || `${path.basename(cwd)} · ${sessionId.slice(0, 8)}`,
     ...(harness === "claude" && harnessSessionId && isUuid(harnessSessionId) ? { nativeSessionId: harnessSessionId } : {}),
   };
@@ -742,8 +762,10 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
         cwd,
         sessionId,
         harnessSessionId,
-        baseUrl: catalog.baseUrl,
-        apiKey: key.key ?? "",
+        baseUrl: proxy?.baseUrl ?? catalog.baseUrl,
+        apiKey: proxy?.apiKey ?? key.key ?? "",
+        mcpApiKey: key.key ?? "",
+        localInference: Boolean(proxy),
         harnessVersion,
         model,
         options,
@@ -926,6 +948,8 @@ async function runInTerminalWithRemote(harness: Harness, plan: HarnessPlan, ctx:
 interface HeadlessRunContext extends RemoteRunContext {
   baseUrl: string;
   apiKey: string;
+  mcpApiKey?: string;
+  localInference?: boolean;
   /** Installed harness version read at launch (X-Ditto-Harness-Version). */
   harnessVersion?: string;
   model?: string;
@@ -988,6 +1012,8 @@ async function runHeadless(harness: Harness, ctx: HeadlessRunContext): Promise<n
       base: {
         baseUrl: ctx.baseUrl,
         apiKey: ctx.apiKey,
+        mcpApiKey: ctx.mcpApiKey,
+        localInference: ctx.localInference,
         sessionId: ctx.sessionId,
         harnessVersion: ctx.harnessVersion,
         model: ctx.model,

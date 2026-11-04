@@ -47,7 +47,7 @@ export function planClaude(input: PlanInput): HarnessPlan {
     ANTHROPIC_CUSTOM_HEADERS: headers,
   };
   if (input.model) envSet.ANTHROPIC_MODEL = input.model;
-  if (input.mcp) envSet[MCP_KEY_ENV] = input.apiKey;
+  if (input.mcp) envSet[MCP_KEY_ENV] = input.mcpApiKey ?? input.apiKey;
   if (input.mcpOnly) {
     // Endpoint keys are only MCP credentials in this mode. Never forward one
     // to Anthropic or inherit a parent launch's inference gateway settings.
@@ -56,6 +56,16 @@ export function planClaude(input: PlanInput): HarnessPlan {
       envSet: input.mcp ? { [MCP_KEY_ENV]: input.apiKey } : {},
       envUnset: ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_CUSTOM_HEADERS", "ANTHROPIC_MODEL", "ANTHROPIC_API_KEY"],
       installHint: "install Claude Code and sign in with `claude auth login`",
+    };
+  }
+  if (input.localInference) {
+    // Cloud MCP auth never becomes the local inference credential, and a
+    // parent Router launch's custom headers/other provider modes stay out.
+    delete envSet.ANTHROPIC_CUSTOM_HEADERS;
+    return {
+      command: "claude", args: finalArgs, envSet,
+      envUnset: ["ANTHROPIC_API_KEY", "ANTHROPIC_CUSTOM_HEADERS", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", ...(!input.model ? ["ANTHROPIC_MODEL"] : []), ...(!input.mcp ? [MCP_KEY_ENV] : [])],
+      installHint: "install Claude Code: npm i -g @anthropic-ai/claude-code",
     };
   }
   // Claude Code's server-side auto-mode classifier needs the dangerous-tool-use

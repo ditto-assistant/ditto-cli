@@ -1281,6 +1281,71 @@ says so. Tracked artifact directories are flagged rather than claimed excluded.
 `heyditto offload` refuses to delete a folder when unrelated files, unknown projects or
 escaping symlinks beneath it would be lost.
 
+### Cloud-assisted CLIProxy inference
+
+To use subscription inference with Router optimizations, cloud session recording
+and remote control, connect a local CLIProxy through an outbound relay. Use a
+dedicated **personal** endpoint and a model exposed by your local proxy:
+
+```sh
+heyditto endpoints create my-local-models
+heyditto cliproxy relay --endpoint my-local-models --enable --model gpt-6.1-sol
+# In another terminal, while the relay stays running:
+heyditto claude --endpoint my-local-models
+```
+
+The first `--enable` changes that endpoint to relay-only BYOK inference, enables
+cloud trace recording and selects Router inference instead of a native-account
+default. Later relay starts omit `--enable`. The CLI keeps an outbound
+authenticated connection; your local proxy access key and provider credentials
+stay on your computer. Stopping the relay makes requests fail without switching
+to paid inference. Existing Router optimization/tool resource costs still apply.
+
+The first release supports one relay per personal endpoint and requires the API
+and inference request to reach the same backend process. Organization endpoints
+and routing across multiple backend processes are not supported yet. The local
+model IDs must match the endpoint's routes/aliases; the cloud model list does not
+discover laptop providers. Deploy the matching backend before enabling an endpoint.
+
+For the official T3 Code app, see [the Router setup guide](docs/t3-code.md).
+
+### Direct local CLIProxy inference
+
+Use a locally installed CLIProxy with Claude Code or Codex instead of Ditto Router
+inference:
+
+```sh
+heyditto claude --cliproxy --endpoint my-tools
+heyditto codex --cliproxy --endpoint my-tools --model gpt-6-luna
+heyditto claude --cliproxy http://127.0.0.1:8317/v1 --dry-run --endpoint my-tools
+```
+
+`--cliproxy` detects EasyCLIProxyAPI's saved host, port and API access key. It
+reads the GUI configuration from the platform's `com.cpa.gui` application-data
+directory. Set `CLIPROXY_CONFIG` for another EasyCLIProxyAPI TOML file, or use
+`CLIPROXY_BASE_URL` and `CLIPROXY_API_KEY` for a standalone CLIProxy installation.
+The URL must be loopback (`127.0.0.1`, `localhost` or `::1`); discovery does not
+accept LAN/public hosts, URL credentials or redirects. An API key is never
+copied between two different proxy addresses automatically.
+
+Before launching, the CLI authenticates `/v1/models` and selects a Claude/GPT
+model exposed by the proxy, or checks your explicit `--model`. Local failure
+stops the launch without switching to paid Router inference. `--dry-run` checks
+the proxy and prints a plan with credentials masked; it mints no Ditto key.
+Resume remembers the proxy URL and reads its credential again, so `--resume`
+keeps local inference. Use `--no-cliproxy` to return to the normal inference mode.
+
+This mode still uses a Ditto login and endpoint for selected Claude MCP tools
+and remote control. The local API access key stays local; Ditto MCP uses a
+separate temporary endpoint key, which is revoked on exit. `--no-mcp` omits the
+selected Claude MCP tools; `--no-remote-control` omits cloud session registration.
+Those flags do not remove the current launcher's Ditto login/endpoint dependency.
+Local inference bypasses Router compression, routing and inference recording;
+cloud-assisted relay is a separate mode. Cloud MCP calls and remote-control
+activity still reach Ditto when enabled. `--mcp-only` keeps using the native
+Claude account instead; it cannot be combined with `--cliproxy`. `--budget`
+cannot cap subscription inference and is rejected in direct CLIProxy mode.
+
 ### Native Claude inference and remote delivery
 
 `heyditto claude` keeps using Ditto Router for inference. `--mcp` changes
