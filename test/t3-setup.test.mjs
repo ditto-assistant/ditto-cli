@@ -205,3 +205,14 @@ test("a read-only endpoint choice on a terminal never offers to create an endpoi
   assert.deepEqual(calls.filter((c) => c.startsWith("POST")), []);
   assert.equal(existsSync(path.join(root, "config")), false);
 });
+
+test("T3 setup without --endpoint refuses a running T3 before choosing an endpoint", async (t) => {
+  const f = fixture(t);
+  writeFileSync(path.join(f.userdata, "server-runtime.json"), JSON.stringify({ version: 1, pid: process.pid }));
+  let called = false;
+  const program = new Command();
+  registerT3Commands(program, { chooseEndpoint: async () => { called = true; return { slug: "x" }; } });
+  await assert.rejects(program.parseAsync(["node", "heyditto", "t3", "setup", "--base-dir", f.base, "--claude-bin", f.options.claudeBin, "--heyditto-bin", f.options.heydittoBin]), /T3 is running/);
+  assert.equal(called, false);
+  assert.equal(readFileSync(f.settings, "utf8"), f.original);
+});

@@ -230,7 +230,8 @@ export function registerT3Commands(program: Command, deps: T3SetupDeps = {}): vo
         // Fail on local problems (T3 settings, binaries) before a browser
         // login, picker or endpoint creation. The throwaway plan needs any
         // valid slug; the chosen one replaces it below.
-        planT3Setup({ ...options, endpoint: "endpoint-not-chosen-yet" });
+        const probe = planT3Setup({ ...options, endpoint: "endpoint-not-chosen-yet" });
+        if (!options.dryRun) ensureStopped(probe);
         const chosen = await choose(Boolean(options.dryRun));
         process.stderr.write(`Using endpoint ${chosen.slug} (pass --endpoint <slug> to choose another)\n`);
         options = { ...options, endpoint: chosen.slug };
