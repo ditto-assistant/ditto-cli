@@ -40,6 +40,8 @@ function startStub({ access, linkRefusal = () => false }) {
           checks.set(name, n + 1);
           return access(name, n);
         });
+        // null fakes an outage on that check.
+        if (repositories.includes(null)) return json(503, { message: "GitHub didn't respond; try again." });
         return json(200, { repositories });
       }
       if (url.pathname === "/api/v5/review" && req.method === "GET") return json(200, { repositories: [EXISTING], runs: [] });
@@ -175,6 +177,32 @@ test("review add keeps the backend's own refusal when app access is not the prob
     assert.notEqual(out.status, 0);
     assert.match(out.stderr, /PUT \/api\/v5\/review\/repositories.*HTTP 400 - invalid Ditto Review configuration/);
     assert.doesNotMatch(out.stderr, /cannot access it/);
+  } finally {
+    stub.close();
+  }
+});
+
+test("review access gives each owner its own instructions even when they share the App's install page", async () => {
+  const stub = await startStub({ access: (name) => notInstalled(name) });
+  try {
+    const out = await run(stub.base, ["review", "access", "acme/api", "globex/web"]);
+    assert.equal(out.status, 2, out.stderr);
+    assert.match(out.stdout, /pick acme as the account to install on, then choose "Only select repositories" and add api,/);
+    assert.match(out.stdout, /pick globex as the account to install on, then choose "Only select repositories" and add web,/);
+    assert.doesNotMatch(out.stdout, /acme\/api, globex\/web/, "repositories of different owners are never one block");
+  } finally {
+    stub.close();
+  }
+});
+
+test("review access --wait survives a failed re-check and keeps polling until access arrives", async () => {
+  const stub = await startStub({ access: (name, n) => (n === 0 ? notSelected(name) : n === 1 ? null : granted(name)) });
+  try {
+    const out = await run(stub.base, ["review", "access", "acme/web", "--wait", "--interval", "1", "--timeout", "30"]);
+    assert.equal(out.status, 0, out.stderr);
+    assert.match(out.stderr, /Re-check failed .*trying again/);
+    assert.match(out.stdout, /After re-checking:\nacme\/web: Ditto Code can access it\./);
+    assert.equal(stub.accessCalls().length, 3);
   } finally {
     stub.close();
   }

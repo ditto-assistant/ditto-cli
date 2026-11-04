@@ -130,7 +130,9 @@ export function describeAccess(results: RepositoryAccess[], all = false): string
   const groups = new Map<string, RepositoryAccess[]>();
   for (const r of results) {
     if (r.state === ACCESS_GRANTED || r.state === "repository_not_visible") continue;
-    const key = `${r.state} ${r.actionUrl ?? r.repository}`;
+    // One block per owner: the App's install page is shared by every owner,
+    // and the instructions name the account to choose.
+    const key = `${r.owner.toLowerCase()} ${r.state} ${r.actionUrl ?? r.repository}`;
     groups.set(key, [...(groups.get(key) ?? []), r]);
   }
   for (const group of groups.values()) {
@@ -183,13 +185,19 @@ async function promptReturn(message: string): Promise<boolean> {
  * Re-checks until every repository is granted or the deadline passes. GitHub
  * applies a saved selection immediately, so a short interval is enough.
  */
-async function waitForAccess(names: string[], intervalSec: number, timeoutSec: number, quiet: boolean): Promise<RepositoryAccess[]> {
+async function waitForAccess(names: string[], first: RepositoryAccess[], intervalSec: number, timeoutSec: number, quiet: boolean): Promise<RepositoryAccess[]> {
   const deadline = Date.now() + timeoutSec * 1000;
-  let results = await fetchRepositoryAccess(names);
+  let results = first;
   while (pending(results).length > 0 && Date.now() < deadline) {
     if (!quiet) process.stderr.write(`Waiting for GitHub access to ${pending(results).map((r) => r.repository).join(", ")}; re-checking in ${intervalSec}s (Ctrl-C to stop)\n`);
     await delay(Math.min(intervalSec * 1000, Math.max(0, deadline - Date.now())));
-    results = await fetchRepositoryAccess(names);
+    try {
+      results = await fetchRepositoryAccess(names);
+    } catch (error) {
+      // A failed re-check is not an answer: keep the last one and try again
+      // until the deadline.
+      if (!quiet) process.stderr.write(`Re-check failed (${error instanceof Error ? error.message : String(error)}); trying again\n`);
+    }
   }
   return results;
 }
@@ -214,7 +222,7 @@ export async function cmdReviewAccess(repositories: string[], options: AccessOpt
 
   if (pending(results).length > 0 && actionUrls(results).length > 0) {
     if (options.wait) {
-      results = await waitForAccess(names, intervalSec, timeoutSec, json);
+      results = await waitForAccess(names, results, intervalSec, timeoutSec, json);
       if (!json) process.stdout.write(`\nAfter re-checking:\n${describeAccess(results, options.all)}`);
     } else if (!json && (await promptReturn("\nFinish on GitHub, then press Enter to re-check (Ctrl-C to stop): "))) {
       results = await fetchRepositoryAccess(names);
@@ -266,7 +274,13 @@ export async function guideAccessForAdd(access: RepositoryAccess, options: { ope
     process.stderr.write(`After granting access, run the same command again, or check with: heyditto review access ${access.repository} --wait\n`);
     return false;
   }
-  const [again] = await fetchRepositoryAccess([access.repository]);
+  let again: RepositoryAccess | undefined;
+  try {
+    [again] = await fetchRepositoryAccess([access.repository]);
+  } catch {
+    process.stderr.write(`Could not re-check just now. Run the same command again, or check with: heyditto review access ${access.repository} --wait\n`);
+    return false;
+  }
   if (again?.state === ACCESS_GRANTED) return true;
   process.stderr.write(`Still no access:\n${describeAccess(again ? [again] : [access])}`);
   return false;
