@@ -1,0 +1,41 @@
+{
+  "version": 2,
+  "mode": "workspace",
+  "baseSha": "b159ce659e070313cd9ecd8440b5a3066deb74ef",
+  "anchorSha": "36c6c0ea4fa5d9ab21c89ae7423bd29ef20166db",
+  "baseTreeSha": "23c18948b7d4537b4d9cefde2c53627796e4f34d",
+  "headTreeSha": "5d74cfa2226a72102d7609fd14da91da51d76a32",
+  "baseFiles": [
+    {
+      "path": "src/alpha.go",
+      "contentBase64": "cGFja2FnZSBwCgpmdW5jIEFscGhhKCkgaW50IHsgcmV0dXJuIDIgfQo=",
+      "mode": "100644"
+    }
+  ],
+  "headFiles": [
+    {
+      "path": "src/alpha.go",
+      "contentBase64": "cGFja2FnZSBwCgpmdW5jIEFscGhhKCkgaW50IHsgcmV0dXJuIDMgfQo=",
+      "mode": "100644"
+    },
+    {
+      "path": "tools/with space.sh",
+      "contentBase64": "ZWNobyBnb2xkZW4K",
+      "mode": "100755"
+    }
+  ],
+  "baseDeletedPaths": [
+    "src/obsolete.go"
+  ],
+  "headDeletedPaths": [
+    "src/obsolete.go"
+  ],
+  "changedPaths": [
+    "src/alpha.go",
+    "tools/with space.sh"
+  ],
+  "contextComplete": true,
+  "omittedContext": [],
+  "skipped": [],
+  "digest": "ab462fe48804a5223134ab6773bc0921e856de3bc9e96fc2ad38dcceb7148d65"
+}
