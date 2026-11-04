@@ -47,12 +47,51 @@ export interface McpCatalogServer {
   tools: McpCatalogTool[];
 }
 
+/**
+ * A connection Ditto could not open for this session (DITTO-1639): its tools
+ * are missing, and the server it would have been served under offers only
+ * `connection_status`, which tells the agent why.
+ */
+export interface McpUnavailableSource {
+  serverId: string;
+  name: string;
+  /** The catalog server name its tools would have had. */
+  prefix: string;
+  /** oauth_not_connected (sign-in expired or revoked), oauth_error, … */
+  reason: string;
+  /** Where its owner reconnects it; absent for someone else's connection. */
+  reconnectUrl?: string;
+  personal: boolean;
+}
+
 /** GET /v1/mcp. */
 export interface McpCatalog {
   endpoint: string;
   approvalMode: string;
   clientApprovals: boolean;
   servers: McpCatalogServer[];
+  /** Absent from a backend that predates DITTO-1639. */
+  unavailable?: McpUnavailableSource[];
+}
+
+const UNAVAILABLE_REASONS: Record<string, string> = {
+  oauth_not_connected: "sign-in expired or revoked",
+  oauth_error: "sign-in could not be refreshed",
+};
+
+/**
+ * One line per connection whose tools are missing from this session, with
+ * where to reconnect it, so the person sees it before the agent stumbles on
+ * it mid-task.
+ */
+export function mcpUnavailableLines(catalog: Pick<McpCatalog, "unavailable">): string[] {
+  const sources = Array.isArray(catalog.unavailable) ? catalog.unavailable : [];
+  return sources.map((s) => {
+    const name = s.name?.trim() || s.prefix || "an MCP connection";
+    const why = UNAVAILABLE_REASONS[s.reason] ?? "could not be opened";
+    const fix = s.personal && s.reconnectUrl ? `reconnect: ${s.reconnectUrl}` : "ask whoever connected it to reconnect it";
+    return `${name} is disconnected (${why}); its tools are missing — ${fix}`;
+  });
 }
 
 /** What a Claude launch needs to attach the catalog. */
