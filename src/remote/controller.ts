@@ -166,6 +166,11 @@ export class RemoteSession {
 
   stop(): void {
     this.stopped = true;
+    // The launcher closes the socket when the PTY exits, possibly before the
+    // pending turn's await resumes. Settle this receipt before session.closed.
+    if (this.uncertainCompletion) {
+      this.finish(this.uncertainCompletion.turnId, { error: "Claude's turn could not be confirmed complete before the terminal exited." });
+    }
     this.claudePermissions.reset();
     for (const pending of this.pendingSteers.values()) pending.abort();
     this.nativeIdle();
@@ -198,16 +203,21 @@ export class RemoteSession {
       this.finish(frame.turnId, { error: "unknown session on this host" });
       return;
     }
-    if (this.uncertainCompletion) {
-      this.finish(frame.turnId, { error: "Claude's turn could not be confirmed complete. Check the terminal and restart the session before sending again." });
-      return;
-    }
     if (frame.deliveryMode !== undefined && frame.deliveryMode !== "queue" && frame.deliveryMode !== "steer") {
       this.finish(frame.turnId, { unsupported: "Unknown prompt delivery mode" });
       return;
     }
     if (frame.deliveryMode !== undefined && (frame.kind ?? "prompt") !== "prompt") {
       this.finish(frame.turnId, { unsupported: "Delivery modes apply only to prompts" });
+      return;
+    }
+    if ((frame.kind ?? "prompt") === "answer") {
+      // Answers resolve the active dialog and do not inject a new turn.
+      this.deliverAnswer(frame);
+      return;
+    }
+    if (this.uncertainCompletion) {
+      this.finish(frame.turnId, { error: "Claude's turn could not be confirmed complete. Check the terminal and restart the session before sending again." });
       return;
     }
     if (frame.deliveryMode === "steer") {
@@ -236,11 +246,6 @@ export class RemoteSession {
         if (this.pendingSteers.get(frame.turnId) === injection) this.pendingSteers.delete(frame.turnId);
         if (this.steering === steering) this.steering = undefined;
       });
-      return;
-    }
-    if ((frame.kind ?? "prompt") === "answer") {
-      // Not a turn of its own: the running turn is waiting on this.
-      this.deliverAnswer(frame);
       return;
     }
     this.queue.push(frame);
@@ -275,7 +280,12 @@ export class RemoteSession {
       }
       return;
     }
-    if (current.interrupted) return;
+    if (current.interrupted) {
+      // An uncertain turn remains the only target until this session exits.
+      // Keep explicit repeated Stop available even if a prior Escape failed.
+      if (this.uncertainCompletion?.turnId === turnId) this.pty?.interrupt(this.ctx.harness);
+      return;
+    }
     current.interrupted = true;
     current.injection.abort();
     if (current.superseded) {
@@ -610,6 +620,12 @@ export class RemoteSession {
         this.finish(turnId, { exitCode: 0, unsupported: resolved.unsupported });
         return;
       }
+      // Attachment preparation can overlap a previous turn's watchdog. Do not
+      // let a prepared Send now inject after that turn became uncertain.
+      if (this.uncertainCompletion) {
+        this.finish(turnId, { error: "Claude's turn could not be confirmed complete. Check the terminal and restart the session before sending again." });
+        return;
+      }
       if (steer && (this.pending || this.claudePermissions.pending)) {
         this.finish(turnId, { unsupported: "Answer the pending permission or question before Send now" });
         return;
@@ -647,7 +663,15 @@ export class RemoteSession {
         ]);
         if (outcome === "uncertain") {
           this.uncertainCompletion = { turnId };
-          this.finish(turnId, { error: "Claude's turn could not be confirmed complete. Check the terminal and restart the session before sending again." });
+          this.ctx.log("remote control: Claude's turn could not be confirmed complete. Stop remains available; check the terminal and restart the session before sending again.");
+          for (const queued of this.queue.splice(0)) {
+            this.finish(queued.turnId, { error: "Claude's turn could not be confirmed complete. Check the terminal and restart the session before sending again." });
+          }
+          // Keep the original receipt running: the backend needs that exact
+          // turn ID to route Stop. A late unscoped native hook is not proof of
+          // completion, so wait for this terminal process to exit.
+          await this.pty.exit;
+          if (!this.stopped) this.finish(turnId, { error: "Claude's turn could not be confirmed complete before the terminal exited." });
         } else this.finish(turnId, { exitCode: 0, ...(active.interrupted ? { interrupted: true } : {}) });
       } else if (this.runHeadless) {
         const turn = this.runHeadless(text);
@@ -703,7 +727,7 @@ export class RemoteSession {
         // A quiet terminal can still be waiting for a long model response.
         // Explicit interruption and builtins retain their recovery fallback.
         if (this.ctx.harness === "claude" && !builtin && active?.submitHookObserved && !active.interrupted && !this.stopHooksUncorrelated) {
-          if (!this.claudePermissions.toolBusy && Date.now() - started >= (this.ctx.hookCompletionTimeoutMs ?? 15 * 60_000) && pty.quietFor() >= limit) {
+          if (this.current === active && !this.claudePermissions.toolBusy && Date.now() - started >= (this.ctx.hookCompletionTimeoutMs ?? 15 * 60_000) && pty.quietFor() >= limit) {
             clearInterval(timer);
             resolve("uncertain");
           }

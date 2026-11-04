@@ -20,7 +20,9 @@ async function world(t, { harness = "claude", mode = "tui", inject, hookCompleti
   const writes = [];
   let interrupts = 0;
   let quiet = 0;
-  const pty = { pid: 1, write(data) { writes.push(data); }, inject: async (...args) => { calls.push(args); await inject?.(...args); }, interrupt() { interrupts++; }, quietFor: () => quiet, exit: new Promise(() => {}), kill() {} };
+  let endTerminal;
+  const exit = new Promise(resolve => { endTerminal = resolve; });
+  const pty = { pid: 1, write(data) { writes.push(data); }, inject: async (...args) => { calls.push(args); await inject?.(...args); }, interrupt() { interrupts++; }, quietFor: () => quiet, exit, kill() {} };
   const session = new RemoteSession({ harness, mode, cwd, sessionId: "owned-session", apiKey: "ditto_mcp_test", baseUrl: stub.base, log() {}, quietFallbackMs: 400, hookCompletionTimeoutMs }, { events });
   if (mode === "tui") session.attachTui(pty);
   t.after(async () => { session.stop(); await stub.close(); if (prior === undefined) delete process.env.DITTO_CONFIG_DIR; else process.env.DITTO_CONFIG_DIR = prior; await rm(cwd, { recursive: true, force: true }); });
@@ -42,7 +44,7 @@ async function world(t, { harness = "claude", mode = "tui", inject, hookCompleti
   };
   const started = (id) => stub.waitFor((f) => f.type === "turn.started" && f.turnId === id);
   const finished = (id) => stub.waitFor((f) => f.type === "turn.finished" && f.turnId === id);
-  return { stub, events, calls, writes, session, send, started, finished, permission, permissionPayload, question, interrupts: () => interrupts, quiet: () => { quiet = Infinity; }, busy: () => { quiet = 0; } };
+  return { stub, events, calls, writes, session, send, started, finished, permission, permissionPayload, question, endTerminal: () => endTerminal(0), interrupts: () => interrupts, quiet: () => { quiet = Infinity; }, busy: () => { quiet = 0; } };
 }
 
 test("Claude normal FIFO survives immediate steering and stale Stop cannot finish its replacement", async (t) => {
@@ -102,26 +104,69 @@ test("a lost Stop hook fails queued prompts closed and cannot be cleared by a la
   w.events.emit("hook", { source: "claude", event: "UserPromptSubmit", payload: {} });
   w.send("queued"); await w.stub.waitFor(f => f.type === "turn.ack" && f.turnId === "queued");
   w.quiet();
-  assert.match((await w.finished("slow")).error, /could not be confirmed complete/);
   assert.match((await w.finished("queued")).error, /could not be confirmed complete/);
+  assert.equal(w.stub.frames.some(f => f.type === "turn.finished" && f.turnId === "slow"), false, "the backend must retain the running turn for Stop");
   assert.equal(w.calls.length, 1, "silence never releases queued input");
   w.send("later"); assert.match((await w.finished("later")).error, /restart the session/);
+  w.stub.send({ type: "turn.interrupt", turnId: "unrelated" });
+  await sleep(30); assert.equal(w.interrupts(), 0, "a stale turn cannot interrupt the active terminal");
   w.stub.send({ type: "turn.interrupt", turnId: "slow" });
   await sleep(30); assert.equal(w.interrupts(), 1, "physical Stop remains available");
+  w.stub.send({ type: "turn.interrupt", turnId: "slow" });
+  await sleep(30); assert.equal(w.interrupts(), 2, "a second explicit Stop remains available");
   w.events.emit("hook", { source: "claude", event: "Stop" });
   w.send("after-stop"); assert.match((await w.finished("after-stop")).error, /restart the session/);
+  assert.equal(w.stub.frames.some(f => f.type === "turn.finished" && f.turnId === "slow"), false, "an ambiguous hook must not hide Stop");
   assert.equal(w.calls.length, 1, "an unscoped Stop cannot clear uncertainty");
+  w.endTerminal();
+  assert.match((await w.finished("slow")).error, /terminal exited/);
 });
 
 test("a local submit after a lost hook prevents an unrelated Stop from clearing uncertainty", { timeout: 6000 }, async (t) => {
   const w = await world(t, { hookCompletionTimeoutMs: 600 });
   w.send("slow"); await w.started("slow");
   w.events.emit("hook", { source: "claude", event: "UserPromptSubmit", payload: {} });
-  w.quiet(); await w.finished("slow");
+  w.send("queued"); await w.stub.waitFor(f => f.type === "turn.ack" && f.turnId === "queued");
+  w.quiet(); await w.finished("queued");
   w.events.emit("hook", { source: "claude", event: "UserPromptSubmit", payload: { prompt: "local" } });
   w.events.emit("hook", { source: "claude", event: "Stop" });
   w.send("later"); assert.match((await w.finished("later")).error, /could not be confirmed complete/);
   assert.equal(w.calls.length, 1);
+});
+
+test("closing an uncertain session reports the active failure before the host closes", { timeout: 6000 }, async t => {
+  const w = await world(t, { hookCompletionTimeoutMs: 600 });
+  w.send("slow"); await w.started("slow");
+  w.events.emit("hook", { source: "claude", event: "UserPromptSubmit", payload: {} });
+  w.send("queued"); await w.stub.waitFor(f => f.type === "turn.ack" && f.turnId === "queued");
+  w.quiet(); await w.finished("queued");
+  w.session.stop();
+  assert.match((await w.finished("slow")).error, /terminal exited/);
+  await w.stub.waitFor(f => f.type === "session.closed");
+  assert.ok(w.stub.frames.findIndex(f => f.type === "turn.finished" && f.turnId === "slow") < w.stub.frames.findIndex(f => f.type === "session.closed"));
+});
+
+test("a Send now prepared during watchdog expiry cannot inject after uncertainty", { timeout: 6000 }, async (t) => {
+  const w = await world(t, { hookCompletionTimeoutMs: 600 });
+  w.send("slow"); await w.started("slow");
+  w.events.emit("hook", { source: "claude", event: "UserPromptSubmit", payload: {} });
+  let resume;
+  const gate = new Promise(resolve => { resume = resolve; });
+  const resolveText = w.session.resolveText.bind(w.session);
+  w.session.resolveText = async frame => {
+    if (frame.turnId === "steer") await gate;
+    return resolveText(frame);
+  };
+  w.send("steer", { deliveryMode: "steer" });
+  await w.stub.waitFor(f => f.type === "turn.ack" && f.turnId === "steer");
+  w.send("queued"); await w.stub.waitFor(f => f.type === "turn.ack" && f.turnId === "queued");
+  w.quiet();
+  assert.match((await w.finished("queued")).error, /could not be confirmed complete/);
+  resume();
+  assert.match((await w.finished("steer")).error, /could not be confirmed complete/);
+  assert.equal(w.calls.length, 1, "no prepared successor is pasted into the terminal");
+  w.stub.send({ type: "turn.interrupt", turnId: "slow" });
+  await sleep(30); assert.equal(w.interrupts(), 1);
 });
 
 test("a locally typed native prompt holds remote FIFO until its Stop hook", async (t) => {
