@@ -59,6 +59,7 @@ interface ActiveTurn {
   turnId: string;
   interrupted: boolean;
   headless?: HeadlessTurn;
+  pty?: PtySession;
   done: () => void;
   settled: Promise<void>;
   settledFlag: boolean;
@@ -93,7 +94,7 @@ export class RemoteSession {
   private nativeBusy = false;
   // A timed-out native turn may still be running. Reject queued input rather
   // than treating silence as evidence that it is safe to type another prompt.
-  private uncertainCompletion?: { turnId: string };
+  private uncertainCompletion?: { turnId: string; receiptSent: boolean };
   private stopHooksUncorrelated = false;
   private nativeEpoch = 0;
   private nativeIdleTimer?: NodeJS.Timeout;
@@ -168,9 +169,7 @@ export class RemoteSession {
     this.stopped = true;
     // The launcher closes the socket when the PTY exits, possibly before the
     // pending turn's await resumes. Settle this receipt before session.closed.
-    if (this.uncertainCompletion) {
-      this.finish(this.uncertainCompletion.turnId, { error: "Claude's turn could not be confirmed complete before the terminal exited." });
-    }
+    this.finishUncertain();
     this.claudePermissions.reset();
     for (const pending of this.pendingSteers.values()) pending.abort();
     this.nativeIdle();
@@ -195,6 +194,13 @@ export class RemoteSession {
 
   private finish(turnId: string, fields: Omit<TurnFinishedFrame, "type" | "turnId"> = {}): void {
     this.host.send({ type: "turn.finished", turnId, ...fields });
+  }
+
+  private finishUncertain(): void {
+    const pending = this.uncertainCompletion;
+    if (!pending || pending.receiptSent) return;
+    pending.receiptSent = true;
+    this.finish(pending.turnId, { error: "Claude's turn could not be confirmed complete before the terminal exited." });
   }
 
   private onTurn(frame: TurnDeliverFrame): void {
@@ -254,10 +260,7 @@ export class RemoteSession {
 
   private onInterrupt(turnId: string): void {
     const current = this.current;
-    if (!current && this.uncertainCompletion?.turnId === turnId) {
-      this.pty?.interrupt(this.ctx.harness);
-      return;
-    }
+    if (!current && this.uncertainCompletion) return;
     // An uncertain editor refuses every future remote paste, so there is no
     // remote successor to target. Explicit Stop still interrupts this PTY.
     if (!current && this.pty?.inputBlockReason?.()) {
@@ -283,7 +286,7 @@ export class RemoteSession {
     if (current.interrupted) {
       // An uncertain turn remains the only target until this session exits.
       // Keep explicit repeated Stop available even if a prior Escape failed.
-      if (this.uncertainCompletion?.turnId === turnId) this.pty?.interrupt(this.ctx.harness);
+      if (this.uncertainCompletion?.turnId === turnId) current.pty?.interrupt(this.ctx.harness);
       return;
     }
     current.interrupted = true;
@@ -293,7 +296,7 @@ export class RemoteSession {
       current.superseded.done();
     }
     if (current.headless) current.headless.interrupt();
-    else this.pty?.interrupt(this.ctx.harness);
+    else current.pty?.interrupt(this.ctx.harness);
   }
 
   private pruneCanceledSteers(): void {
@@ -636,12 +639,13 @@ export class RemoteSession {
       const finished = new Promise<void>((resolve) => { finish = resolve; });
       const settled = new Promise<void>((resolve) => { settle = resolve; });
       previous = this.current;
-      active = { turnId, interrupted: false, done: finish, settled, settledFlag: false, ignoreStopHook: steer, submitHookObserved: false, injection: injection ?? new AbortController(), submitted: false, ...(steer && previous ? { superseded: previous } : {}) };
+      active = { turnId, interrupted: false, done: finish, settled, settledFlag: false, ignoreStopHook: steer, submitHookObserved: false, injection: injection ?? new AbortController(), submitted: false, ...(this.pty ? { pty: this.pty } : {}), ...(steer && previous ? { superseded: previous } : {}) };
       this.current = active;
       this.host.status(this.ctx.sessionId, "running");
-      if (this.pty) {
+      if (active.pty) {
+        const pty = active.pty;
         this.ctx.log(`remote control: ${entry ? `command ${text.split("\n")[0]}` : steer ? "Send now prompt" : "prompt"} received from the app (turn ${turnId.slice(0, 8)})`);
-        await this.pty.inject(text, frame.deliveryMode, active.injection.signal);
+        await pty.inject(text, frame.deliveryMode, active.injection.signal);
         if (active.interrupted) active.done();
         else {
           active.submitted = true;
@@ -656,13 +660,19 @@ export class RemoteSession {
         }
         release();
         const quiet = entry?.source === "builtin" ? Math.min(this.ctx.quietFallbackMs ?? 8000, 1500) : undefined;
-        const outcome = await Promise.race([
-          finished.then(() => "finished" as const),
-          this.pty.exit.then(() => "exited" as const),
-          this.quietFallback(finished, quiet, active, entry?.source === "builtin"),
-        ]);
+        const watcher = this.quietFallback(finished, pty, quiet, active, entry?.source === "builtin");
+        let outcome: "finished" | "exited" | "uncertain";
+        try {
+          outcome = await Promise.race([
+            finished.then(() => "finished" as const),
+            pty.exit.then(() => "exited" as const),
+            watcher.promise,
+          ]);
+        } finally {
+          watcher.cancel();
+        }
         if (outcome === "uncertain") {
-          this.uncertainCompletion = { turnId };
+          this.uncertainCompletion = { turnId, receiptSent: false };
           this.ctx.log("remote control: Claude's turn could not be confirmed complete. Stop remains available; check the terminal and restart the session before sending again.");
           for (const queued of this.queue.splice(0)) {
             this.finish(queued.turnId, { error: "Claude's turn could not be confirmed complete. Check the terminal and restart the session before sending again." });
@@ -670,8 +680,12 @@ export class RemoteSession {
           // Keep the original receipt running: the backend needs that exact
           // turn ID to route Stop. A late unscoped native hook is not proof of
           // completion, so wait for this terminal process to exit.
-          await this.pty.exit;
-          if (!this.stopped) this.finish(turnId, { error: "Claude's turn could not be confirmed complete before the terminal exited." });
+          await pty.exit;
+          this.finishUncertain();
+          if (!this.stopped) {
+            this.nativeIdle();
+            this.host.closed(this.ctx.sessionId);
+          }
         } else this.finish(turnId, { exitCode: 0, ...(active.interrupted ? { interrupted: true } : {}) });
       } else if (this.runHeadless) {
         const turn = this.runHeadless(text);
@@ -698,7 +712,7 @@ export class RemoteSession {
         if (!this.uncertainCompletion) this.nativeIdle();
         this.clearPending();
         this.claudePermissions.reset();
-        this.host.status(this.ctx.sessionId, this.uncertainCompletion ? "running" : "idle");
+        if (!this.uncertainCompletion) this.host.status(this.ctx.sessionId, "idle");
       }
       settle();
     }
@@ -710,19 +724,19 @@ export class RemoteSession {
    * after the prompt went in, the turn counts as finished. Hooks are the
    * primary signal; a pending prompt never times out this way.
    */
-  private quietFallback(finished: Promise<void>, limitMs?: number, active?: ActiveTurn, builtin = false): Promise<"finished" | "uncertain"> {
+  private quietFallback(finished: Promise<void>, pty: PtySession, limitMs?: number, active?: ActiveTurn, builtin = false): { promise: Promise<"finished" | "uncertain">; cancel: () => void } {
     const limit = limitMs ?? this.ctx.quietFallbackMs ?? 8000;
-    return new Promise<"finished" | "uncertain">((resolve) => {
+    let timer: NodeJS.Timeout | undefined;
+    const promise = new Promise<"finished" | "uncertain">((resolve) => {
       let settled = false;
       void finished.then(() => {
         settled = true;
         resolve("finished");
       });
       const started = Date.now();
-      const timer = setInterval(() => {
+      timer = setInterval(() => {
         if (settled) return clearInterval(timer);
-        const pty = this.pty;
-        if (!pty || this.pending || this.claudePermissions.pending) return;
+        if (this.pending || this.claudePermissions.pending) return;
         // A responsive Claude submit hook means Stop is the turn boundary.
         // A quiet terminal can still be waiting for a long model response.
         // Explicit interruption and builtins retain their recovery fallback.
@@ -740,5 +754,6 @@ export class RemoteSession {
       }, 250);
       timer.unref?.();
     });
+    return { promise, cancel: () => clearInterval(timer) };
   }
 }

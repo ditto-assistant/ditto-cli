@@ -92,8 +92,9 @@ test("Stop retains its fallback when the native Stop hook does not arrive", { ti
   const w = await world(t);
   w.send("slow"); await w.started("slow");
   w.events.emit("hook", { source: "claude", event: "UserPromptSubmit", payload: {} });
-  w.quiet();
   w.stub.send({ type: "turn.interrupt", turnId: "slow" });
+  await sleep(30); assert.equal(w.interrupts(), 1);
+  w.quiet();
   assert.equal((await w.finished("slow")).interrupted, true);
   assert.equal(w.interrupts(), 1);
 });
@@ -120,6 +121,10 @@ test("a lost Stop hook fails queued prompts closed and cannot be cleared by a la
   assert.equal(w.calls.length, 1, "an unscoped Stop cannot clear uncertainty");
   w.endTerminal();
   assert.match((await w.finished("slow")).error, /terminal exited/);
+  await w.stub.waitFor(f => f.type === "session.closed");
+  w.session.stop(); await sleep(50);
+  assert.equal(w.stub.frames.filter(f => f.type === "turn.finished" && f.turnId === "slow").length, 1, "exit and stop cannot both finish the receipt");
+  assert.equal(w.stub.frames.slice(w.stub.frames.findIndex(f => f.type === "turn.finished" && f.turnId === "slow")).some(f => f.type === "session.status" && f.status === "running"), false, "an exited terminal is never marked running again");
 });
 
 test("a local submit after a lost hook prevents an unrelated Stop from clearing uncertainty", { timeout: 6000 }, async (t) => {
@@ -144,6 +149,40 @@ test("closing an uncertain session reports the active failure before the host cl
   assert.match((await w.finished("slow")).error, /terminal exited/);
   await w.stub.waitFor(f => f.type === "session.closed");
   assert.ok(w.stub.frames.findIndex(f => f.type === "turn.finished" && f.turnId === "slow") < w.stub.frames.findIndex(f => f.type === "session.closed"));
+});
+
+test("the completion watchdog stops polling when the original terminal exits", { timeout: 6000 }, async t => {
+  const w = await world(t, { hookCompletionTimeoutMs: 2000 });
+  const setIntervalOriginal = globalThis.setInterval;
+  const clearIntervalOriginal = globalThis.clearInterval;
+  const watchdogs = new Set();
+  globalThis.setInterval = (fn, delay, ...args) => {
+    const timer = setIntervalOriginal(fn, delay, ...args);
+    if (delay === 250) watchdogs.add(timer);
+    return timer;
+  };
+  globalThis.clearInterval = timer => { watchdogs.delete(timer); return clearIntervalOriginal(timer); };
+  t.after(() => { globalThis.setInterval = setIntervalOriginal; globalThis.clearInterval = clearIntervalOriginal; });
+  w.send("slow"); await w.started("slow");
+  w.events.emit("hook", { source: "claude", event: "UserPromptSubmit", payload: {} });
+  w.quiet(); await sleep(300); assert.equal(watchdogs.size, 1, "the watchdog was installed");
+  w.endTerminal(); await w.finished("slow");
+  await sleep(50);
+  assert.equal(watchdogs.size, 0, "the watchdog interval was canceled");
+});
+
+test("an uncertain turn stays bound to its original terminal if another is attached", { timeout: 6000 }, async t => {
+  const w = await world(t, { hookCompletionTimeoutMs: 600 });
+  w.send("slow"); await w.started("slow");
+  w.events.emit("hook", { source: "claude", event: "UserPromptSubmit", payload: {} });
+  w.send("queued"); await w.stub.waitFor(f => f.type === "turn.ack" && f.turnId === "queued");
+  w.quiet(); await w.finished("queued");
+  let otherInterrupts = 0;
+  w.session.attachTui({ pid: 2, write() {}, inject: async () => {}, interrupt() { otherInterrupts++; }, quietFor: () => 0, exit: new Promise(() => {}), kill() {} });
+  w.stub.send({ type: "turn.interrupt", turnId: "slow" });
+  await sleep(30); assert.equal(w.interrupts(), 1); assert.equal(otherInterrupts, 0);
+  w.endTerminal();
+  assert.match((await w.finished("slow")).error, /terminal exited/);
 });
 
 test("a Send now prepared during watchdog expiry cannot inject after uncertainty", { timeout: 6000 }, async (t) => {
