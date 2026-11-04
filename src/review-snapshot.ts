@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { constants } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
 import path from "node:path";
+import { gitBlobOID, gitTreeOID } from "./review-git-tree.js";
 
 export const LOCAL_REVIEW_MAX_BYTES = 16 * 1024 * 1024;
 export const LOCAL_REVIEW_MAX_FILES = 4096;
@@ -10,7 +11,7 @@ export const LOCAL_REVIEW_MAX_JSON_BYTES = 24 * 1024 * 1024;
 
 export interface SnapshotFile { path: string; contentBase64: string; mode: "100644" | "100755" }
 export interface ReviewSnapshot {
-  version: 1;
+  version: 1 | 2;
   mode: "workspace" | "staged" | "base";
   baseRef?: string;
   baseSha?: string;
@@ -21,9 +22,16 @@ export interface ReviewSnapshot {
   contextComplete: boolean;
   omittedContext: string[];
   skipped: { path: string; reason: string }[];
+  anchorSha?: string;
+  anchorRef?: string;
+  baseTreeSha?: string;
+  headTreeSha?: string;
+  baseDeletedPaths?: string[];
+  headDeletedPaths?: string[];
 }
-interface GitEntry { oid: string; mode: string }
-export interface SnapshotOptions { staged?: boolean; base?: string; cwd?: string; signal?: AbortSignal }
+interface GitEntry { oid: string; mode: string; skipWorktree?: boolean }
+export interface SnapshotOptions { staged?: boolean; base?: string; cwd?: string; signal?: AbortSignal; allowAnchor?: boolean }
+export interface SnapshotCapture { root: string; snapshot: ReviewSnapshot; bytes: number; captureMs: number; fallbackReason?: string }
 const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 const order = (a: string, b: string): number => Buffer.compare(Buffer.from(a), Buffer.from(b));
 
@@ -85,15 +93,17 @@ function safePath(file: string): void {
 
 async function entries(cwd: string, ref: string | undefined, index: boolean, signal?: AbortSignal): Promise<Map<string, GitEntry>> {
   if (!index && !ref) return new Map();
-  const rows = names(await reviewGit(cwd, index ? ["ls-files", "--stage", "-z"] : ["ls-tree", "-rz", "--full-tree", ref!], undefined, signal));
+  const rows = names(await reviewGit(cwd, index ? ["ls-files", "--stage", "-t", "--sparse", "-z"] : ["ls-tree", "-rz", "--full-tree", ref!], undefined, signal));
   const out = new Map<string, GitEntry>();
   for (const row of rows) {
     const tab = row.indexOf("\t");
     if (tab < 0) throw new Error("invalid git tree entry");
     const fields = row.slice(0, tab).split(" "), file = row.slice(tab + 1);
+    const tag = index ? fields.shift() : undefined;
+    if (index && ["040000", "40000"].includes(fields[0])) throw new Error("local review cannot capture collapsed sparse-index directories; run git sparse-checkout reapply --no-sparse-index manually before retrying (capture never expands the index)");
     safePath(file);
     if (index && fields[2] !== "0") throw new Error("resolve unmerged index entries before reviewing a working diff");
-    out.set(file, { mode: fields[0], oid: fields[index ? 1 : 2] });
+    out.set(file, { mode: fields[0], oid: fields[index ? 1 : 2], ...(tag === "S" ? { skipWorktree: true } : {}) });
   }
   return out;
 }
@@ -132,7 +142,8 @@ class SkipFile extends Error {}
 
 /** Reject symlinks (including parent directories); do not follow them outside
  * the checkout. Verify the opened inode and stat again after reading. */
-async function workingFile(root: string, file: string, read: boolean): Promise<{ size: number; mode: "100644" | "100755"; data?: Buffer } | undefined> {
+interface WorkingFile { size: number; mode: "100644" | "100755"; data?: Buffer }
+async function workingFile(root: string, file: string, read: boolean, absent?: () => void): Promise<WorkingFile | undefined> {
   const absolute = path.join(root, file);
   let before;
   try {
@@ -145,12 +156,13 @@ async function workingFile(root: string, file: string, read: boolean): Promise<{
     }
     before = await lstat(absolute);
   } catch (error) {
-    if (["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) return undefined;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") { absent?.(); return undefined; }
+    if ((error as NodeJS.ErrnoException).code === "ENOTDIR") return undefined;
     throw error;
   }
   if (before.isDirectory()) return undefined; // A tracked file was replaced by a directory.
   if (!before.isFile() || before.isSymbolicLink()) throw new SkipFile("symlink or non-regular file");
-  const mode = (before.mode & 0o111) ? "100755" : "100644";
+  const mode = (before.mode & 0o100) ? "100755" : "100644";
   if (!read) return { size: before.size, mode };
   const handle = await open(absolute, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   try {
@@ -165,6 +177,16 @@ async function workingFile(root: string, file: string, read: boolean): Promise<{
   } finally { await handle.close(); }
 }
 
+async function selectedHead(root: string, file: string, entry: GitEntry | undefined, read: boolean): Promise<{ working?: WorkingFile; index?: GitEntry }> {
+  let absent = false;
+  const working = await workingFile(root, file, read, () => { absent = true; });
+  if (entry?.skipWorktree && !working) {
+    if (absent) return { index: entry };
+    throw new Error(`selected skip-worktree path is replaced by a non-file; resolve it manually before retrying: ${file}`);
+  }
+  return { working };
+}
+
 function textFile(data: Buffer): boolean {
   if (data.includes(0)) return false;
   try { utf8.decode(data); return true; } catch { return false; }
@@ -172,9 +194,14 @@ function textFile(data: Buffer): boolean {
 
 export function snapshotDigest(snapshot: Omit<ReviewSnapshot, "digest"> | ReviewSnapshot): string {
   const hash = createHash("sha256");
-  hash.update(`ditto-review-local-v1\0${snapshot.mode}\0${snapshot.baseSha ?? ""}\0`);
+  if (snapshot.version === 2) hash.update(`ditto-review-local-v2\0${snapshot.mode}\0${snapshot.baseSha ?? ""}\0${snapshot.anchorSha ?? ""}\0${snapshot.baseTreeSha ?? ""}\0${snapshot.headTreeSha ?? ""}\0`);
+  else hash.update(`ditto-review-local-v1\0${snapshot.mode}\0${snapshot.baseSha ?? ""}\0`);
   for (const [tree, files] of [["base", snapshot.baseFiles], ["head", snapshot.headFiles]] as const) {
     for (const file of [...files].sort((a, b) => order(a.path, b.path))) hash.update(`${tree}\0${file.path}\0${file.mode || "100644"}\0${file.contentBase64}\0`);
+  }
+  if (snapshot.version === 2) {
+    for (const file of [...(snapshot.baseDeletedPaths ?? [])].sort(order)) hash.update(`base-deleted\0${file}\0`);
+    for (const file of [...(snapshot.headDeletedPaths ?? [])].sort(order)) hash.update(`head-deleted\0${file}\0`);
   }
   for (const file of [...snapshot.changedPaths].sort(order)) hash.update(`changed\0${file}\0`);
   for (const file of [...snapshot.omittedContext].sort(order)) hash.update(`omitted\0${file}\0`);
@@ -183,8 +210,81 @@ export function snapshotDigest(snapshot: Omit<ReviewSnapshot, "digest"> | Review
   return hash.digest("hex");
 }
 
-export async function captureReviewSnapshot(options: SnapshotOptions = {}): Promise<{ root: string; snapshot: ReviewSnapshot; bytes: number }> {
+class AnchorUnavailable extends Error {}
+const regularEntry = (entry: GitEntry | undefined): entry is GitEntry => !!entry && ["100644", "100755"].includes(entry.mode);
+const sameEntry = (a: GitEntry | undefined, b: GitEntry | undefined): boolean => a?.oid === b?.oid && a?.mode === b?.mode;
+
+function validAnchorRef(ref: string): boolean {
+  if (ref.length > 1024 || !ref.startsWith("refs/heads/")) return false;
+  const branch = ref.slice(11);
+  return !!branch && !branch.includes("..") && !branch.includes("//") && !branch.includes("@{") && branch.split("/").every(part => !!part && !part.startsWith(".") && !part.endsWith(".") && !part.endsWith(".lock") && /^[A-Za-z0-9._-]+$/.test(part));
+}
+
+async function captureAnchored(root: string, baseSha: string | undefined, base: Map<string, GitEntry>, index: Map<string, GitEntry>, headPaths: Set<string>, changedPaths: string[], honorFileMode: boolean, options: SnapshotOptions): Promise<{ snapshot: ReviewSnapshot; bytes: number }> {
+  if (options.allowAnchor === false) throw new AnchorUnavailable("anchored snapshots are not enabled for this server");
+  if (!baseSha || !/^[0-9a-f]{40}$/.test(baseSha)) throw new AnchorUnavailable("no committed SHA-1 baseline is available");
+  const refs = utf8.decode(await reviewGit(root, ["for-each-ref", "--format=%(refname)%00%(objectname)%00%(symref)", "refs/remotes/origin"], undefined, options.signal)).trimEnd().split("\n").filter(Boolean).map(row => { const [ref, oid, symbolic] = row.split("\0"); return { ref, oid, symbolic }; });
+  const defaultRef = refs.find(row => row.ref === "refs/remotes/origin/HEAD")?.symbolic;
+  const selected = refs.find(row => row.ref === defaultRef) ?? refs.find(row => row.ref === "refs/remotes/origin/main") ?? refs.find(row => row.ref === "refs/remotes/origin/master") ?? refs.find(row => row.ref !== "refs/remotes/origin/HEAD");
+  if (!selected || !/^[0-9a-f]{40}$/.test(selected.oid)) throw new AnchorUnavailable("no locally known origin anchor is available; capture never fetches");
+  const anchorRef = "refs/heads/" + selected.ref.slice("refs/remotes/origin/".length);
+  if (!validAnchorRef(anchorRef)) throw new AnchorUnavailable("the origin branch cannot be represented as a restricted anchor hint");
+  let anchorSha: string;
+  try { anchorSha = selected.oid === baseSha ? baseSha : (await reviewGit(root, ["merge-base", baseSha, selected.oid], undefined, options.signal)).toString("ascii").trim(); }
+  catch (error) { if (options.signal?.aborted) throw error; throw new AnchorUnavailable("the local origin anchor has no available common baseline"); }
+  const anchor = await entries(root, anchorSha, false, options.signal), head = new Map(base), working = new Map<string, Buffer>();
+  let workingBytes = 0;
+  const logicalIndexHeads = new Set<string>();
+  for (const file of changedPaths) {
+    if (options.signal?.aborted) throw options.signal.reason;
+    if (base.has(file) && !regularEntry(base.get(file))) throw new AnchorUnavailable("a selected symlink or submodule requires bounded capture");
+    if (!headPaths.has(file)) { head.delete(file); continue; }
+    const staged = index.get(file);
+    if (staged && !regularEntry(staged)) throw new AnchorUnavailable("a selected symlink or submodule requires bounded capture");
+    if (options.staged) { if (staged) head.set(file, staged); else head.delete(file); continue; }
+    let source;
+    try { source = await selectedHead(root, file, staged, true); }
+    catch (error) { if (error instanceof SkipFile) throw new AnchorUnavailable("a selected path cannot be represented as a regular anchored file"); throw error; }
+    if (source.index) { head.set(file, source.index); logicalIndexHeads.add(file); continue; }
+    const value = source.working;
+    if (!value?.data) { head.delete(file); continue; }
+    if (!textFile(value.data)) throw new AnchorUnavailable("a selected binary or non-UTF-8 file requires bounded capture");
+    workingBytes += value.data.length;
+    if (workingBytes > LOCAL_REVIEW_MAX_BYTES) throw new AnchorUnavailable("selected working bytes exceed the anchored transfer limit");
+    const oid = gitBlobOID(value.data); working.set(oid, value.data);
+    head.set(file, { oid, mode: honorFileMode ? value.mode : staged?.mode ?? "100644" });
+  }
+  const overlays = (tree: Map<string, GitEntry>) => [...tree].filter(([file, entry]) => !sameEntry(anchor.get(file), entry)).sort(([a], [b]) => order(a, b));
+  const baseOverlay = overlays(base), headOverlay = overlays(head);
+  const deleted = (tree: Map<string, GitEntry>) => [...anchor.keys()].filter(file => !tree.has(file)).sort(order);
+  const baseDeletedPaths = deleted(base), headDeletedPaths = deleted(head);
+  if ([baseOverlay, headOverlay, baseDeletedPaths, headDeletedPaths].some(list => list.length > LOCAL_REVIEW_MAX_FILES)) throw new AnchorUnavailable("committed or selected overlays exceed anchored file limits");
+  if ([...baseOverlay, ...headOverlay].some(([, entry]) => !regularEntry(entry))) throw new AnchorUnavailable("a committed binary, symlink or submodule overlay requires bounded capture");
+  const policyIds = [...new Set(changedPaths.flatMap(file => [base.get(file), ...(options.staged || logicalIndexHeads.has(file) ? [index.get(file)] : [])]).filter(regularEntry).map(entry => entry.oid))];
+  const ids = [...new Set([...baseOverlay, ...headOverlay].map(([, entry]) => entry.oid).concat(policyIds).filter(oid => !working.has(oid)))];
+  const sizes = await objectSizes(root, ids, options.signal);
+  if (policyIds.reduce((bytes, oid) => bytes + (working.get(oid)?.length ?? sizes.get(oid)!), 0) > LOCAL_REVIEW_MAX_BYTES) throw new AnchorUnavailable("selected baseline bytes exceed the anchored source-policy bound");
+  const estimated = [...baseOverlay, ...headOverlay].reduce((bytes, [, entry]) => bytes + (working.get(entry.oid)?.length ?? sizes.get(entry.oid)!), 0);
+  if (estimated > LOCAL_REVIEW_MAX_BYTES) throw new AnchorUnavailable("committed and selected overlays exceed the 16 MiB anchored transfer limit");
+  const content = await blobs(root, ids, options.signal);
+  for (const [oid, bytes] of working) content.set(oid, bytes);
+  if (policyIds.some(oid => !textFile(content.get(oid)!))) throw new AnchorUnavailable("a selected binary or non-UTF-8 state requires bounded capture");
+  const files = (overlay: [string, GitEntry][]): SnapshotFile[] => overlay.map(([file, entry]) => {
+    const bytes = content.get(entry.oid)!;
+    if (!textFile(bytes)) throw new AnchorUnavailable("a committed binary or non-UTF-8 overlay requires bounded capture");
+    return { path: file, mode: entry.mode as SnapshotFile["mode"], contentBase64: bytes.toString("base64") };
+  });
+  const actualChanges = [...new Set([...base.keys(), ...head.keys()])].filter(file => !sameEntry(base.get(file), head.get(file))).sort(order);
+  const snapshot: ReviewSnapshot = { version: 2, mode: options.staged ? "staged" : options.base ? "base" : "workspace", ...(options.base ? { baseRef: options.base } : {}), baseSha, anchorSha, anchorRef, baseTreeSha: gitTreeOID(base), headTreeSha: gitTreeOID(head), baseFiles: files(baseOverlay), headFiles: files(headOverlay), baseDeletedPaths, headDeletedPaths, changedPaths: actualChanges, contextComplete: true, omittedContext: [], skipped: [], digest: "" };
+  snapshot.digest = snapshotDigest(snapshot);
+  if (Buffer.byteLength(JSON.stringify(snapshot)) > LOCAL_REVIEW_MAX_JSON_BYTES) throw new AnchorUnavailable("anchored snapshot exceeds the transport limit");
+  return { snapshot, bytes: estimated };
+}
+
+export async function captureReviewSnapshot(options: SnapshotOptions = {}): Promise<SnapshotCapture> {
+  const started = performance.now();
   if (options.staged && options.base) throw new Error("--staged and --base cannot be used together");
+  if (options.base && Buffer.byteLength(options.base) > 1024) throw new Error("--base exceeds the 1024-byte ref limit");
   const root = await realpath(utf8.decode(await reviewGit(options.cwd ?? process.cwd(), ["rev-parse", "--show-toplevel"], undefined, options.signal)).replace(/\r?\n$/, ""));
   let head: string | undefined;
   try { head = (await reviewGit(root, ["rev-parse", "--verify", "HEAD"], undefined, options.signal)).toString("ascii").trim(); }
@@ -210,21 +310,26 @@ export async function captureReviewSnapshot(options: SnapshotOptions = {}): Prom
   const changed = new Set(changedPaths);
   const all = [...new Set([...base.keys(), ...headPaths])];
   all.forEach(safePath);
+  let fallbackReason: string;
+  try { return { root, ...await captureAnchored(root, baseSha, base, index, headPaths, changedPaths, honorFileMode, options), captureMs: performance.now() - started }; }
+  catch (error) { if (!(error instanceof AnchorUnavailable)) throw error; fallbackReason = error.message; }
   const regular = (entry: GitEntry | undefined) => !!entry && (entry.mode === "100644" || entry.mode === "100755");
-  const ids = [...new Set([...base.values(), ...(options.staged ? index.values() : [])].filter(regular).map(e => e.oid))];
+  const indexSources = options.staged ? [...index.values()] : [...index].filter(([file, entry]) => changed.has(file) && entry.skipWorktree).map(([, entry]) => entry);
+  const ids = [...new Set([...base.values(), ...indexSources].filter(regular).map(e => e.oid))];
   const sizes = await objectSizes(root, ids, options.signal);
-  const metadata = new Map<string, { baseSize: number; headSize: number }>();
+  const metadata = new Map<string, { baseSize: number; headSize: number; indexHead: boolean }>();
   const skipped: ReviewSnapshot["skipped"] = [];
   for (const file of all) {
     if (options.signal?.aborted) throw options.signal.reason;
     const b = base.get(file), h = index.get(file);
     if ((b && !regular(b)) || (headPaths.has(file) && h && !regular(h))) { skipped.push({ path: file, reason: "symlink or submodule" }); continue; }
     try {
-      const working = !options.staged && changed.has(file) && headPaths.has(file) ? await workingFile(root, file, false) : undefined;
+      const source = !options.staged && changed.has(file) && headPaths.has(file) ? await selectedHead(root, file, h, false) : undefined;
+      const indexHead = !!source?.index;
       // Unchanged surrounding context intentionally comes from the pinned
       // comparison tree. Avoid thousands of live reads (and attribute/filter
       // execution) for bytes Git did not select as changes.
-      metadata.set(file, { baseSize: b ? sizes.get(b.oid)! : 0, headSize: options.staged ? (h ? sizes.get(h.oid)! : 0) : changed.has(file) ? (working?.size ?? 0) : b ? sizes.get(b.oid)! : 0 });
+      metadata.set(file, { baseSize: b ? sizes.get(b.oid)! : 0, headSize: options.staged || indexHead ? (h ? sizes.get(h.oid)! : 0) : changed.has(file) ? (source?.working?.size ?? 0) : b ? sizes.get(b.oid)! : 0, indexHead });
     } catch (error) { if (error instanceof SkipFile) skipped.push({ path: file, reason: error.message }); else throw error; }
   }
   const distance = (file: string): number => {
@@ -243,7 +348,7 @@ export async function captureReviewSnapshot(options: SnapshotOptions = {}): Prom
     }
     selected.push(file); total += size.baseSize + size.headSize; baseCount = nextBase; headCount = nextHead;
   }
-  const selectedIds = [...new Set(selected.flatMap(file => [base.get(file), ...(options.staged ? [index.get(file)] : [])].filter((e): e is GitEntry => regular(e)).map(e => e.oid)))];
+  const selectedIds = [...new Set(selected.flatMap(file => [base.get(file), ...(options.staged || metadata.get(file)!.indexHead ? [index.get(file)] : [])].filter((e): e is GitEntry => regular(e)).map(e => e.oid)))];
   const content = await blobs(root, selectedIds, options.signal);
   const baseFiles: SnapshotFile[] = [], headFiles: SnapshotFile[] = [];
   for (const file of selected) {
@@ -251,9 +356,13 @@ export async function captureReviewSnapshot(options: SnapshotOptions = {}): Prom
     const before = b ? content.get(b.oid)! : undefined;
     let after: Buffer | undefined, headMode: SnapshotFile["mode"] = "100644";
     try {
-      if (options.staged) { after = h ? content.get(h.oid) : undefined; headMode = h?.mode as SnapshotFile["mode"] ?? "100644"; }
+      if (options.staged || metadata.get(file)!.indexHead) { after = h ? content.get(h.oid) : undefined; headMode = h?.mode as SnapshotFile["mode"] ?? "100644"; }
       else if (!changed.has(file)) { after = before; headMode = b?.mode as SnapshotFile["mode"] ?? "100644"; }
-      else if (headPaths.has(file)) { const value = await workingFile(root, file, true); after = value?.data; headMode = honorFileMode ? value?.mode ?? "100644" : h?.mode as SnapshotFile["mode"] ?? "100644"; }
+      else if (headPaths.has(file)) {
+        const source = await selectedHead(root, file, h, true);
+        if (source.index) throw new Error(`skip-worktree file became absent during capture; retry the review: ${file}`);
+        const value = source.working; after = value?.data; headMode = honorFileMode ? value?.mode ?? "100644" : h?.mode as SnapshotFile["mode"] ?? "100644";
+      }
     } catch (error) { if (error instanceof SkipFile) { skipped.push({ path: file, reason: error.message }); continue; } throw error; }
     if ((before && !textFile(before)) || (after && !textFile(after))) { skipped.push({ path: file, reason: "binary or non-UTF-8 file" }); continue; }
     if (before) baseFiles.push({ path: file, contentBase64: before.toString("base64"), mode: b!.mode as SnapshotFile["mode"] });
@@ -276,5 +385,5 @@ export async function captureReviewSnapshot(options: SnapshotOptions = {}): Prom
   const snapshot: ReviewSnapshot = { version: 1, mode, ...(options.base ? { baseRef: options.base } : {}), ...(baseSha ? { baseSha } : {}), digest: "", baseFiles, headFiles, changedPaths: sealedChanges, contextComplete: omittedContext.length === 0 && skipped.length === 0, omittedContext, skipped };
   snapshot.digest = snapshotDigest(snapshot);
   if (Buffer.byteLength(JSON.stringify(snapshot)) > LOCAL_REVIEW_MAX_JSON_BYTES) throw new Error("local review snapshot exceeds the 24 MiB transport limit; narrow the diff");
-  return { root, snapshot, bytes };
+  return { root, snapshot, bytes, captureMs: performance.now() - started, fallbackReason };
 }
