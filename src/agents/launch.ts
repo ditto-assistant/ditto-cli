@@ -949,7 +949,7 @@ async function runInTerminalWithRemote(harness: Harness, plan: HarnessPlan, ctx:
     releaseNotes();
     process.off("SIGTERM", onTerm);
     process.off("SIGHUP", onTerm);
-    session.stop();
+    await session.stop();
     await hooks.close();
   }
 }
@@ -1072,7 +1072,7 @@ async function runHeadless(harness: Harness, ctx: HeadlessRunContext): Promise<n
     process.once("SIGINT", stop);
     process.once("SIGTERM", stop);
   });
-  session.stop();
+  await session.stop();
   await hooks.close();
   return 0;
 }

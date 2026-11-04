@@ -11,6 +11,7 @@ import {
   type SessionAnnounceFrame,
   type SessionCommandsFrame,
   type SessionStatus,
+  type TurnFinishedFrame,
   type TurnDeliverFrame,
   type WelcomeFrame,
   isServerFrame,
@@ -51,6 +52,8 @@ export interface HostClientOptions {
   heartbeatSeconds?: number;
   reconnectBaseMs?: number;
   reconnectMaxMs?: number;
+  /** Maximum graceful-exit wait for final frames; tests can shorten it. */
+  finalCloseTimeoutMs?: number;
 }
 
 const SEEN_TURNS_MAX = 1000;
@@ -75,6 +78,8 @@ export class HostClient {
   private readonly sessions = new Map<string, SessionAnnounceFrame>();
   private readonly resolvedPrompts = new Map<string, string>();
   private readonly catalogs = new Map<string, SessionCommandsFrame>();
+  private readonly finalSessions = new Map<string, Map<string, TurnFinishedFrame>>();
+  private readonly finalWaiters = new Set<() => void>();
   private readonly seenTurns: string[] = [];
   private readonly seenSet = new Set<string>();
   private welcomeWaiters: Array<() => void> = [];
@@ -220,6 +225,7 @@ export class HostClient {
       const catalog = this.catalogs.get(session.sessionId);
       if (catalog) this.send(catalog);
     }
+    this.flushFinalSessions();
     const waiters = this.welcomeWaiters;
     this.welcomeWaiters = [];
     for (const w of waiters) w();
@@ -315,6 +321,57 @@ export class HostClient {
     this.resolvedPrompts.delete(sessionId);
     this.catalogs.delete(sessionId);
     this.send({ type: "session.closed", sessionId });
+  }
+
+  /** Keep final receipts and their session until all frames can be sent, in order. */
+  finalizeSession(sessionId: string, receipt: TurnFinishedFrame): void {
+    let receipts = this.finalSessions.get(sessionId);
+    if (!receipts) {
+      receipts = new Map();
+      this.finalSessions.set(sessionId, receipts);
+    }
+    if (!receipts.has(receipt.turnId)) receipts.set(receipt.turnId, receipt);
+    this.flushFinalSessions();
+  }
+
+  private flushFinalSessions(): void {
+    if (!this.connected) return;
+    for (const [sessionId, receipts] of this.finalSessions) {
+      try {
+        // If the socket drops between frames, replaying the same turn receipt
+        // on the next connection is safe; the backend handles turn IDs idempotently.
+        for (const receipt of receipts.values()) {
+          if (!this.send(receipt)) return;
+        }
+        if (!this.send({ type: "session.closed", sessionId })) return;
+      } catch {
+        return;
+      }
+      this.finalSessions.delete(sessionId);
+      this.sessions.delete(sessionId);
+      this.resolvedPrompts.delete(sessionId);
+      this.catalogs.delete(sessionId);
+    }
+    if (this.finalSessions.size === 0) {
+      for (const resolve of this.finalWaiters) resolve();
+      this.finalWaiters.clear();
+    }
+  }
+
+  /** Allow a brief reconnect on exit; never keep the user's terminal open indefinitely. */
+  async closeAfterFinals(timeoutMs = this.options.finalCloseTimeoutMs ?? 5000): Promise<boolean> {
+    if (this.finalSessions.size > 0) {
+      const delivered = await new Promise<boolean>((resolve) => {
+        const done = () => { clearTimeout(timer); this.finalWaiters.delete(done); resolve(true); };
+        const timer = setTimeout(() => { this.finalWaiters.delete(done); resolve(false); }, timeoutMs);
+        this.finalWaiters.add(done);
+      });
+      if (!delivered) this.options.log?.("remote control: could not report the terminal's final state before disconnecting");
+      this.close();
+      return delivered;
+    }
+    this.close();
+    return true;
   }
 
   /** Announces every session closed and stops reconnecting. */
