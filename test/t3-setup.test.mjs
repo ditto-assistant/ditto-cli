@@ -143,3 +143,36 @@ test("unsupported CLIs and unsafe instance names fail before setup writes", (t) 
   assert.equal(readFileSync(f.settings, "utf8"), f.original);
   assert.equal(existsSync(path.join(f.base, "ditto-providers")), false);
 });
+
+test("T3 setup without --endpoint uses the normal default/pick/create choice and installs it", async (t) => {
+  const f = fixture(t);
+  t.mock.method(process.stdout, "write", () => true);
+  t.mock.method(process.stderr, "write", () => true);
+  const calls = [];
+  const program = new Command();
+  registerT3Commands(program, { chooseEndpoint: async (readOnly) => { calls.push(readOnly); return { slug: "picked-endpoint" }; } });
+  const args = ["node", "heyditto", "t3", "setup", "--base-dir", f.base, "--claude-bin", f.options.claudeBin, "--heyditto-bin", f.options.heydittoBin, "--json"];
+  await program.parseAsync([...args, "--dry-run"]);
+  assert.deepEqual(calls, [true], "a dry run must not create an endpoint or save a default");
+  assert.equal(readFileSync(f.settings, "utf8"), f.original);
+  let printed = "";
+  process.stdout.write.mock.mockImplementation((value) => { printed += value; return true; });
+  const fresh = new Command();
+  registerT3Commands(fresh, { chooseEndpoint: async (readOnly) => { calls.push(readOnly); return { slug: "picked-endpoint" }; } });
+  await fresh.parseAsync(args);
+  assert.equal(calls.at(-1), false);
+  const summary = JSON.parse(printed);
+  assert.equal(summary.endpoint, "picked-endpoint");
+  const launcher = readFileSync(summary.binaryPath, "utf8");
+  assert.match(launcher, /DITTO_T3_ENDPOINT='picked-endpoint'/);
+});
+
+test("T3 setup without --endpoint fails on local problems before choosing an endpoint", async (t) => {
+  const f = fixture(t);
+  writeFileSync(f.settings, "not json");
+  let called = false;
+  const program = new Command();
+  registerT3Commands(program, { chooseEndpoint: async () => { called = true; return { slug: "x" }; } });
+  await assert.rejects(program.parseAsync(["node", "heyditto", "t3", "setup", "--base-dir", f.base, "--claude-bin", f.options.claudeBin, "--heyditto-bin", f.options.heydittoBin]), /Cannot parse T3 settings/);
+  assert.equal(called, false);
+});

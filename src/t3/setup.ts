@@ -5,10 +5,11 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Command, Option } from "commander";
+import { chooseEndpoint } from "../agents/launch.js";
 
 type JsonObject = Record<string, unknown>;
 export interface T3SetupOptions {
-  endpoint: string;
+  endpoint?: string;
   inference?: string;
   instance?: string;
   name?: string;
@@ -98,7 +99,8 @@ function shellQuote(value: string): string {
 /** Plan only: no credentials, endpoint changes, filesystem writes or service stops. */
 export function planT3Setup(options: T3SetupOptions): T3SetupPlan {
   if (process.platform === "win32") throw new Error("T3 launcher setup currently supports macOS and Linux; use the manual T3 guide on Windows");
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(options.endpoint)) throw new Error("Use an endpoint CLI slug or UUID with --endpoint");
+  const endpoint = options.endpoint ?? "";
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(endpoint)) throw new Error("Use an endpoint CLI slug or UUID with --endpoint");
   const inference = options.inference ?? "cliproxy";
   if (inference !== "router" && inference !== "cliproxy") throw new Error("--inference must be router or cliproxy");
   const instance = options.instance ?? "claude_ditto_cliproxy";
@@ -133,11 +135,11 @@ export function planT3Setup(options: T3SetupOptions): T3SetupPlan {
     throw new Error(`The selected heyditto does not support ${inference} T3 launches; update it before setup`);
   }
   const launcher = readFileSync(fileURLToPath(new URL("../../scripts/claude-router-launcher.sh", import.meta.url)), "utf8");
-  const digest = createHash("sha256").update(JSON.stringify({ inference, endpoint: options.endpoint, heydittoBin, claudeBin, launcher })).digest("hex").slice(0, 20);
+  const digest = createHash("sha256").update(JSON.stringify({ inference, endpoint, heydittoBin, claudeBin, launcher })).digest("hex").slice(0, 20);
   const versionDir = path.join(managedRoot, instance, digest);
   const supportPath = path.join(versionDir, "claude-router-launcher.sh");
   const launcherPath = path.join(versionDir, "launch");
-  const wrapper = `#!/bin/sh\n# Managed by heyditto t3 setup. No credentials are stored here.\nexport DITTO_T3_INFERENCE=${shellQuote(inference)}\nexport DITTO_T3_ENDPOINT=${shellQuote(options.endpoint)}\nexport DITTO_T3_HEYDITTO_BIN=${shellQuote(heydittoBin)}\nexport DITTO_T3_CLAUDE_BIN=${shellQuote(claudeBin)}\nexec ${shellQuote(supportPath)} "$@"\n`;
+  const wrapper = `#!/bin/sh\n# Managed by heyditto t3 setup. No credentials are stored here.\nexport DITTO_T3_INFERENCE=${shellQuote(inference)}\nexport DITTO_T3_ENDPOINT=${shellQuote(endpoint)}\nexport DITTO_T3_HEYDITTO_BIN=${shellQuote(heydittoBin)}\nexport DITTO_T3_CLAUDE_BIN=${shellQuote(claudeBin)}\nexec ${shellQuote(supportPath)} "$@"\n`;
   const displayName = options.name?.trim() || (inference === "cliproxy" ? "Claude CLIProxy + Ditto" : "Ditto Router");
   const previous = object(existing) ? existing : {};
   const provider = { ...previous, driver: "claudeAgent", displayName, enabled: true, config: { ...(object(previous.config) ? previous.config : {}), binaryPath: launcherPath, homePath } };
@@ -145,7 +147,7 @@ export function planT3Setup(options: T3SetupOptions): T3SetupPlan {
   const same = JSON.stringify(settings) === JSON.stringify(updatedObject);
   return {
     settingsPath, original, updated: same ? original : JSON.stringify(updatedObject, null, 2) + "\n",
-    instance, endpoint: options.endpoint, inference, displayName, managedRoot, homePath, launcherPath,
+    instance, endpoint, inference, displayName, managedRoot, homePath, launcherPath,
     files: [{ path: supportPath, content: launcher }, { path: launcherPath, content: wrapper }],
     action: existing === undefined ? "add" : same ? "unchanged" : "update",
     runningPid: runningServer(userdata),
@@ -205,10 +207,16 @@ export function applyT3Setup(plan: T3SetupPlan): { changed: boolean; backup?: st
   }
 }
 
-export function registerT3Commands(program: Command): void {
+export interface T3SetupDeps {
+  /** Chooses an endpoint when --endpoint is omitted; `readOnly` for --dry-run. */
+  chooseEndpoint?: (readOnly: boolean) => Promise<{ slug: string }>;
+}
+
+export function registerT3Commands(program: Command, deps: T3SetupDeps = {}): void {
+  const choose = deps.chooseEndpoint ?? ((readOnly: boolean) => chooseEndpoint("claude", readOnly));
   program.command("t3").description("configure a local T3 Code provider for Ditto").command("setup")
     .description("install a Claude launcher and configure a T3 provider while T3 is stopped")
-    .requiredOption("--endpoint <slug>", "Ditto endpoint supplying tools (and inference in Router mode)")
+    .option("--endpoint <slug>", "Ditto endpoint supplying tools (and inference in Router mode); default: your saved default, or pick or create one")
     .addOption(new Option("--inference <mode>", "inference route").choices(["cliproxy", "router"]).default("cliproxy"))
     .option("--instance <id>", "T3 provider instance id", "claude_ditto_cliproxy")
     .option("--name <name>", "provider display name")
@@ -217,7 +225,15 @@ export function registerT3Commands(program: Command): void {
     .option("--heyditto-bin <path>", "installed heyditto executable")
     .option("--dry-run", "show the setup plan; write nothing and allow T3 to remain open")
     .option("--json", "print a credential-free setup summary")
-    .action((options: T3SetupOptions) => {
+    .action(async (options: T3SetupOptions) => {
+      if (options.endpoint === undefined) {
+        // Fail on local problems (T3 settings, binaries) before a browser
+        // login, picker or endpoint creation; the slug is replaced below.
+        planT3Setup({ ...options, endpoint: "endpoint-pending" });
+        const chosen = await choose(Boolean(options.dryRun));
+        process.stderr.write(`Using endpoint ${chosen.slug} (pass --endpoint <slug> to choose another)\n`);
+        options = { ...options, endpoint: chosen.slug };
+      }
       const plan = planT3Setup(options);
       const applied = options.dryRun ? undefined : applyT3Setup(plan);
       const summary = { action: plan.action, dryRun: Boolean(options.dryRun), instance: plan.instance, displayName: plan.displayName, endpoint: plan.endpoint, inference: plan.inference, settingsPath: plan.settingsPath, binaryPath: plan.launcherPath, homePath: plan.homePath, runningPid: plan.runningPid ?? null, ...applied };

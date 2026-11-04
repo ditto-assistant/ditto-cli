@@ -20,13 +20,21 @@ Quit T3 Code (or stop its background service yourself), then apply:
 heyditto t3 setup --endpoint ditto-dev --inference cliproxy
 ```
 
+Without `--endpoint`, setup chooses the endpoint the way `heyditto claude`
+does: it signs you in through the browser if needed, then uses your saved
+default endpoint, your only endpoint, or a numbered picker, and offers to
+create your first endpoint when you have none. The chosen slug is written into
+the launcher. A `--dry-run` without `--endpoint` never creates an endpoint or
+saves a default.
+
 Keep T3 closed until setup finishes. Reopen it and choose **Claude CLIProxy +
 Ditto** in a new chat. The command installs a private launcher, creates an
 isolated Claude config directory, and adds the `claude_ditto_cliproxy` provider.
 It preserves other providers and settings, saves an exact private backup before
 replacing settings, and can be rerun without duplicating the provider. It does
-not mint keys, copy credentials, change the saved default endpoint, stop active
-chats, or send inference requests. Session keys are minted by the launcher when
+not mint keys, copy credentials, stop active chats, or send inference requests,
+and it changes the saved default endpoint only when you create a first endpoint
+or accept the picker's "use by default" prompt. Session keys are minted by the launcher when
 a chat starts and revoked on normal exit.
 
 Use `--inference router` for Router inference instead. `--instance` and `--name`

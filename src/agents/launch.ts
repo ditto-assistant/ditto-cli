@@ -272,9 +272,10 @@ async function resolveEndpoint(
   wanted: string | undefined,
   endpoints: InferenceEndpoint[],
   selected: SelectedEndpoint | undefined,
+  readOnly = false,
 ): Promise<InferenceEndpoint> {
   if (endpoints.length === 0) {
-    if (interactive() && (await confirmYes("You have no inference endpoints yet. Create your first one now?"))) {
+    if (!readOnly && interactive() && (await confirmYes("You have no inference endpoints yet. Create your first one now?"))) {
       const created = await createEndpoint({});
       log(`created endpoint ${created.slug} (model ${created.model})`);
       await updateStoredAuth({ defaultEndpoint: created.slug });
@@ -303,11 +304,23 @@ async function resolveEndpoint(
   }
   if (endpoints.length === 1) return endpoints[0];
   const picked = await pickEndpoint(endpoints, stored);
-  if (await confirmYes(`Use ${picked.slug} by default next time?`)) {
+  if (!readOnly && (await confirmYes(`Use ${picked.slug} by default next time?`))) {
     await updateStoredAuth({ defaultEndpoint: picked.slug });
     log(`default endpoint set to ${picked.slug} (change it with \`heyditto endpoints use <slug>\`)`);
   }
   return picked;
+}
+
+/**
+ * The endpoint `heyditto claude` would choose without --endpoint, for a caller
+ * that saves the choice (T3 setup): log in if needed, then the saved default,
+ * the only endpoint, or the picker, offering to create a first endpoint.
+ * `readOnly` (a dry run) never creates an endpoint or saves a default.
+ */
+export async function chooseEndpoint(harness: Harness, readOnly = false): Promise<InferenceEndpoint> {
+  const selected = readOnly ? undefined : await ensureLoggedIn(harness, undefined);
+  const catalog = await listEndpoints();
+  return resolveEndpoint(undefined, catalog.endpoints, selected, readOnly);
 }
 
 /**
