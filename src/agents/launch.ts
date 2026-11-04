@@ -272,9 +272,10 @@ async function resolveEndpoint(
   wanted: string | undefined,
   endpoints: InferenceEndpoint[],
   selected: SelectedEndpoint | undefined,
+  readOnly = false,
 ): Promise<InferenceEndpoint> {
   if (endpoints.length === 0) {
-    if (interactive() && (await confirmYes("You have no inference endpoints yet. Create your first one now?"))) {
+    if (!readOnly && interactive() && (await confirmYes("You have no inference endpoints yet. Create your first one now?"))) {
       const created = await createEndpoint({});
       log(`created endpoint ${created.slug} (model ${created.model})`);
       await updateStoredAuth({ defaultEndpoint: created.slug });
@@ -303,11 +304,43 @@ async function resolveEndpoint(
   }
   if (endpoints.length === 1) return endpoints[0];
   const picked = await pickEndpoint(endpoints, stored);
-  if (await confirmYes(`Use ${picked.slug} by default next time?`)) {
+  if (!readOnly && (await confirmYes(`Use ${picked.slug} by default next time?`))) {
     await updateStoredAuth({ defaultEndpoint: picked.slug });
     log(`default endpoint set to ${picked.slug} (change it with \`heyditto endpoints use <slug>\`)`);
   }
   return picked;
+}
+
+/**
+ * The endpoint `heyditto claude` would choose without --endpoint, for a caller
+ * that saves the choice (T3 setup): log in if needed, then the saved default,
+ * the only endpoint, or the picker, offering to create a first endpoint.
+ * `readOnly` (a dry run) never creates an endpoint or saves a default.
+ */
+export async function chooseEndpoint(harness: Harness, readOnly = false): Promise<InferenceEndpoint> {
+  const { selected, catalog } = await signInAndListEndpoints(harness, undefined, readOnly);
+  return resolveEndpoint(undefined, catalog.endpoints, selected, readOnly);
+}
+
+/** Signs in when needed and lists endpoints; a dry run never opens the browser. */
+async function signInAndListEndpoints(
+  harness: Harness,
+  requestedEndpoint: string | undefined,
+  dryRun: boolean,
+): Promise<{ selected: SelectedEndpoint | undefined; catalog: Awaited<ReturnType<typeof listEndpoints>> }> {
+  let selected = dryRun ? undefined : await ensureLoggedIn(harness, requestedEndpoint);
+  try {
+    return { selected, catalog: await listEndpoints() };
+  } catch (err) {
+    // A saved key that lapsed (device-flow keys expire) sends the user back
+    // through the browser instead of a dead 401.
+    if (!(err instanceof ApiError) || err.status !== 401 || dryRun || !interactive()) throw err;
+    const { source } = await resolveApiKey();
+    if (source !== "config") throw err;
+    log("your saved Ditto login is no longer valid — opening your browser to sign in again.");
+    selected = await browserLogin(harness, requestedEndpoint);
+    return { selected, catalog: await listEndpoints() };
+  }
 }
 
 /**
@@ -477,20 +510,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   if (proxy) options = { ...options, cliproxy: proxy.baseUrl, mcpOnly: false };
 
   const requestedEndpoint = options.endpoint ?? record?.endpointSlug;
-  let selected = options.dryRun ? undefined : await ensureLoggedIn(harness, requestedEndpoint);
-  let catalog: Awaited<ReturnType<typeof listEndpoints>>;
-  try {
-    catalog = await listEndpoints();
-  } catch (err) {
-    // A saved key that lapsed (device-flow keys expire) sends the user back
-    // through the browser instead of a dead 401.
-    if (!(err instanceof ApiError) || err.status !== 401 || options.dryRun || !interactive()) throw err;
-    const { source } = await resolveApiKey();
-    if (source !== "config") throw err;
-    log("your saved Ditto login is no longer valid — opening your browser to sign in again.");
-    selected = await browserLogin(harness, requestedEndpoint);
-    catalog = await listEndpoints();
-  }
+  const { selected, catalog } = await signInAndListEndpoints(harness, requestedEndpoint, Boolean(options.dryRun));
 
   // Sent as X-Ditto-Harness-Version so the router serves this release's own
   // prompts. Started only now that sign-in has succeeded (a failed login

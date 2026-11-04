@@ -1308,8 +1308,9 @@ model IDs must match the endpoint's routes/aliases; the cloud model list does no
 discover laptop providers. Deploy the matching backend before enabling an endpoint.
 
 For the official T3 Code app, preview a dedicated provider with
-`heyditto t3 setup --endpoint <slug> --inference cliproxy --dry-run`, then quit
-T3 and rerun without `--dry-run`. This keeps inference on local CLIProxy and
+`heyditto t3 setup --inference cliproxy --dry-run`, then quit T3 and rerun
+without `--dry-run`. Without `--endpoint`, setup uses your saved default, your
+only endpoint, or a picker, and offers to create a first endpoint. This keeps inference on local CLIProxy and
 auto-connects the endpoint's MCP tools. Use `--inference router` for Ditto
 Router inference. See [the T3 setup guide](docs/t3-code.md) for paths, backups,
 limitations, and manual configuration.
