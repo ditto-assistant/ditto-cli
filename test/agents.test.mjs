@@ -274,6 +274,22 @@ test("FORCE_COLOR paints the launch banner even when stderr is a pipe", async ()
   }
 });
 
+test("--dry-run claude parses Ditto flags after unknown flags and prompt words", async () => {
+  const stub = await startStub();
+  try {
+    const result = await runAsync(
+      ["claude", "--dry-run", "--verbose", "hello", "--yellow", "--endpoint", "alpha", "--session", "sess-1", "--", "--model", "x"],
+      { DITTO_API_BASE: stub.base, DITTO_API_KEY: "ditto_mcp_test" },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    const plan = JSON.parse(result.stdout);
+    assert.equal(plan.endpoint.slug, "alpha");
+    assert.deepEqual(plan.args, ["--permission-mode", "acceptEdits", "--session-id", "sess-1", "--verbose", "hello", "--model", "x"]);
+  } finally {
+    stub.close();
+  }
+});
+
 test("--dry-run codex passes the model through by default and uses -c overrides", async () => {
   const stub = await startStub();
   try {
