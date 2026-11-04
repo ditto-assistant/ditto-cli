@@ -578,7 +578,7 @@ async function cmdAggregate(groupBy: string, options: AggregateOptions): Promise
   if (options.until) args.until = options.until;
   if (options.timezone) args.timezone = options.timezone;
   if (options.filter) args.filter = parseJSONOption(options.filter, "--filter");
-  if (options.kg) args.kg = options.kg;
+  if (options.kg) args.space = options.kg;
   await callAndPrint("aggregate_memories", args, format);
 }
 
@@ -687,7 +687,7 @@ async function cmdFriends(options: CommonOptions): Promise<void> {
 }
 
 async function cmdKnowledgeGraphs(options: CommonOptions): Promise<void> {
-  await callAndPrint("list_knowledge_graphs", {}, parseOutputFormat(options.output));
+  await callAndPrint("list_spaces", {}, parseOutputFormat(options.output));
 }
 
 async function cmdMyMemories(options: MyMemoriesOptions): Promise<void> {
@@ -697,12 +697,12 @@ async function cmdMyMemories(options: MyMemoriesOptions): Promise<void> {
   const offset = parseIntegerOption(options.offset, "--offset");
   if (offset !== undefined) args.offset = offset;
   if (options.source) args.source = options.source;
-  await callAndPrint("list_my_memories", args, parseOutputFormat(options.output));
+  await callAndPrint("list_memories", args, parseOutputFormat(options.output));
 }
 
 async function cmdSubjectEdges(subjectId: string, options: SubjectEdgesOptions): Promise<void> {
   const args: Record<string, unknown> = { subjectId };
-  if (options.kg) args.kg = options.kg;
+  if (options.kg) args.space = options.kg;
   const limit = parseIntegerOption(options.limit, "--limit");
   if (limit !== undefined) args.limit = limit;
   const minWeight = parseNumberOption(options.minWeight, "--min-weight");
@@ -719,7 +719,7 @@ async function cmdGraphSharing(options: GraphSharingOptions): Promise<void> {
   };
   if (options.title !== undefined) args.title = options.title;
   if (options.description !== undefined) args.description = options.description;
-  await callAndPrint("set_knowledge_graph_sharing", args, parseOutputFormat(options.output));
+  await callAndPrint("set_space_sharing", args, parseOutputFormat(options.output));
 }
 
 async function cmdDelete(memoryId: string, options: DeleteOptions): Promise<void> {
@@ -727,7 +727,7 @@ async function cmdDelete(memoryId: string, options: DeleteOptions): Promise<void
     throw new Error("delete: pass --confirm to permanently delete this memory");
   }
   const args: Record<string, unknown> = { memoryId, confirm: true };
-  if (options.kg) args.kg = options.kg;
+  if (options.kg) args.space = options.kg;
   await callAndPrint("delete_memory", args, parseOutputFormat(options.output));
 }
 
@@ -856,7 +856,7 @@ async function cmdGraphsCreate(
   const app = options.app?.trim();
   if (app) args.app = app;
   await callAndPrint(
-    "create_dedicated_graph",
+    "create_space",
     args,
     parseOutputFormat(options.output),
   );
@@ -864,7 +864,7 @@ async function cmdGraphsCreate(
 
 async function cmdGraphsList(options: CommonOptions): Promise<void> {
   await callAndPrint(
-    "list_knowledge_graph_subscriptions",
+    "list_space_subscriptions",
     {},
     parseOutputFormat(options.output),
   );
@@ -872,7 +872,7 @@ async function cmdGraphsList(options: CommonOptions): Promise<void> {
 
 async function cmdGraphsSubscribers(options: CommonOptions): Promise<void> {
   await callAndPrint(
-    "list_knowledge_graph_subscribers",
+    "list_space_subscribers",
     {},
     parseOutputFormat(options.output),
   );
@@ -880,7 +880,7 @@ async function cmdGraphsSubscribers(options: CommonOptions): Promise<void> {
 
 async function cmdGraphsAdd(username: string, options: CommonOptions): Promise<void> {
   await callAndPrint(
-    "subscribe_knowledge_graph",
+    "subscribe_to_space",
     { username },
     parseOutputFormat(options.output),
   );
@@ -888,7 +888,7 @@ async function cmdGraphsAdd(username: string, options: CommonOptions): Promise<v
 
 async function cmdGraphsRemove(username: string, options: CommonOptions): Promise<void> {
   await callAndPrint(
-    "unsubscribe_knowledge_graph",
+    "unsubscribe_from_space",
     { username },
     parseOutputFormat(options.output),
   );
@@ -1136,6 +1136,7 @@ Examples:
   program
     .command("knowledge-graphs")
     .alias("list_knowledge_graphs")
+    .alias("list_spaces")
     .description("list readable workspaces")
     .summary("list readable workspaces")
     .addOption(outputOption())
@@ -1144,6 +1145,7 @@ Examples:
   program
     .command("graph-sharing")
     .alias("set_knowledge_graph_sharing")
+    .alias("set_space_sharing")
     .description("configure whether others can subscribe to your workspace")
     .summary("configure workspace sharing")
     .option("--enable", "allow public subscriptions to your workspace")

@@ -418,7 +418,7 @@ heyditto list --username peyton --limit 10 --output json
 heyditto my-memories --source cli --limit 10 --output json
 ```
 
-`my-memories` is the CLI wrapper for `list_my_memories`. It only lists your
+`my-memories` calls `list_memories` without a username. It only lists your
 saved memories, while `list --username <u>` can switch to public DittoHub
 publishes for another user.
 
