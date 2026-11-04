@@ -55,8 +55,8 @@ fi
 # inference needs native MCP attachment: no Router request will inject tools.
 inference=${DITTO_T3_INFERENCE:-router}
 case "$inference" in
-  router) required_flags='--no-mcp-only --no-mcp --no-remote-control' ;;
-  cliproxy) required_flags='--no-mcp-only --mcp --cliproxy --no-remote-control' ;;
+  router) required_flags='--no-mcp-only --no-mcp --no-remote-control'; minimum_cli=3.4.0 ;;
+  cliproxy) required_flags='--no-mcp-only --mcp --cliproxy --no-remote-control'; minimum_cli=3.5.0 ;;
   *) fail "DITTO_T3_INFERENCE must be router or cliproxy" ;;
 esac
 
@@ -80,7 +80,7 @@ unset CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY
 help_output=$("$heyditto_bin" claude --help 2>&1) || fail "cannot inspect heyditto; check its Node runtime and installation"
 for required_flag in $required_flags; do
   printf '%s\n' "$help_output" | grep -Eq -- "(^|[[:space:],])${required_flag}([[:space:],]|$)" ||
-    fail "heyditto lacks $required_flag; update @heyditto/cli with its supported Node runtime (CLIProxy requires 3.5.0 or newer)"
+    fail "heyditto lacks $required_flag; install @heyditto/cli $minimum_cli or newer with its supported Node runtime"
 done
 
 # A restarted SDK may still supply its fresh-session flag beside --resume.

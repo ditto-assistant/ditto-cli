@@ -5,6 +5,55 @@ Keep the normal Claude instance for its existing subscription. The extra
 instance uses the installed Claude Code harness, Ditto Router inference, and
 the Router's endpoint tools and optimizations.
 
+## Automatic setup
+
+Preview a dedicated Claude provider using local CLIProxy inference and the
+selected endpoint's MCP tools:
+
+```sh
+heyditto t3 setup --endpoint ditto-dev --inference cliproxy --dry-run
+```
+
+Quit T3 Code (or stop its background service yourself), then apply:
+
+```sh
+heyditto t3 setup --endpoint ditto-dev --inference cliproxy
+```
+
+Keep T3 closed until setup finishes. Reopen it and choose **Claude CLIProxy +
+Ditto** in a new chat. The command installs a private launcher, creates an
+isolated Claude config directory, and adds the `claude_ditto_cliproxy` provider.
+It preserves other providers and settings, saves an exact private backup before
+replacing settings, and can be rerun without duplicating the provider. It does
+not mint keys, copy credentials, change the saved default endpoint, stop active
+chats, or send inference requests. Session keys are minted by the launcher when
+a chat starts and revoked on normal exit.
+
+Use `--inference router` for Router inference instead. `--instance` and `--name`
+choose a separate provider id and label. An id belonging to another provider is
+refused rather than overwritten. To update a provider created by this command,
+rerun setup with its id and the new endpoint or inference mode. Its Claude home
+stays the same, and its old launcher is kept intact.
+
+`--base-dir` selects a local T3 installation, defaulting to `T3CODE_HOME` or
+`~/.t3`. Pass the base directory, not its `userdata` child. T3 must already have
+been initialized there. `--heyditto-bin` and `--claude-bin` override executable
+detection. `--json` prints a summary with paths and route choices, never the
+existing settings or their secrets.
+
+T3 CLI v0.1.7 has no provider-settings command. This shortcut updates its local
+`userdata/settings.json` while the server is stopped, rather than invoking a
+nonexistent `t3 provider` command or an undocumented live API. Apply refuses a
+live or unreadable runtime record, changed settings, linked destinations, and
+modified generated launchers. Dry runs are allowed while T3 is open. This
+file-based integration was developed against T3 v0.1.7; verify it after T3
+configuration-schema changes. It currently supports the Claude provider on
+macOS/Linux, not native MCP attachment for Codex.
+
+To undo, disable or remove this dedicated provider in T3; your previous providers
+are preserved. Setup also prints a private backup path. Restore a whole backup
+only with T3 stopped and before making later settings edits you would lose.
+
 ## Install the launcher
 
 Use `@heyditto/cli` **3.4.0 or newer** and a Node runtime supported by that
