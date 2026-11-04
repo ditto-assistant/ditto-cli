@@ -19,15 +19,34 @@ resolve_binary() {
 
 claude_bin=$(resolve_binary "${DITTO_T3_CLAUDE_BIN:-claude}" Claude DITTO_T3_CLAUDE_BIN)
 
-# T3 refreshes versions periodically. This path does not contact Ditto or mint a
-# key, including when its probe supplies extra output/configuration flags.
+# Validate and collect session options before treating -v/--version as a
+# version probe. A version flag cannot stand in for a missing session value.
+session_id=
+take_session_id=false
+resuming=false
 version_probe=false
 for argument in "$@"; do
-  [ "$argument" = -- ] && break
+  if [ "$take_session_id" = true ]; then
+    case "$argument" in
+      ''|-*) fail "--session-id requires a value" ;;
+      *) session_id=$argument ;;
+    esac
+    take_session_id=false
+    continue
+  fi
   case "$argument" in
+    --) break ;;
+    --session-id) take_session_id=true ;;
+    --session-id=|--session-id=-*) fail "--session-id requires a value" ;;
+    --session-id=*) session_id=${argument#--session-id=} ;;
+    --resume|--resume=*|-r|-r?*|--continue|-c) resuming=true ;;
     --version|-v) version_probe=true ;;
   esac
 done
+[ "$take_session_id" = false ] || fail "--session-id requires a value"
+
+# T3 refreshes versions periodically. This path does not contact Ditto or mint a
+# key, including when its probe supplies extra output/configuration flags.
 if [ "$version_probe" = true ]; then
   exec "$claude_bin" "$@"
 fi
@@ -54,28 +73,6 @@ for required_flag in --no-mcp-only --no-mcp --no-remote-control; do
   printf '%s\n' "$help_output" | grep -Eq -- "(^|[[:space:],])${required_flag}([[:space:],]|$)" ||
     fail "heyditto lacks $required_flag; install @heyditto/cli 3.4.0 or newer with its supported Node runtime"
 done
-
-session_id=
-take_session_id=false
-resuming=false
-for argument in "$@"; do
-  if [ "$take_session_id" = true ]; then
-    case "$argument" in
-      ''|-*) fail "--session-id requires a value" ;;
-      *) session_id=$argument ;;
-    esac
-    take_session_id=false
-    continue
-  fi
-  case "$argument" in
-    --) break ;;
-    --session-id) take_session_id=true ;;
-    --session-id=|--session-id=-*) fail "--session-id requires a value" ;;
-    --session-id=*) session_id=${argument#--session-id=} ;;
-    --resume|--resume=*|-r|-r?*|--continue|-c) resuming=true ;;
-  esac
-done
-[ "$take_session_id" = false ] || fail "--session-id requires a value"
 
 # A restarted SDK may still supply its fresh-session flag beside --resume.
 # Claude rejects that combination. Remove both session-id spellings only on

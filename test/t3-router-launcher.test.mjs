@@ -73,13 +73,25 @@ process.stdin.on("end", () => { process.exitCode = Number(process.env.T3_TEST_EX
 
 test("T3 version probes run only Claude, including binary paths with spaces", (t) => {
   const f = fixture(t);
-  for (const args of [["--version"], ["-v"], ["--version", "--output-format", "json"], ["--settings", "config with spaces.json", "-v"]]) {
+  for (const args of [["--version"], ["-v"], ["--version", "--output-format", "json"], ["--settings", "config with spaces.json", "-v"], ["--session-id", "valid-session", "--settings", "config with spaces.json", "--version"]]) {
     const result = f.run(args, { DITTO_T3_HEYDITTO_BIN: "/does/not/exist" });
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout, "2.1.318 (Claude Code)\n");
     assert.deepEqual(f.claudeArgs(), args);
   }
   assert.deepEqual(f.calls(), []);
+});
+
+test("version-like missing session values fail before either executable runs", (t) => {
+  const f = fixture(t);
+  for (const args of [["--session-id", "-v"], ["--session-id", "--version"], ["--version", "--session-id"], ["-v", "--session-id="]]) {
+    const result = f.run(args, { DITTO_T3_HEYDITTO_BIN: "/does/not/exist" });
+    assert.notEqual(result.status, 0);
+    assert.equal(result.stdout, "");
+    assert.match(result.stderr, /--session-id requires a value/);
+  }
+  assert.deepEqual(f.calls(), []);
+  assert.throws(() => f.claudeArgs(), { code: "ENOENT" });
 });
 
 test("a version-like argument after the SDK separator does not bypass heyditto", (t) => {
@@ -170,5 +182,5 @@ test("invalid binaries and missing session values fail with no inference launch"
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /--session-id requires a value/);
   }
-  assert.deepEqual(f.calls(), invalidArgs.map(() => ["claude", "--help"]));
+  assert.deepEqual(f.calls(), [], "invalid session arguments fail before inspecting heyditto");
 });
