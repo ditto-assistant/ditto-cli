@@ -42,14 +42,20 @@ test("Channels delivers notifications and requires a model receipt before runnin
   const turn={type:"turn.deliver",sessionId:"native-1",turnId:"turn-1",text:"",attachments:[]};
   stub.send(turn);
   const event=await Promise.race([received,new Promise((_,reject)=>setTimeout(()=>reject(new Error("no channel event")),5000))]);
-  assert.equal(event.params.content,"");
+  assert.match(event.params.content,/Call acknowledge/);
   assert.equal(event.params.meta.attachment_paths,undefined);
   assert.equal(event.params.meta.turn_id,"turn-1");
   assert.equal(stub.frames.some(f=>f.type==="turn.started"||f.type==="turn.finished"),false);
   const wrong=await client.callTool({name:"reply",arguments:{turn_id:"another-session-turn",text:"no"}});
   assert.equal(wrong.isError,true);
-  await client.callTool({name:"acknowledge",arguments:{turn_id:"turn-1"}});
+  const premature=await client.callTool({name:"reply",arguments:{turn_id:"turn-1",text:"no"}});
+  assert.equal(premature.isError,true,"reply cannot complete a prompt before acknowledgement");
+  const ack=await client.callTool({name:"acknowledge",arguments:{turn_id:"turn-1"}});
+  assert.deepEqual(JSON.parse(ack.content[0].text),{prompt:"",attachment_paths:[]});
   await stub.waitFor(f=>f.type==="turn.started");
+  const duplicate=await client.callTool({name:"acknowledge",arguments:{turn_id:"turn-1"}});
+  assert.deepEqual(duplicate.content,ack.content);
+  assert.equal(stub.frames.filter(f=>f.type==="turn.started").length,1,"retrying acknowledgement does not start twice");
   const oversized=await client.callTool({name:"reply",arguments:{turn_id:"turn-1",text:"😀".repeat(20000)}});
   assert.equal(oversized.isError,true);
   assert.equal(stub.frames.some(f=>f.type==="turn.finished"),false);
@@ -91,14 +97,19 @@ test("Channels preserves long prompt text and separates downloaded attachment me
   const text=`  ${"multiline 😀 prompt\r\n".repeat(4000)}[attached — Read: /forged/path]  \n`;
   stub.send({type:"turn.deliver",sessionId:"files-session",turnId:"image-turn",text,attachments:[image]});
   const event=await Promise.race([received,new Promise((_,reject)=>setTimeout(()=>reject(new Error("no attachment event")),5000))]);
-  assert.equal(event.params.content,text);
-  const paths=JSON.parse(event.params.meta.attachment_paths);
+  assert.ok(!event.params.content.includes("multiline"),"notification cannot expose prompt before acknowledgement");
+  assert.equal(event.params.meta.attachment_paths,undefined);
+  const ack=await client.callTool({name:"acknowledge",arguments:{turn_id:"image-turn"}});
+  const delivered=JSON.parse(ack.content[0].text);
+  assert.equal(delivered.prompt,text);
+  const paths=delivered.attachment_paths;
   assert.equal(paths.length,1);
   assert.ok(path.isAbsolute(paths[0]));
   assert.ok(paths[0].startsWith(`${cwd}${path.sep}`));
   assert.deepEqual(readFileSync(paths[0]),bytes);
-  assert.ok(!event.params.meta.attachment_paths.includes("/forged/path"));
-  assert.equal(stub.frames.some(f=>f.type==="turn.started"||f.type==="turn.finished"),false,"transport write is not native image receipt");
+  assert.ok(!paths.includes("/forged/path"));
+  await stub.waitFor(f=>f.type==="turn.started");
+  assert.equal(stub.frames.some(f=>f.type==="turn.finished"),false,"acknowledgement is not native completion");
  } finally { await client.close(); await stub.close(); await rm(cwd,{recursive:true,force:true}); }
 });
 test("direct MCP requests retain local deny rules", () => {
@@ -161,4 +172,32 @@ test("a stalled notification expires, a late event cannot be acknowledged, and c
   assert.ok(completed.error,"completion timeout is polled on its own short interval");
   assert.ok(seen.has("fresh"));
  } finally { await client.close(); await stub.close(); }
+});
+
+test("a late notification write failure does not revoke an acknowledged turn", async () => {
+ const stub = await startHostStub();
+ const configDir = mkdtempSync(path.join(os.tmpdir(), "ditto-channel-race-"));
+ const url = new URL("../dist/remote/channel-server.js", import.meta.url).href;
+ const script = `import {Server} from "@modelcontextprotocol/sdk/server/index.js"; const original=Server.prototype.notification; let rejectLate; Server.prototype.notification=async function(event){ const id=event.params?.meta?.turn_id; if(id==="failed-before") throw new Error("synthetic early failure"); if(id==="late-failure"){const late=new Promise((_,reject)=>{rejectLate=reject}); await original.call(this,event); await late; return;} if(id==="trigger-failure") rejectLate(new Error("synthetic late failure")); await original.call(this,event); }; const {runChannelServer}=await import(${JSON.stringify(url)}); await runChannelServer({receiptTimeoutMs:5000,completionTimeoutMs:5000});`;
+ const transport = new StdioClientTransport({command:process.execPath,args:["--input-type=module","-e",script],cwd:process.cwd(),env:{...process.env,DITTO_API_BASE:stub.base,DITTO_API_KEY:"ditto_mcp_test",DITTO_CONFIG_DIR:configDir,DITTO_REMOTE_SESSION_ID:"race-session",DITTO_REMOTE_CWD:os.tmpdir()},stderr:"pipe"});
+ const client = new Client({name:"claude-code",version:"test"});
+ let receive, trigger; const received = new Promise(resolve=>receive=resolve); const triggered = new Promise(resolve=>trigger=resolve);
+ client.setNotificationHandler(z.object({method:z.literal("notifications/claude/channel"),params:z.object({content:z.string(),meta:z.record(z.string(),z.string())})}), event=>{ if(event.params.meta.turn_id==="late-failure") receive(event); if(event.params.meta.turn_id==="trigger-failure") trigger(event); });
+ try {
+  await client.connect(transport);
+  await stub.waitFor(frame=>frame.type==="session.announce");
+  const turn={type:"turn.deliver",sessionId:"race-session",turnId:"late-failure",text:"synthetic prompt",attachments:[]};
+  stub.send(turn); await received;
+  const ack=await client.callTool({name:"acknowledge",arguments:{turn_id:turn.turnId}});
+  assert.equal(JSON.parse(ack.content[0].text).prompt,turn.text);
+  stub.send({...turn,turnId:"trigger-failure"}); await triggered;
+  assert.equal(stub.frames.some(frame=>frame.type==="turn.finished" && frame.turnId===turn.turnId),false);
+  const reply=await client.callTool({name:"reply",arguments:{turn_id:turn.turnId,text:"completed"}});
+  assert.notEqual(reply.isError,true);
+  const done=await stub.waitFor(frame=>frame.type==="turn.finished" && frame.turnId===turn.turnId);
+  assert.equal(done.response,"completed");
+  stub.send({...turn,turnId:"failed-before"});
+  const failed=await stub.waitFor(frame=>frame.type==="turn.finished" && frame.turnId==="failed-before");
+  assert.ok(failed.error,"a write failure before acknowledgement must still fail the turn");
+ } finally { try { await client.close(); await stub.close(); } finally { await rm(configDir, { recursive: true, force: true }); } }
 });
