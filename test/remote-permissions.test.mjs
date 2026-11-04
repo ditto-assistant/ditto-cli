@@ -68,7 +68,7 @@ async function world(t) {
   const stub = await startHostStub(); const events = new EventEmitter(); let quiet = 0; let interrupts = 0;
   const session = new RemoteSession({ harness: "claude", sessionId: native, cwd: f.root, mode: "tui", baseUrl: stub.base, apiKey: "ditto_mcp_test", quietFallbackMs: 100, log() {} }, { events });
   session.attachTui({ pid: 1, write() {}, inject: async () => {}, interrupt() { interrupts++; }, quietFor: () => quiet, exit: new Promise(() => {}), kill() {} });
-  t.after(async () => { session.stop(); await stub.close(); for (const [key, value] of Object.entries(env)) if (value === undefined) delete process.env[key]; else process.env[key] = value; });
+  t.after(async () => { await session.stop(); await stub.close(); for (const [key, value] of Object.entries(env)) if (value === undefined) delete process.env[key]; else process.env[key] = value; });
   await session.start();
   const hook = (event, payload = {}) => events.emit("hook", { source: "claude", event, payload: { session_id: native, ...payload } });
   const payload = id => ({ tool_name: "Bash", tool_input: { command: "synthetic", description: "fixture" }, tool_use_id: id, transcript_path: f.file });

@@ -94,13 +94,14 @@ export class RemoteSession {
   private nativeBusy = false;
   // A timed-out native turn may still be running. Reject queued input rather
   // than treating silence as evidence that it is safe to type another prompt.
-  private uncertainCompletion?: { turnId: string; receiptSent: boolean };
+  private uncertainCompletion?: { turnId: string; receiptQueued: boolean };
   private stopHooksUncorrelated = false;
   private nativeEpoch = 0;
   private nativeIdleTimer?: NodeJS.Timeout;
   private readonly idleWaiters = new Set<() => void>();
   private draining = false;
   private stopped = false;
+  private stopTask?: Promise<void>;
   private catalog: CommandEntry[] = [];
   private stopWatching?: () => void;
   private pending?: PendingPrompt;
@@ -165,7 +166,8 @@ export class RemoteSession {
     return ok;
   }
 
-  stop(): void {
+  stop(): Promise<void> {
+    if (this.stopTask) return this.stopTask;
     this.stopped = true;
     // The launcher closes the socket when the PTY exits, possibly before the
     // pending turn's await resumes. Settle this receipt before session.closed.
@@ -175,7 +177,13 @@ export class RemoteSession {
     this.nativeIdle();
     this.canceledSteers.clear();
     this.stopWatching?.();
-    this.host.close();
+    if (this.uncertainCompletion) {
+      this.stopTask = this.host.closeAfterFinals().then(() => undefined);
+    } else {
+      this.host.close();
+      this.stopTask = Promise.resolve();
+    }
+    return this.stopTask;
   }
 
   async refreshCatalog(): Promise<void> {
@@ -198,13 +206,17 @@ export class RemoteSession {
 
   private finishUncertain(): void {
     const pending = this.uncertainCompletion;
-    if (!pending || pending.receiptSent) return;
-    pending.receiptSent = true;
-    this.finish(pending.turnId, { error: "Claude's turn could not be confirmed complete before the terminal exited." });
+    if (!pending || pending.receiptQueued) return;
+    pending.receiptQueued = true;
+    this.host.finalizeSession(this.ctx.sessionId, { type: "turn.finished", turnId: pending.turnId, error: "Claude's turn could not be confirmed complete before the terminal exited." });
   }
 
   private onTurn(frame: TurnDeliverFrame): void {
     this.host.send({ type: "turn.ack", turnId: frame.turnId });
+    if (this.stopped) {
+      this.finish(frame.turnId, { error: "This remote session is closing." });
+      return;
+    }
     if (frame.sessionId !== this.ctx.sessionId) {
       this.finish(frame.turnId, { error: "unknown session on this host" });
       return;
@@ -260,7 +272,10 @@ export class RemoteSession {
 
   private onInterrupt(turnId: string): void {
     const current = this.current;
-    if (!current && this.uncertainCompletion) return;
+    if (!current && this.uncertainCompletion) {
+      this.pendingSteers.get(turnId)?.abort();
+      return;
+    }
     // An uncertain editor refuses every future remote paste, so there is no
     // remote successor to target. Explicit Stop still interrupts this PTY.
     if (!current && this.pty?.inputBlockReason?.()) {
@@ -672,7 +687,7 @@ export class RemoteSession {
           watcher.cancel();
         }
         if (outcome === "uncertain") {
-          this.uncertainCompletion = { turnId, receiptSent: false };
+          this.uncertainCompletion = { turnId, receiptQueued: false };
           this.ctx.log("remote control: Claude's turn could not be confirmed complete. Stop remains available; check the terminal and restart the session before sending again.");
           for (const queued of this.queue.splice(0)) {
             this.finish(queued.turnId, { error: "Claude's turn could not be confirmed complete. Check the terminal and restart the session before sending again." });
@@ -682,10 +697,7 @@ export class RemoteSession {
           // completion, so wait for this terminal process to exit.
           await pty.exit;
           this.finishUncertain();
-          if (!this.stopped) {
-            this.nativeIdle();
-            this.host.closed(this.ctx.sessionId);
-          }
+          if (!this.stopped) this.nativeIdle();
         } else this.finish(turnId, { exitCode: 0, ...(active.interrupted ? { interrupted: true } : {}) });
       } else if (this.runHeadless) {
         const turn = this.runHeadless(text);

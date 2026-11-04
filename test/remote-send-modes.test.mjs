@@ -10,7 +10,7 @@ import { spawnInPty } from "../dist/remote/pty.js";
 import { startHostStub } from "./helpers/host-stub.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-async function world(t, { harness = "claude", mode = "tui", inject, hookCompletionTimeoutMs } = {}) {
+async function world(t, { harness = "claude", mode = "tui", inject, hookCompletionTimeoutMs, finalCloseTimeoutMs = 1000 } = {}) {
   const cwd = await mkdtemp(path.join(os.tmpdir(), "ditto-send-modes-"));
   const prior = process.env.DITTO_CONFIG_DIR;
   process.env.DITTO_CONFIG_DIR = path.join(cwd, "config");
@@ -18,14 +18,15 @@ async function world(t, { harness = "claude", mode = "tui", inject, hookCompleti
   const events = new EventEmitter();
   const calls = [];
   const writes = [];
+  const notes = [];
   let interrupts = 0;
   let quiet = 0;
   let endTerminal;
   const exit = new Promise(resolve => { endTerminal = resolve; });
   const pty = { pid: 1, write(data) { writes.push(data); }, inject: async (...args) => { calls.push(args); await inject?.(...args); }, interrupt() { interrupts++; }, quietFor: () => quiet, exit, kill() {} };
-  const session = new RemoteSession({ harness, mode, cwd, sessionId: "owned-session", apiKey: "ditto_mcp_test", baseUrl: stub.base, log() {}, quietFallbackMs: 400, hookCompletionTimeoutMs }, { events });
+  const session = new RemoteSession({ harness, mode, cwd, sessionId: "owned-session", apiKey: "ditto_mcp_test", baseUrl: stub.base, log(line) { notes.push(line); }, quietFallbackMs: 400, hookCompletionTimeoutMs, hostOptions: { reconnectBaseMs: 20, reconnectMaxMs: 50, finalCloseTimeoutMs } }, { events });
   if (mode === "tui") session.attachTui(pty);
-  t.after(async () => { session.stop(); await stub.close(); if (prior === undefined) delete process.env.DITTO_CONFIG_DIR; else process.env.DITTO_CONFIG_DIR = prior; await rm(cwd, { recursive: true, force: true }); });
+  t.after(async () => { await session.stop(); await stub.close(); if (prior === undefined) delete process.env.DITTO_CONFIG_DIR; else process.env.DITTO_CONFIG_DIR = prior; await rm(cwd, { recursive: true, force: true }); });
   await session.start();
   const send = (turnId, extra = {}) => stub.send({ type: "turn.deliver", sessionId: "owned-session", turnId, text: turnId, ...extra });
   let toolSequence = 0;
@@ -44,7 +45,7 @@ async function world(t, { harness = "claude", mode = "tui", inject, hookCompleti
   };
   const started = (id) => stub.waitFor((f) => f.type === "turn.started" && f.turnId === id);
   const finished = (id) => stub.waitFor((f) => f.type === "turn.finished" && f.turnId === id);
-  return { stub, events, calls, writes, session, send, started, finished, permission, permissionPayload, question, endTerminal: () => endTerminal(0), interrupts: () => interrupts, quiet: () => { quiet = Infinity; }, busy: () => { quiet = 0; } };
+  return { stub, events, calls, writes, notes, session, send, started, finished, permission, permissionPayload, question, endTerminal: () => endTerminal(0), interrupts: () => interrupts, quiet: () => { quiet = Infinity; }, busy: () => { quiet = 0; } };
 }
 
 test("Claude normal FIFO survives immediate steering and stale Stop cannot finish its replacement", async (t) => {
@@ -122,7 +123,7 @@ test("a lost Stop hook fails queued prompts closed and cannot be cleared by a la
   w.endTerminal();
   assert.match((await w.finished("slow")).error, /terminal exited/);
   await w.stub.waitFor(f => f.type === "session.closed");
-  w.session.stop(); await sleep(50);
+  await w.session.stop(); await sleep(50);
   assert.equal(w.stub.frames.filter(f => f.type === "turn.finished" && f.turnId === "slow").length, 1, "exit and stop cannot both finish the receipt");
   assert.equal(w.stub.frames.slice(w.stub.frames.findIndex(f => f.type === "turn.finished" && f.turnId === "slow")).some(f => f.type === "session.status" && f.status === "running"), false, "an exited terminal is never marked running again");
 });
@@ -145,7 +146,7 @@ test("closing an uncertain session reports the active failure before the host cl
   w.events.emit("hook", { source: "claude", event: "UserPromptSubmit", payload: {} });
   w.send("queued"); await w.stub.waitFor(f => f.type === "turn.ack" && f.turnId === "queued");
   w.quiet(); await w.finished("queued");
-  w.session.stop();
+  await w.session.stop();
   assert.match((await w.finished("slow")).error, /terminal exited/);
   await w.stub.waitFor(f => f.type === "session.closed");
   assert.ok(w.stub.frames.findIndex(f => f.type === "turn.finished" && f.turnId === "slow") < w.stub.frames.findIndex(f => f.type === "session.closed"));
@@ -206,6 +207,68 @@ test("a Send now prepared during watchdog expiry cannot inject after uncertainty
   assert.equal(w.calls.length, 1, "no prepared successor is pasted into the terminal");
   w.stub.send({ type: "turn.interrupt", turnId: "slow" });
   await sleep(30); assert.equal(w.interrupts(), 1);
+});
+
+test("a pending Send now can still be canceled after the uncertain terminal exits", { timeout: 6000 }, async t => {
+  const w = await world(t, { hookCompletionTimeoutMs: 600 });
+  w.send("slow"); await w.started("slow");
+  w.events.emit("hook", { source: "claude", event: "UserPromptSubmit", payload: {} });
+  let resume;
+  const gate = new Promise(resolve => { resume = resolve; });
+  const resolveText = w.session.resolveText.bind(w.session);
+  w.session.resolveText = async frame => {
+    if (frame.turnId === "steer") await gate;
+    return resolveText(frame);
+  };
+  w.send("steer", { deliveryMode: "steer" });
+  await w.stub.waitFor(f => f.type === "turn.ack" && f.turnId === "steer");
+  w.send("queued"); await w.stub.waitFor(f => f.type === "turn.ack" && f.turnId === "queued");
+  w.quiet(); await w.finished("queued");
+  w.endTerminal(); await w.finished("slow"); await sleep(30);
+  w.stub.send({ type: "turn.interrupt", turnId: "steer" });
+  await sleep(30); resume();
+  assert.equal((await w.finished("steer")).interrupted, true);
+  assert.equal(w.calls.length, 1, "the canceled steer never reaches a terminal");
+});
+
+test("uncertain terminal exit replays its receipt and close after a temporary disconnect", { timeout: 6000 }, async t => {
+  const w = await world(t, { hookCompletionTimeoutMs: 600 });
+  w.send("slow"); await w.started("slow");
+  w.events.emit("hook", { source: "claude", event: "UserPromptSubmit", payload: {} });
+  w.send("queued"); await w.stub.waitFor(f => f.type === "turn.ack" && f.turnId === "queued");
+  w.quiet(); await w.finished("queued");
+  w.stub.refuseConnections(true); w.stub.dropClients();
+  const deadline = Date.now() + 1000;
+  while (w.session.host.isConnected && Date.now() < deadline) await sleep(5);
+  assert.equal(w.session.host.isConnected, false);
+  w.endTerminal();
+  const closing = w.session.stop();
+  await sleep(60);
+  assert.equal(w.stub.frames.some(f => f.type === "turn.finished" && f.turnId === "slow"), false);
+  w.stub.refuseConnections(false);
+  const receipt = await w.finished("slow");
+  const closed = await w.stub.waitFor(f => f.type === "session.closed" && f._conn === receipt._conn);
+  await closing;
+  const onConnection = w.stub.frames.filter(f => f._conn === receipt._conn);
+  assert.ok(onConnection.findIndex(f => f.type === "session.announce") < onConnection.indexOf(receipt));
+  assert.ok(onConnection.indexOf(receipt) < onConnection.indexOf(closed));
+  assert.equal(w.stub.frames.filter(f => f.type === "turn.finished" && f.turnId === "slow").length, 1);
+});
+
+test("uncertain terminal shutdown is bounded if the host remains offline", { timeout: 6000 }, async t => {
+  const w = await world(t, { hookCompletionTimeoutMs: 600, finalCloseTimeoutMs: 150 });
+  w.send("slow"); await w.started("slow");
+  w.events.emit("hook", { source: "claude", event: "UserPromptSubmit", payload: {} });
+  w.send("queued"); await w.stub.waitFor(f => f.type === "turn.ack" && f.turnId === "queued");
+  w.quiet(); await w.finished("queued");
+  w.stub.refuseConnections(true); w.stub.dropClients();
+  const deadline = Date.now() + 1000;
+  while (w.session.host.isConnected && Date.now() < deadline) await sleep(5);
+  assert.equal(w.session.host.isConnected, false);
+  w.endTerminal(); await w.session.stop();
+  assert.ok(w.notes.some(line => line.includes("could not report the terminal's final state")));
+  await w.session.stop();
+  assert.equal(w.notes.filter(line => line.includes("could not report the terminal's final state")).length, 1);
 });
 
 test("a locally typed native prompt holds remote FIFO until its Stop hook", async (t) => {
