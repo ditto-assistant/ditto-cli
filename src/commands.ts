@@ -6,6 +6,7 @@ import { launchHarness, pickEndpoint } from "./agents/launch.js";
 import { listSessions, removeSession } from "./agents/sessions.js";
 import { DEFAULT_LAUNCH_EXPIRY, HARNESSES, type Harness, KEY_EXPIRIES, type KeyExpiry, apiRootOf } from "./agents/types.js";
 import {
+  ApiError,
   BILLING_MODES,
   CONTEXT_COMPACTION_LEVELS,
   type ChatAgent,
@@ -27,6 +28,7 @@ import {
   ROUTING_MODES,
   STREAM_GRANULARITIES,
   USAGE_WINDOWS,
+  apiErrorCode,
   createEndpoint,
   createKey,
   deleteEndpoint,
@@ -34,12 +36,14 @@ import {
   getEndpoint,
   getEndpointUsage,
   isEndpointPending,
+  listArchivedEndpoints,
   listChatAgents,
   listEndpoints,
   listCompanies,
   listKeys,
   resolveCompany,
   revokeKey,
+  unarchiveEndpoint,
   updateEndpoint,
 } from "./api.js";
 import { openInBrowser } from "./browser.js";
@@ -70,6 +74,7 @@ interface EndpointsOptions {
   output?: string;
   setDefault?: string;
   clearDefault?: boolean;
+  archived?: boolean;
 }
 
 function pad(s: string, n: number): string {
@@ -144,6 +149,11 @@ async function endpointJSON(e: InferenceEndpoint): Promise<Record<string, unknow
 
 export async function cmdEndpoints(options: EndpointsOptions): Promise<void> {
   if (options.setDefault && options.clearDefault) throw new Error("use either --set-default or --clear-default");
+  if (options.archived) {
+    if (options.setDefault || options.clearDefault) throw new Error("--archived lists archived endpoints only; it cannot be combined with --set-default or --clear-default");
+    await listArchived(options);
+    return;
+  }
   const catalog = await listEndpoints();
   if (options.clearDefault) {
     await updateStoredAuth({ defaultEndpoint: undefined });
@@ -185,6 +195,24 @@ export async function cmdEndpoints(options: EndpointsOptions): Promise<void> {
   }
   process.stdout.write(`\nGateway: ${catalog.baseUrl}${defaultSlug ? `  (* = default)` : ""}\n`);
   await noteActivation(catalog.endpoints);
+}
+
+/** `heyditto endpoints list --archived`: archived endpoints with when they were archived. */
+async function listArchived(options: { output?: string }): Promise<void> {
+  const catalog = await listArchivedEndpoints();
+  if (isJSON(options)) {
+    process.stdout.write(`${JSON.stringify(catalog, null, 2)}\n`);
+    return;
+  }
+  if (catalog.endpoints.length === 0) {
+    process.stdout.write("No archived endpoints.\n");
+    return;
+  }
+  printTable(
+    ["SLUG", "MODEL", "ARCHIVED"],
+    catalog.endpoints.map((e) => [e.slug, e.model, e.archivedAt ? e.archivedAt.slice(0, 16).replace("T", " ") : ""]),
+  );
+  process.stdout.write("\nRestore one with `heyditto endpoints unarchive <slug>`.\n");
 }
 
 interface EndpointCreateOptions {
@@ -838,19 +866,78 @@ export async function cmdEndpointUsage(ref: string, options: { window?: string; 
   if (t.requests === 0) process.stdout.write(`No gateway requests in this window. Point a client at ${endpoint.slug} and check back.\n`);
 }
 
-export async function cmdEndpointDelete(ref: string, options: { yes?: boolean; output?: string }): Promise<void> {
+/** What archiving does, shared by the help text and the success message. */
+const ARCHIVE_EFFECTS =
+  "it stops serving and its keys stop working while archived; threads, traces, usage and keys are kept";
+
+/** `heyditto endpoints archive` (alias `delete`): the API route is DELETE, which archives. */
+export async function cmdEndpointArchive(ref: string, options: { yes?: boolean; output?: string }): Promise<void> {
   const { endpoint } = await getEndpoint(ref);
-  await confirmElevated("delete", endpoint.slug, options.yes);
+  await confirmElevated("archive", endpoint.slug, options.yes);
   await deleteEndpoint(endpoint.id);
   const stored = await readStoredAuth();
   if (stored?.defaultEndpoint === endpoint.slug || stored?.defaultEndpoint === endpoint.id) {
     await updateStoredAuth({ defaultEndpoint: undefined });
   }
   if (isJSON(options)) {
-    process.stdout.write(`${JSON.stringify({ deleted: endpoint.id, slug: endpoint.slug }, null, 2)}\n`);
+    // `deleted` is kept for scripts written against the old `endpoints delete`.
+    process.stdout.write(`${JSON.stringify({ archived: endpoint.id, deleted: endpoint.id, slug: endpoint.slug }, null, 2)}\n`);
     return;
   }
-  process.stdout.write(`Deleted endpoint ${endpoint.slug}. Its keys stop working immediately; threads and traces are kept.\n`);
+  process.stdout.write(
+    `Archived endpoint ${endpoint.slug}: ${ARCHIVE_EFFECTS}.\nRestore it with \`heyditto endpoints unarchive ${endpoint.slug}\`.\n`,
+  );
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Turns the unarchive route's refusals into the next step the user can take. */
+function unarchiveError(err: unknown, label: string): Error {
+  if (!(err instanceof ApiError)) return err instanceof Error ? err : new Error(String(err));
+  const code = apiErrorCode(err);
+  if (err.status === 409 || code === "endpoint_slug_taken") {
+    return new Error(
+      `cannot restore ${label}: a live endpoint now uses the slug "${label}". Archive or rename that endpoint (\`heyditto endpoints archive ${label}\`), then try again.`,
+    );
+  }
+  if (err.status === 402 || /limit/i.test(code ?? "")) {
+    return new Error(
+      `cannot restore ${label}: you have no free endpoint slot. Archive an endpoint you no longer use, or upgrade your plan, then try again.`,
+    );
+  }
+  if (err.status === 404) {
+    return new Error(`no archived endpoint "${label}" you can restore. See \`heyditto endpoints list --archived\`.`);
+  }
+  if (err.status === 403) return new Error(`cannot restore ${label}: ${err.message}`);
+  return err;
+}
+
+/** `heyditto endpoints unarchive <slug|id>`: resolves among ARCHIVED endpoints, then restores. */
+export async function cmdEndpointUnarchive(ref: string, options: { output?: string }): Promise<void> {
+  const wanted = ref.trim();
+  const archived = await listArchivedEndpoints();
+  const match = findEndpoint(archived.endpoints, wanted);
+  if (!match && !UUID_RE.test(wanted)) {
+    throw new Error(
+      `no archived endpoint named "${wanted}". Archived: ${archived.endpoints.map((e) => e.slug).join(", ") || "(none)"}`,
+    );
+  }
+  const id = match?.id ?? wanted;
+  const label = match?.slug ?? wanted;
+  let restored: InferenceEndpoint;
+  try {
+    restored = await unarchiveEndpoint(id);
+  } catch (err) {
+    throw unarchiveError(err, label);
+  }
+  if (isJSON(options)) {
+    process.stdout.write(`${JSON.stringify(await endpointJSON(restored), null, 2)}\n`);
+    return;
+  }
+  process.stdout.write(
+    `Restored endpoint ${restored.slug}. Keys that were active when it was archived work again (unless they have since expired or been revoked).\n`,
+  );
+  await noteActivation([restored]);
 }
 
 export async function cmdEndpointKeys(ref: string, options: { output?: string }): Promise<void> {
@@ -1098,8 +1185,9 @@ export function registerEndpointCommands(
     .addHelpText(
       "after",
       `
-Endpoint controls spend your Ditto credits, so delete, key revocation and
+Endpoint controls spend your Ditto credits, so archive, key revocation and
 spend-limit increases ask you to type the slug back (or pass --yes).
+Archiving keeps threads, traces, usage and keys; restore with 'unarchive'.
 'keys create' mints a key straight into a secret manager via its own CLI
 through the gh CLI; the plaintext never reaches your terminal.`,
     );
@@ -1109,10 +1197,12 @@ through the gh CLI; the plaintext never reaches your terminal.`,
       .description("list your inference endpoints (* = default)")
       .option("--set-default <slug>", "endpoint to use when --endpoint is omitted")
       .option("--clear-default", "forget the default endpoint")
+      .option("--archived", "list archived endpoints instead (restore with `endpoints unarchive`)")
       .addOption(outputOption())
       .action(cmdEndpoints),
     `  heyditto endpoints
   heyditto endpoints --set-default my-endpoint
+  heyditto endpoints list --archived
   heyditto endpoints list --output json`,
   );
   addExamples(
@@ -1267,13 +1357,30 @@ through the gh CLI; the plaintext never reaches your terminal.`,
     `  heyditto endpoints usage my-endpoint
   heyditto endpoints usage my-endpoint --window 7d --output json`,
   );
-  endpoints
-    .command("delete")
-    .description("delete an endpoint (keys stop working; threads and traces are kept)")
-    .argument("<endpoint>", "endpoint slug or id")
-    .option("--yes", "skip the confirmation prompt")
-    .addOption(outputOption())
-    .action(cmdEndpointDelete);
+  addExamples(
+    endpoints
+      .command("archive")
+      .alias("delete")
+      .description(
+        "archive an endpoint: it stops serving and its keys stop working while archived; threads, traces, usage and keys are kept (restore with `endpoints unarchive`)",
+      )
+      .argument("<endpoint>", "endpoint slug or id")
+      .option("--yes", "skip the confirmation prompt")
+      .addOption(outputOption())
+      .action(cmdEndpointArchive),
+    `  heyditto endpoints archive my-endpoint
+  heyditto endpoints unarchive my-endpoint`,
+  );
+  addExamples(
+    endpoints
+      .command("unarchive")
+      .description("restore an archived endpoint; keys that were active when it was archived work again")
+      .argument("<endpoint>", "archived endpoint slug or id (see `endpoints list --archived`)")
+      .addOption(outputOption())
+      .action(cmdEndpointUnarchive),
+    `  heyditto endpoints list --archived
+  heyditto endpoints unarchive my-endpoint`,
+  );
   const keys = endpoints
     .command("keys")
     .description("list an endpoint's API keys")

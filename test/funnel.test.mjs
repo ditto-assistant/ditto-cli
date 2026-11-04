@@ -276,9 +276,10 @@ test("endpoints group help works without auth", () => {
   const top = run(["endpoints", "--help"]);
   assert.equal(top.status, 0, top.stderr);
   assert.match(top.stdout, /Usage: heyditto endpoints/);
-  for (const sub of ["list", "create", "show", "use", "pick", "open", "set", "delete", "keys"]) {
+  for (const sub of ["list", "create", "show", "use", "pick", "open", "set", "archive", "unarchive", "keys"]) {
     assert.match(top.stdout, new RegExp(`^\\s+${sub}\\b`, "m"), `missing subcommand ${sub}`);
   }
+  assert.match(top.stdout, /^\s+archive\|delete\b/m, "delete must stay an alias of archive");
   const usage = run(["endpoints", "usage", "--help"]);
   assert.equal(usage.status, 0);
   assert.match(usage.stdout, /Usage: heyditto endpoints usage/);
@@ -405,7 +406,7 @@ test("endpoints create makes the first endpoint the default and prints the launc
   }
 });
 
-test("endpoints delete needs --yes without a TTY, then sends DELETE and clears the default", async () => {
+test("endpoints delete (alias of archive) needs --yes without a TTY, then sends DELETE and clears the default", async () => {
   const stub = await startStub();
   const configDir = mkdtempSync(path.join(os.tmpdir(), "heyditto-funnel-cfg-"));
   writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ apiKey: "ditto_mcp_test", defaultEndpoint: "alpha" }));
@@ -413,12 +414,12 @@ test("endpoints delete needs --yes without a TTY, then sends DELETE and clears t
   try {
     const refused = await runAsync(["endpoints", "delete", "alpha"], env);
     assert.equal(refused.status, 1);
-    assert.match(refused.stderr, /refusing to delete "alpha" without confirmation/);
+    assert.match(refused.stderr, /refusing to archive "alpha" without confirmation/);
     assert.ok(!stub.calls.some((c) => c.method === "DELETE"), "must not delete without confirmation");
 
     const deleted = await runAsync(["endpoints", "delete", "alpha", "--yes"], env);
     assert.equal(deleted.status, 0, deleted.stderr);
-    assert.match(deleted.stdout, /Deleted endpoint alpha/);
+    assert.match(deleted.stdout, /Archived endpoint alpha/);
     assert.ok(stub.calls.some((c) => c.method === "DELETE" && c.url === `/api/v5/inference/endpoints/${ALPHA.id}`));
     assert.equal(JSON.parse(readFileSync(path.join(configDir, "config.json"), "utf8")).defaultEndpoint, undefined);
 
