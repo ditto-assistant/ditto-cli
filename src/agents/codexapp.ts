@@ -19,6 +19,7 @@ import { openInBrowser } from "../browser.js";
 import { endpointURL, resolveApiKey } from "../config.js";
 import { deviceLogin } from "../device-login.js";
 import { formatActivation } from "../endpoint-format.js";
+import { addProfileOption, explicitProfileEndpoint, readDefaultEndpoint } from "../profiles.js";
 import { readStoredAuth, saveLogin, updateStoredAuth } from "../store.js";
 import { err as c } from "../ui.js";
 import { assertEndpointActive, pickEndpoint } from "./launch.js";
@@ -218,13 +219,13 @@ async function confirmYes(question: string): Promise<boolean> {
 async function resolveEndpointFor(options: CodexAppOptions, selected: SelectedEndpoint | undefined): Promise<{ endpoint: InferenceEndpoint; catalog: InferenceEndpointsResponse }> {
   const catalog = await listEndpoints();
   const endpoints = catalog.endpoints;
-  const stored = (await readStoredAuth())?.defaultEndpoint;
-  const wanted = options.endpoint?.trim();
+  const wanted = options.endpoint?.trim() || (await explicitProfileEndpoint())?.endpoint;
   if (wanted) {
     const match = findEndpoint(endpoints, wanted);
     if (match) return { endpoint: match, catalog };
     throw new Error(`no endpoint named "${wanted}". Available: ${endpoints.map((e) => e.slug).join(", ")}`);
   }
+  const stored = await readDefaultEndpoint();
   if (selected) {
     const match = findEndpoint(endpoints, selected.id) ?? findEndpoint(endpoints, selected.slug);
     if (match) return { endpoint: match, catalog };
@@ -480,7 +481,7 @@ export async function runCodexApp(options: CodexAppOptions): Promise<void> {
 /** Registers `codex-app` on the program (which must have enablePositionalOptions()). */
 export function registerCodexAppCommand(program: Command, addExamples: (c: Command, ex: string) => Command): void {
   addExamples(
-    program
+    addProfileOption(program
       .command("codex-app")
       .description(
         'wire the Codex desktop app (ChatGPT.app) to a Ditto inference endpoint, so its models work behind the app\'s "Sign in with an API key"',
@@ -502,7 +503,7 @@ export function registerCodexAppCommand(program: Command, addExamples: (c: Comma
       .option("--dry-run", "print what would be written without touching anything")
       .action(async (options: CodexAppOptions) => {
         await runCodexApp(options);
-      }),
+      })),
     `  heyditto codex-app                          sign in, pick an endpoint, wire the app
   heyditto codex-app --endpoint my-endpoint --budget 500000
   heyditto codex-app --model glm-5.3-flash    pin the app's model

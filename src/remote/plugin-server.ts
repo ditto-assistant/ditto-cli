@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { apiFetch, findEndpoint, listEndpoints } from "../api.js";
 import { resolveApiKey } from "../config.js";
 import { findProfileEndpoint, repoDefaultProfile } from "../dittoconfig/profiles.js";
-import { readStoredAuth } from "../store.js";
+import { readDefaultEndpoint } from "../profiles.js";
 import { runChannelServer } from "./channel-server.js";
 import { remoteSessionURL } from "./session-link.js";
 
@@ -30,7 +30,7 @@ export async function preparePluginSession(cwd = process.env.DITTO_REMOTE_CWD ??
   const catalog = await listEndpoints();
   const explicit = process.env.DITTO_REMOTE_ENDPOINT?.trim();
   const profile = explicit ? undefined : await repoDefaultProfile(cwd);
-  const selected = explicit ?? (await readStoredAuth())?.defaultEndpoint;
+  const selected = explicit ?? (await readDefaultEndpoint());
   const endpoint = profile
     ? await findProfileEndpoint(profile, catalog.endpoints)
     : selected ? findEndpoint(catalog.endpoints, selected) : catalog.endpoints.length === 1 ? catalog.endpoints[0] : undefined;

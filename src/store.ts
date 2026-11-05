@@ -1,6 +1,7 @@
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { authFilePath } from "./config.js";
+import { type EndpointProfile, profileView, setProfileEndpointPatch } from "./profile-state.js";
 
 export interface StoredAuth {
   apiKey?: string;
@@ -10,8 +11,16 @@ export interface StoredAuth {
   agentCaller?: string;
   claimURL?: string;
   createdAt?: string;
-  /** Endpoint slug or id used by `heyditto claude` / `heyditto codex` when --endpoint is omitted. */
+  /**
+   * Endpoint slug or id used by `heyditto claude` / `heyditto codex` when
+   * --endpoint is omitted. With named profiles this mirrors the active
+   * profile's endpoint, so older CLI versions keep launching the same thing.
+   */
   defaultEndpoint?: string;
+  /** Named endpoint profiles (`heyditto profile`); never holds credentials. */
+  profiles?: Record<string, EndpointProfile>;
+  /** Name of the profile used when neither --profile nor DITTO_PROFILE is set. */
+  activeProfile?: string;
   /**
    * Organization slug used when `--org` is omitted, set by `heyditto orgs use`.
    *
@@ -111,7 +120,12 @@ export async function saveLogin(key: string, extra: { defaultEndpoint?: string }
     claimURL: undefined,
     createdAt: new Date().toISOString(),
   };
-  if (extra.defaultEndpoint) partial.defaultEndpoint = extra.defaultEndpoint;
+  if (extra.defaultEndpoint) {
+    // Saved into the active profile (and its `defaultEndpoint` mirror), so a
+    // re-login cannot silently desynchronize the two.
+    const current = await readStoredAuth();
+    Object.assign(partial, setProfileEndpointPatch(current, profileView(current).active, extra.defaultEndpoint));
+  }
   return updateStoredAuth(partial);
 }
 

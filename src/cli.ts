@@ -41,6 +41,7 @@ import { deviceLogin } from "./device-login.js";
 import { registerSelfUpdateCommands } from "./self-update.js";
 import { registerRelayCommands } from "./relay/commands.js";
 import { registerT3Commands } from "./t3/setup.js";
+import { addProfileOption, installProfileHook, registerProfileCommands, selectedProfile } from "./profiles.js";
 
 type OutputFormat = "json" | "text" | "markdown" | "raw";
 const OUTPUT_FORMATS: readonly OutputFormat[] = ["json", "text", "markdown", "raw"];
@@ -444,13 +445,15 @@ async function cmdLogin(keyArg: string | undefined, options: LoginOptions): Prom
   }
 
   const stored = await saveLogin(key, defaultEndpoint ? { defaultEndpoint } : {});
+  const active = await selectedProfile();
+  const inProfile = active.implicit ? "" : ` (profile ${active.name})`;
   process.stdout.write(`${viaDevice ? "Logged in. " : ""}Saved key to ${authFilePath()}\n`);
   if (defaultEndpoint) {
-    process.stdout.write(`Default endpoint: ${defaultEndpoint}\n`);
+    process.stdout.write(`Default endpoint: ${defaultEndpoint}${inProfile}\n`);
   } else if (pickedEndpoint) {
     process.stdout.write(`Endpoint picked in the browser: ${pickedEndpoint} (make it the default with 'heyditto endpoints use ${pickedEndpoint}')\n`);
   } else if (stored.defaultEndpoint) {
-    process.stdout.write(`Default endpoint: ${stored.defaultEndpoint} (kept)\n`);
+    process.stdout.write(`Default endpoint: ${stored.defaultEndpoint}${inProfile} (kept)\n`);
   }
   if (process.env.DITTO_API_KEY) {
     process.stderr.write(
@@ -812,6 +815,7 @@ async function cmdDelete(memoryId: string, options: DeleteOptions): Promise<void
 interface StatusReport {
   session?: { id: string; name?: string; source: "env" | "config" };
   defaultEndpoint?: string;
+  profile?: { name: string; source: "flag" | "env" | "active"; endpoint?: string; count: number };
   package: string;
   version: string;
   endpoint: string;
@@ -843,7 +847,11 @@ async function cmdStatus(options: CommonOptions): Promise<void> {
     apiKey: { present: !!key, source },
   };
   if (session) report.session = { id: session.id, name: session.name, source: session.source };
-  if (stored?.defaultEndpoint) report.defaultEndpoint = stored.defaultEndpoint;
+  const profile = await selectedProfile();
+  if (profile.profile.endpoint) report.defaultEndpoint = profile.profile.endpoint;
+  if (!profile.implicit || profile.source !== "active") {
+    report.profile = { name: profile.name, source: profile.source, endpoint: profile.profile.endpoint, count: Object.keys(stored?.profiles ?? {}).length };
+  }
   if (source === "config" && stored?.agentMode) {
     report.agent = {
       enabled: true,
@@ -898,6 +906,7 @@ async function cmdStatus(options: CommonOptions): Promise<void> {
   } else if (report.connect && !report.connect.ok) {
     lines.push(`connect:   FAILED - ${report.connect.error}`);
   }
+  if (report.profile) lines.push(`profile:   ${report.profile.name}${report.profile.source === "env" ? "  (DITTO_PROFILE)" : report.profile.source === "flag" ? "  (--profile)" : ""}`);
   if (report.defaultEndpoint) lines.push(`endpoint:  ${report.defaultEndpoint}  (default for heyditto claude / codex)`);
   if (report.agent?.claimURL) {
     lines.push(`agent:     unclaimed (${report.agent.caller || "agent"})`, `claim:     ${report.agent.claimURL}`);
@@ -1324,7 +1333,9 @@ your own workspace or an app workspace.`,
     .addOption(hiddenOutputOption())
     .action(cmdLogin);
 
+  installProfileHook(program);
   registerEndpointCommands(program, addExamples, outputOption);
+  registerProfileCommands(program, addExamples, outputOption);
   registerAppCommands(program, addExamples, outputOption);
   registerOrgCommands(program, addExamples, outputOption, orgOption,
     (name, args, output) => callAndPrint(name, args, parseOutputFormat(output), true));
@@ -1455,11 +1466,11 @@ your own workspace or an app workspace.`,
     .addOption(hiddenOutputOption())
     .action(cmdLogout);
 
-  program
+  addProfileOption(program
     .command("status")
     .description("show CLI auth and endpoint status")
     .addOption(outputOption())
-    .action(cmdStatus);
+    .action(cmdStatus));
 
   program
     .command("config")

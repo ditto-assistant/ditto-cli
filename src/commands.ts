@@ -66,7 +66,8 @@ import {
   startSession,
   useSession,
 } from "./mcp-session.js";
-import { readStoredAuth, updateStoredAuth } from "./store.js";
+import { addProfileOption, forgetEndpointInProfiles, readDefaultEndpoint, renameEndpointInProfiles, selectedProfile, writeDefaultEndpoint } from "./profiles.js";
+import { readStoredAuth } from "./store.js";
 
 interface EndpointsOptions {
   output?: string;
@@ -145,6 +146,12 @@ async function endpointJSON(e: InferenceEndpoint): Promise<Record<string, unknow
   };
 }
 
+/** " (profile subnet)" when named profiles are in use, so a write says where it went. */
+async function profileSuffix(name: string): Promise<string> {
+  const selected = await selectedProfile();
+  return selected.implicit ? "" : ` (profile ${name})`;
+}
+
 export async function cmdEndpoints(options: EndpointsOptions): Promise<void> {
   if (options.setDefault && options.clearDefault) throw new Error("use either --set-default or --clear-default");
   if (options.archived) {
@@ -154,8 +161,8 @@ export async function cmdEndpoints(options: EndpointsOptions): Promise<void> {
   }
   const catalog = await listEndpoints();
   if (options.clearDefault) {
-    await updateStoredAuth({ defaultEndpoint: undefined });
-    process.stderr.write("Cleared the default endpoint.\n");
+    const name = await writeDefaultEndpoint(undefined);
+    process.stderr.write(`Cleared the default endpoint${await profileSuffix(name)}.\n`);
   }
   if (options.setDefault) {
     const wanted = options.setDefault.trim();
@@ -163,10 +170,10 @@ export async function cmdEndpoints(options: EndpointsOptions): Promise<void> {
     if (!match) {
       throw new Error(`no endpoint named "${wanted}". Available: ${catalog.endpoints.map((e) => e.slug).join(", ") || "(none)"}`);
     }
-    await updateStoredAuth({ defaultEndpoint: match.slug });
-    process.stderr.write(`Default endpoint set to ${match.slug}.\n`);
+    const name = await writeDefaultEndpoint(match.slug);
+    process.stderr.write(`Default endpoint set to ${match.slug}${await profileSuffix(name)}.\n`);
   }
-  const defaultSlug = (await readStoredAuth())?.defaultEndpoint;
+  const defaultSlug = await readDefaultEndpoint();
   if (isJSON(options)) {
     const endpoints = await Promise.all(catalog.endpoints.map(endpointJSON));
     process.stdout.write(`${JSON.stringify({ ...catalog, endpoints, defaultEndpoint: defaultSlug ?? null }, null, 2)}\n`);
@@ -237,11 +244,11 @@ export async function cmdEndpointCreate(options: EndpointCreateOptions): Promise
   const company = options.org?.trim() ? await resolveCompany(options.org) : undefined;
   if (company) input.companyId = company.id;
   const created = await createEndpoint(input);
-  const stored = await readStoredAuth();
-  const makeDefault = options.default || !stored?.defaultEndpoint;
-  if (makeDefault) await updateStoredAuth({ defaultEndpoint: created.slug });
+  const previousDefault = await readDefaultEndpoint();
+  const makeDefault = options.default || !previousDefault;
+  if (makeDefault) await writeDefaultEndpoint(created.slug);
   if (isJSON(options)) {
-    process.stdout.write(`${JSON.stringify({ ...(await endpointJSON(created)), defaultEndpoint: makeDefault ? created.slug : (stored?.defaultEndpoint ?? null) }, null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify({ ...(await endpointJSON(created)), defaultEndpoint: makeDefault ? created.slug : (previousDefault ?? null) }, null, 2)}\n`);
   } else {
     process.stdout.write(`Created endpoint ${created.slug} (model ${created.model})${company ? ` in ${company.slug}, which owns and pays for it` : ""}${makeDefault ? " — now the default" : ""}.\n`);
     if (!isEndpointPending(created)) {
@@ -305,7 +312,7 @@ async function ownerWord(endpoint: { companyId?: string }): Promise<string> {
 
 export async function cmdEndpointShow(ref: string, options: { output?: string }): Promise<void> {
   const { endpoint, catalog } = await getEndpoint(ref);
-  const defaultSlug = (await readStoredAuth())?.defaultEndpoint;
+  const defaultSlug = await readDefaultEndpoint();
   if (isJSON(options)) {
     process.stdout.write(`${JSON.stringify({ ...(await endpointJSON(endpoint)), baseUrl: catalog.baseUrl, isDefault: endpoint.slug === defaultSlug }, null, 2)}\n`);
     return;
@@ -421,12 +428,12 @@ function codingAgentLines(endpoint: InferenceEndpoint): string[] {
 
 export async function cmdEndpointUse(ref: string, options: { output?: string }): Promise<void> {
   const { endpoint } = await getEndpoint(ref);
-  await updateStoredAuth({ defaultEndpoint: endpoint.slug });
+  const profile = await writeDefaultEndpoint(endpoint.slug);
   if (isJSON(options)) {
-    process.stdout.write(`${JSON.stringify({ defaultEndpoint: endpoint.slug }, null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify({ defaultEndpoint: endpoint.slug, profile }, null, 2)}\n`);
     return;
   }
-  process.stdout.write(`Default endpoint set to ${endpoint.slug}.\n`);
+  process.stdout.write(`Default endpoint set to ${endpoint.slug}${await profileSuffix(profile)}.\n`);
   await noteActivation([endpoint]);
 }
 
@@ -435,21 +442,21 @@ export async function cmdEndpointPick(options: { output?: string }): Promise<voi
   if (catalog.endpoints.length === 0) {
     throw new Error("you have no inference endpoints yet. Create one with `heyditto endpoints create`.");
   }
-  const stored = (await readStoredAuth())?.defaultEndpoint;
+  const stored = await readDefaultEndpoint();
   const picked = await pickEndpoint(catalog.endpoints, stored);
-  await updateStoredAuth({ defaultEndpoint: picked.slug });
+  const profile = await writeDefaultEndpoint(picked.slug);
   if (isJSON(options)) {
-    process.stdout.write(`${JSON.stringify({ defaultEndpoint: picked.slug }, null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify({ defaultEndpoint: picked.slug, profile }, null, 2)}\n`);
     return;
   }
-  process.stdout.write(`Default endpoint set to ${picked.slug}.\n`);
+  process.stdout.write(`Default endpoint set to ${picked.slug}${await profileSuffix(profile)}.\n`);
   await noteActivation([picked]);
 }
 
 export async function cmdEndpointOpen(ref: string | undefined, options: { print?: boolean }): Promise<void> {
   // The developer console addresses endpoints by id; resolve the slug (or the
   // stored default) through the catalog. No target → the endpoints list.
-  const target = ref ?? (await readStoredAuth())?.defaultEndpoint;
+  const target = ref ?? (await readDefaultEndpoint());
   const id = target ? (await getEndpoint(target)).endpoint.id : undefined;
   const url = endpointURL(id);
   process.stdout.write(`${url}\n`);
@@ -797,9 +804,7 @@ export async function cmdEndpointSet(ref: string, options: EndpointSetOptions): 
   if (raisesSpend) await confirmElevated("raise the spend limit of", endpoint.slug, options.yes);
 
   const updated = await updateEndpoint(endpoint.id, patch);
-  if (updated.slug !== endpoint.slug && (await readStoredAuth())?.defaultEndpoint === endpoint.slug) {
-    await updateStoredAuth({ defaultEndpoint: updated.slug });
-  }
+  if (updated.slug !== endpoint.slug) await renameEndpointInProfiles(endpoint.slug, updated.slug);
   if (isJSON(options)) {
     process.stdout.write(`${JSON.stringify(await endpointJSON(updated), null, 2)}\n`);
     return;
@@ -873,10 +878,7 @@ export async function cmdEndpointArchive(ref: string, options: { yes?: boolean; 
   const { endpoint } = await getEndpoint(ref);
   await confirmElevated("archive", endpoint.slug, options.yes);
   await deleteEndpoint(endpoint.id);
-  const stored = await readStoredAuth();
-  if (stored?.defaultEndpoint === endpoint.slug || stored?.defaultEndpoint === endpoint.id) {
-    await updateStoredAuth({ defaultEndpoint: undefined });
-  }
+  await forgetEndpointInProfiles([endpoint.slug, endpoint.id]);
   if (isJSON(options)) {
     // `deleted` is kept for scripts written against the old `endpoints delete`.
     process.stdout.write(`${JSON.stringify({ archived: endpoint.id, deleted: endpoint.id, slug: endpoint.slug }, null, 2)}\n`);
@@ -1190,21 +1192,21 @@ Archiving keeps threads, traces, usage and keys; restore with 'unarchive'.
 through the gh CLI; the plaintext never reaches your terminal.`,
     );
   addExamples(
-    endpoints
+    addProfileOption(endpoints
       .command("list", { isDefault: true })
       .description("list your inference endpoints (* = default)")
       .option("--set-default <slug>", "endpoint to use when --endpoint is omitted")
       .option("--clear-default", "forget the default endpoint")
       .option("--archived", "list archived endpoints instead (restore with `endpoints unarchive`)")
       .addOption(outputOption())
-      .action(cmdEndpoints),
+      .action(cmdEndpoints)),
     `  heyditto endpoints
   heyditto endpoints --set-default my-endpoint
   heyditto endpoints list --archived
   heyditto endpoints list --output json`,
   );
   addExamples(
-    endpoints
+    addProfileOption(endpoints
       .command("create")
       .description("create an endpoint (one click: name, slug and model are generated when omitted)")
       .option("--name <name>", "display name")
@@ -1215,7 +1217,7 @@ through the gh CLI; the plaintext never reaches your terminal.`,
       .option("--org <org>", "file it under this organization (slug or id), which owns and pays for it")
       .option("--default", "make it the default for heyditto claude / codex (automatic when you have no default yet)")
       .addOption(outputOption())
-      .action(cmdEndpointCreate),
+      .action(cmdEndpointCreate)),
     `  heyditto endpoints create
   heyditto endpoints create --name "Work laptop" --model anthropic/claude-sonnet-5 --default
   heyditto endpoints create --org omniaura --billing-mode byok --provider-key <uuid>`,
@@ -1259,29 +1261,29 @@ through the gh CLI; the plaintext never reaches your terminal.`,
         for (const model of result.models) process.stdout.write(`${model.id}  ${model.name ?? ""}\n`);
       }
     });
-  endpoints
+  addProfileOption(endpoints
     .command("show")
     .description("show one endpoint's settings")
     .argument("<endpoint>", "endpoint slug or id")
     .addOption(outputOption())
-    .action(cmdEndpointShow);
-  endpoints
+    .action(cmdEndpointShow));
+  addProfileOption(endpoints
     .command("use")
     .description("make an endpoint the default for heyditto claude / codex")
     .argument("<endpoint>", "endpoint slug or id")
     .addOption(outputOption())
-    .action(cmdEndpointUse);
-  endpoints
+    .action(cmdEndpointUse));
+  addProfileOption(endpoints
     .command("pick")
     .description("choose the default endpoint interactively")
     .addOption(outputOption())
-    .action(cmdEndpointPick);
-  endpoints
+    .action(cmdEndpointPick));
+  addProfileOption(endpoints
     .command("open")
     .description("open the endpoint editor in the Ditto app (default endpoint when omitted)")
     .argument("[endpoint]", "endpoint slug or id")
     .option("--print", "print the URL without opening a browser")
-    .action(cmdEndpointOpen);
+    .action(cmdEndpointOpen));
   addExamples(
     endpoints
       .command("set")
@@ -1557,6 +1559,7 @@ export function registerHarnessCommands(program: Command, addExamples: (c: Comma
       cmd.option("--no-mcp-only", "use Ditto Router inference for this launch, overriding the saved native-account default");
       cmd.addOption(new Option("--remote-transport <transport>", "remote prompt delivery: CLI terminal bridge (default) or MCP Channels (native account only, research preview)").choices(["cli", "channels"]));
     }
+    addProfileOption(cmd);
     cmd.action(async (args: string[], options) => {
       await launchHarness(harness, args, options);
     });
