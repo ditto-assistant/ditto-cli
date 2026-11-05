@@ -108,6 +108,12 @@ test("a present null findings list is the engine's empty list; an absent key is 
 test("round-1 self-review findings stay fixed", () => {
   // S2: a blocking finding with a null or empty status cannot hide from the gate.
   for (const status of [null, ""]) assert.equal(recommendLocalReview(withResult({ findings: [finding("high", { status })] })).verdict, "changes");
+  // R3.1: an unrecognized status counts; only withheld/duplicate candidates are excluded.
+  assert.equal(recommendLocalReview(withResult({ findings: [finding("high", { status: "pending" })] })).verdict, "changes");
+  assert.equal(recommendLocalReview(withResult({ findings: [finding("high", { status: "duplicate" })] })).verdict, "approve");
+  // R3.3: equal reuse receipts with different key order are not a disagreement.
+  const a = { version: 1, unfinished: [], sourceRunId: RUN }, b = { sourceRunId: RUN, unfinished: [], version: 1 };
+  assert.equal(recommendLocalReview(clean({ reuse: a, result: { ...clean().result, reuse: b } })).verdict, "approve");
   // S7: non-boolean coverage flags are not complete coverage; missing local metadata is not either.
   for (const local of [{ contextComplete: true, changedCoverageComplete: null }, { contextComplete: "yes", changedCoverageComplete: true }, undefined]) {
     assert.equal(recommendLocalReview(withResult({ local })).verdict, "none", JSON.stringify(local));

@@ -87,7 +87,7 @@ export function reuseAndInheritanceProblems(run: LocalRunLike): string[] {
   }
   // Two copies of the receipt must not disagree: a clear alias must not hide
   // unfinished work in the other one.
-  if (present.length === 2 && JSON.stringify(present[0][1]) !== JSON.stringify(present[1][1])) problems.push("reuse and result.reuse disagree; reuse resolution cannot be verified");
+  if (present.length === 2 && canonical(present[0][1]) !== canonical(present[1][1])) problems.push("reuse and result.reuse disagree; reuse resolution cannot be verified");
   for (const [where, value] of [["inheritance", run.inheritance], ["result.inheritance", result.inheritance]] as const) {
     if (value === undefined || value === null) continue;
     // No server contract for inherited local receipts exists in this client
@@ -98,11 +98,22 @@ export function reuseAndInheritanceProblems(run: LocalRunLike): string[] {
   return problems;
 }
 
+/** The engine's statuses for candidates it did not post (ditto-review
+ * internal/hosted: "withheld" after verification, "duplicate" when folded). */
+const UNPOSTED_STATUSES = new Set(["withheld", "duplicate"]);
+
 /** A finding counts unless the engine explicitly withheld or deduplicated it.
- * An absent, null or empty status counts, so it can never hide from the gate
- * while the readable output shows it. */
+ * Any other status, including a missing, empty or unrecognized one, counts, so
+ * a blocking finding can never hide from the gate. */
 export function isVisibleFinding(f: Obj): boolean {
-  return f.status === undefined || f.status === null || f.status === "" || f.status === "posted";
+  return !(typeof f.status === "string" && UNPOSTED_STATUSES.has(f.status));
+}
+
+/** JSON with object keys sorted, so equal receipts compare equal. */
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (isObj(value)) return `{${Object.keys(value).sort().map(k => `${JSON.stringify(k)}:${canonical(value[k])}`).join(",")}}`;
+  return JSON.stringify(value) ?? "null";
 }
 
 function visibleFindings(result: Obj): Obj[] {
