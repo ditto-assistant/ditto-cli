@@ -150,6 +150,13 @@ export function recommendLocalReview(run: LocalRunLike): Recommendation {
   const present = (v: unknown) => v !== undefined && v !== null && v !== "";
   if (present(run.error)) return none([`run error: ${typeof run.error === "string" ? run.error : JSON.stringify(run.error)}`]);
   if (present(result.error)) return none([`result error: ${typeof result.error === "string" ? result.error : JSON.stringify(result.error)}`]);
+  // Every lens must finish every changed file. Local reviews only review the
+  // changed paths, so any abbreviated or failed entry is unfinished changed
+  // work (production run b14c5978 abbreviated its main file yet reported
+  // changed coverage complete). A missing coverage report is not complete.
+  const files = isObj(result.files) ? result.files : undefined;
+  if (!files || !Array.isArray(files.abbreviated) || !Array.isArray(files.failed)) return none(["the result has no per-file coverage report"]);
+  if (files.abbreviated.length || files.failed.length) return none([`${files.abbreviated.length + files.failed.length} changed file(s) were reviewed briefly or not reviewed by every lens`]);
   // Local receipts always carry both flags; anything but true is incomplete.
   const local = isObj(result.local) ? result.local : {};
   if (local.changedCoverageComplete !== true) return none(["changed paths were not fully reviewed"]);

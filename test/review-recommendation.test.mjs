@@ -15,7 +15,7 @@ const cli = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
 const REPO = { id: "33333333-3333-3333-3333-333333333333", fullName: "acme/project", enabled: true };
 const RUN = "66666666-6666-6666-6666-666666666666";
 
-const clean = (over = {}) => ({ status: "completed", workspaceCurrent: true, result: { complete: true, findings: [], local: { contextComplete: true, changedCoverageComplete: true } }, ...over });
+const clean = (over = {}) => ({ status: "completed", workspaceCurrent: true, result: { complete: true, findings: [], files: { completed: ["app.ts"], abbreviated: [], failed: [] }, local: { contextComplete: true, changedCoverageComplete: true } }, ...over });
 const withResult = (result, over = {}) => clean({ result: { ...clean().result, ...result }, ...over });
 const finding = (severity, extra = {}) => ({ status: "posted", severity, path: "app.ts", line: 1, title: `${severity} finding`, ...extra });
 
@@ -118,6 +118,12 @@ test("round-1 self-review findings stay fixed", () => {
   assert.equal(recommendLocalReview(withResult({ findings: [{ status: "posted", severity: { toString: null } }] })).verdict, "changes");
   // PR review: unfinished: null is an empty list.
   assert.equal(recommendLocalReview(clean({ reuse: { version: 1, unfinished: null } })).verdict, "approve");
+  // Every lens must finish every changed file; a missing coverage report is not complete.
+  assert.equal(recommendLocalReview(withResult({ files: { completed: [], abbreviated: [{ path: "app.ts", reason: "lens security: max_rounds" }], failed: [] } })).verdict, "none");
+  assert.equal(recommendLocalReview(withResult({ files: { completed: [], abbreviated: [], failed: [{ path: "app.ts", reason: "time limit" }] } })).verdict, "none");
+  assert.match(recommendLocalReview(withResult({ files: undefined })).reasons.join(), /no per-file coverage report/);
+  // Abbreviated work with a blocking finding is still CHANGES (findings are evidence).
+  assert.equal(recommendLocalReview(withResult({ findings: [finding("high")], files: { completed: [], abbreviated: [{ path: "app.ts", reason: "x" }], failed: [] } })).verdict, "changes");
   // S7: non-boolean coverage flags are not complete coverage; missing local metadata is not either.
   for (const local of [{ contextComplete: true, changedCoverageComplete: null }, { contextComplete: "yes", changedCoverageComplete: true }, undefined]) {
     assert.equal(recommendLocalReview(withResult({ local })).verdict, "none", JSON.stringify(local));
