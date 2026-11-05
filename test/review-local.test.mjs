@@ -97,6 +97,24 @@ test("unborn repositories work; ignored files, binaries and symlinks are not upl
   assert.ok(snapshot.headFiles.every(f => !contents(snapshot.headFiles, f.path).includes("outside secret")));
 });
 
+test("unchanged binaries and symlinks are listed but do not bound context; changed ones still do", async t => {
+  const root = await repository(t, { "app.ts": "first\n", "icon.png": "\u0000PNG binary\n", "target.ts": "export const t = 1;\n" });
+  await symlink("target.ts", path.join(root, "alias.ts")); git(root, "add", "alias.ts"); git(root, "commit", "-m", "symlink");
+  await writeFile(path.join(root, "app.ts"), "changed\n");
+  const { snapshot } = await captureReviewSnapshot({ cwd: root });
+  assert.deepEqual(snapshot.changedPaths, ["app.ts"]);
+  assert.deepEqual(snapshot.skipped.map(s => [s.path, s.reason]), [["alias.ts", "symlink or submodule"], ["icon.png", "binary or non-UTF-8 file"]]);
+  assert.equal(snapshot.contextComplete, true, "unchanged unreadable files do not make context incomplete");
+  assert.equal(snapshot.digest, snapshotDigest(snapshot));
+  // A changed binary is a changed path the reviewer cannot read: still incomplete.
+  await writeFile(path.join(root, "icon.png"), "\u0000PNG changed\n");
+  assert.equal((await captureReviewSnapshot({ cwd: root })).snapshot.contextComplete, false);
+  await writeFile(path.join(root, "icon.png"), "\u0000PNG binary\n");
+  // A changed symlink likewise.
+  await rm(path.join(root, "alias.ts")); await symlink("app.ts", path.join(root, "alias.ts"));
+  assert.equal((await captureReviewSnapshot({ cwd: root })).snapshot.contextComplete, false);
+});
+
 test("file/directory replacements preserve the deleted source and new files", async t => {
   const root = await repository(t, { "leaf": "old leaf\n", "dir/source.ts": "old nested source\n" });
   await rm(path.join(root, "leaf")); await mkdir(path.join(root, "leaf")); await writeFile(path.join(root, "leaf/new.ts"), "new nested\n");
