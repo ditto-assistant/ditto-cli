@@ -357,7 +357,11 @@ function refusalDetail(body: string): string {
     const parsed: unknown = JSON.parse(body);
     if (!parsed || typeof parsed !== "object") return "";
     const o = parsed as Record<string, unknown>, e = (o.error && typeof o.error === "object" ? o.error : o) as Record<string, unknown>;
-    const parts = [e.code, e.ref ?? o.ref, e.message ?? o.message, e.detail].filter((v): v is string => typeof v === "string" && v.length > 0);
+    // The backend's specific reason is in params.problem (go-kit errs);
+    // message is the generic factory text. Older bodies use a string error.
+    const params = (o.params && typeof o.params === "object" ? o.params : {}) as Record<string, unknown>;
+    const parts = [e.code, e.ref ?? o.ref, params.problem, e.message ?? o.message, typeof o.error === "string" ? o.error : undefined, e.detail]
+      .filter((v, i, all): v is string => typeof v === "string" && v.length > 0 && all.indexOf(v) === i);
     return parts.length ? ` · ${parts.join(" · ").slice(0, 400)}` : "";
   } catch { return ""; }
 }

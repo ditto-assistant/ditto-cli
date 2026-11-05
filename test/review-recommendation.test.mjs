@@ -242,10 +242,18 @@ test("a reuse or inheritance resolution failure blocks any recommendation at the
 
 test("a refused admission (the anchorRef HTTP 400) says nothing was admitted or approved", async t => {
   const root = await repository(t); await writeFile(path.join(root, "app.ts"), "export const a = 2;\n");
-  const body = { error: { code: "review_local_input", ref: "dbgfhl8nsvo44krb0cn0", message: "Check the local review input and try again.", detail: "json: unknown field \"anchorRef\"" } };
+  // The exact production body shape (go-kit errs), with the backend fix's problem text.
+  const problem = "This Ditto server does not accept the local review field \"anchorRef\". No review was admitted. Use a heyditto CLI release that matches this server.";
+  const body = { fields: { snapshot: problem }, params: { field: "snapshot", problem }, message: "Check the local review input and try again.", code: "review_local_input", ref: "dbme2rnrfp5gaide20n0", action: "fix_input", status: 400 };
   const svc = await server(t, { admission: [400, body] });
   const out = await run(root, svc.base, ["local", "--gate"]);
-  assert.equal(out.code, 1); assert.match(out.stderr, /refused the local review request \(HTTP 400 · review_local_input · dbgfhl8nsvo44krb0cn0/);
+  assert.equal(out.code, 1); assert.match(out.stderr, /refused the local review request \(HTTP 400 · review_local_input · dbme2rnrfp5gaide20n0 · This Ditto server does not accept the local review field "anchorRef"/);
+  // Today's production body (before the backend fix) and older string-error bodies still report their reason.
+  for (const [legacy, want] of [[{ message: "Check the local review input and try again.", code: "review_local_input", ref: "r1", status: 400 }, /review_local_input · r1 · Check the local review input/], [{ error: "snapshot contract mismatch" }, /snapshot contract mismatch/], [{ error: { code: "nested" } }, /HTTP 400 · nested/]]) {
+    const old = await server(t, { admission: [400, legacy] });
+    const res = await run(root, old.base, ["local", "--gate"]);
+    assert.equal(res.code, 1); assert.match(res.stderr, want); assert.doesNotMatch(res.stderr, /TypeError|slice is not a function/);
+  }
   assert.match(out.stderr, /No review was admitted and nothing was approved/);
   assert.equal(svc.calls.filter(c => c.method === "POST").length, 1, "a refusal is never retried");
 });
