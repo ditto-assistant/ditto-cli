@@ -8,7 +8,7 @@ import { cmdReviewAccess, diagnoseLinkRefusal, guideAccessForAdd } from "./githu
 import { registerReviewFindingCommands } from "./review-findings.js";
 import { readStoredAuth } from "./store.js";
 import { captureReviewSnapshot, reviewGit } from "./review-snapshot.js";
-import { findingsList, formatRecommendation, gateExitCode, malformedLocalRun, recommendLocalReview, type Recommendation } from "./review-recommendation.js";
+import { findingsList, formatRecommendation, isVisibleFinding, gateExitCode, malformedLocalRun, recommendLocalReview, type Recommendation } from "./review-recommendation.js";
 
 /**
  * Ditto Review repository settings: the developer console's Review →
@@ -185,7 +185,7 @@ function printLocalRun(run: LocalRun, options: LocalOptions): Recommendation {
   const result = run.result;
   process.stdout.write(`Local review ${run.status} · ${run.profile}\nRun: ${run.runId}\nSnapshot: ${run.snapshotDigest}\n`);
   const list = findingsList(result);
-  const findings = (list ?? []).filter(f => !f.status || f.status === "posted") as NonNullable<NonNullable<LocalRun["result"]>["findings"]>;
+  const findings = (list ?? []).filter(isVisibleFinding) as NonNullable<NonNullable<LocalRun["result"]>["findings"]>;
   const reportable = list !== undefined && malformedLocalRun(run).length === 0 && ["completed", "partial"].includes(run.status);
   if (reportable) {
     process.stdout.write(`${findings.length ? `${findings.length} finding${findings.length === 1 ? "" : "s"} in reviewed scope` : "No findings in reviewed scope"}\n`);
@@ -216,6 +216,7 @@ async function pollLocalRun(route: string, signal: AbortSignal): Promise<LocalRu
 
 export async function cmdReviewLocal(options: LocalOptions): Promise<void> {
   if (options.staged && options.base) throw new Error("--staged and --base cannot be used together");
+  if (options.preview && options.gate) throw new Error("--preview starts no review, so it cannot satisfy --gate");
   const profile = options.profile ?? "quick";
   if (!["quick", "standard", "deep"].includes(profile)) throw new Error("--profile must be quick, standard or deep");
   if (options.requestId) { try { runPath(options.requestId); } catch { throw new Error("--request-id must be a UUID"); } }
@@ -261,8 +262,10 @@ export async function cmdReviewLocal(options: LocalOptions): Promise<void> {
       return;
     }
     if (!snapshot.changedPaths.length) {
-      const empty = { status: "skipped", reason: "no_changes", snapshotDigest: snapshot.digest, changedPaths: [] };
-      if (isJSON(options)) writeJSON(empty); else process.stdout.write("No working-diff changes to review.\n");
+      const recommendation: Recommendation = { verdict: "none", approved: false, reasons: ["no changes were selected, so nothing was reviewed"], blocking: 0, nits: 0 };
+      const empty = { status: "skipped", reason: "no_changes", snapshotDigest: snapshot.digest, changedPaths: [], recommendation };
+      if (isJSON(options)) writeJSON(empty); else process.stdout.write(`No working-diff changes to review.\n${formatRecommendation(recommendation)}`);
+      if (options.gate) process.exitCode = gateExitCode(recommendation);
       return;
     }
     const fullName = options.repository ?? repositoryFromRemote((await reviewGit(captured.root, ["remote", "get-url", "origin"], undefined, controller.signal)).toString("utf8"));
@@ -276,15 +279,15 @@ export async function cmdReviewLocal(options: LocalOptions): Promise<void> {
     let run = await apiFetch<LocalRun>(`/api/v5/review/repositories/${encodeURIComponent(repo.id)}/local${scopeQuery(company)}`, {
       method: "POST", body: { requestId, snapshot, profile, ...(context ? { context } : {}) }, signal: AbortSignal.timeout(30000),
     });
-    try { runPath(run.runId); } catch { throw new Error("Review API returned no valid run ID"); }
+    try { runPath(run?.runId); } catch { throw new Error("Review API returned no valid run ID"); }
     runId = run.runId;
     process.stderr.write(`Local review run: ${runId}\n`);
     const route = `/api/v5/review/local/runs/${encodeURIComponent(runId)}`;
     let prior = "";
     for (;;) {
       if (controller.signal.aborted) throw controller.signal.reason;
-      if (run.status !== prior) { process.stderr.write(`Local review: ${run.status}\n`); prior = run.status; }
       if (!run || typeof run !== "object" || typeof run.status !== "string") throw new Error("Review API returned a malformed run (no status); no recommendation was produced");
+      if (run.status !== prior) { process.stderr.write(`Local review: ${run.status}\n`); prior = run.status; }
       if (TERMINAL_REVIEW_STATUSES.has(run.status)) {
         if (run.snapshotDigest !== snapshot.digest) throw new Error("Review API returned a result for a different snapshot");
         clearTimeout(timer);

@@ -98,14 +98,21 @@ export function reuseAndInheritanceProblems(run: LocalRunLike): string[] {
   return problems;
 }
 
+/** A finding counts unless the engine explicitly withheld or deduplicated it.
+ * An absent, null or empty status counts, so it can never hide from the gate
+ * while the readable output shows it. */
+export function isVisibleFinding(f: Obj): boolean {
+  return f.status === undefined || f.status === null || f.status === "" || f.status === "posted";
+}
+
 function visibleFindings(result: Obj): Obj[] {
-  const findings = findingsList(result) ?? [];
-  return findings.filter(f => f.status === undefined || f.status === "posted");
+  return (findingsList(result) ?? []).filter(isVisibleFinding);
 }
 
 export function recommendLocalReview(run: LocalRunLike): Recommendation {
   const reasons: string[] = [];
-  const none = (extra: string[] = []): Recommendation => ({ verdict: "none", approved: false, reasons: [...reasons, ...extra], blocking: 0, nits: 0 });
+  let nitCount = 0;
+  const none = (extra: string[] = []): Recommendation => ({ verdict: "none", approved: false, reasons: [...reasons, ...extra], blocking: 0, nits: nitCount });
   const malformed = malformedLocalRun(run);
   if (malformed.length) return none(malformed.map(p => `malformed response: ${p}`));
   const gate = reuseAndInheritanceProblems(run);
@@ -120,17 +127,20 @@ export function recommendLocalReview(run: LocalRunLike): Recommendation {
     const blocking = findings.filter(f => !NIT_SEVERITIES.has(String(f.severity ?? "").toLowerCase())).length;
     const nits = findings.length - blocking;
     if (blocking) return { verdict: "changes", approved: false, reasons: [`${blocking} blocking finding(s)`], blocking, nits };
+    nitCount = nits;
     reasons.push(...(nits ? [`${nits} non-blocking finding(s)`] : []));
   }
   if (status !== "completed") return none([`run status is ${status}; only a completed run can approve`]);
   if (!result) return none(["no review result is available"]);
   if (result.complete !== true) return none(["review coverage is incomplete (result.complete is not true)"]);
   if (!findingsList(result)) return none(["result has no findings list; an absent list is not a clean review"]);
-  if (typeof run.error === "string" && run.error) return none([`run error: ${run.error}`]);
-  if (typeof result.error === "string" && result.error) return none([`result error: ${result.error}`]);
+  const present = (v: unknown) => v !== undefined && v !== null && v !== "";
+  if (present(run.error)) return none([`run error: ${typeof run.error === "string" ? run.error : JSON.stringify(run.error)}`]);
+  if (present(result.error)) return none([`result error: ${typeof result.error === "string" ? result.error : JSON.stringify(result.error)}`]);
+  // Local receipts always carry both flags; anything but true is incomplete.
   const local = isObj(result.local) ? result.local : {};
-  if (local.changedCoverageComplete === false) return none(["changed paths were not fully reviewed"]);
-  if (local.contextComplete === false) return none(["surrounding context was bounded"]);
+  if (local.changedCoverageComplete !== true) return none(["changed paths were not fully reviewed"]);
+  if (local.contextComplete !== true) return none(["surrounding context was bounded"]);
   if (run.workspaceCurrent !== true) return none([run.workspaceCurrent === false ? "the working tree changed after capture" : "the current working tree could not be verified against the reviewed snapshot"]);
   const nits = visibleFindings(result).length;
   return { verdict: "approve", approved: true, reasons, blocking: 0, nits };

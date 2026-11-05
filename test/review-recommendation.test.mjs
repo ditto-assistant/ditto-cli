@@ -105,6 +105,20 @@ test("a present null findings list is the engine's empty list; an absent key is 
   assert.equal(recommendLocalReview(absent).verdict, "none");
 });
 
+test("round-1 self-review findings stay fixed", () => {
+  // S2: a blocking finding with a null or empty status cannot hide from the gate.
+  for (const status of [null, ""]) assert.equal(recommendLocalReview(withResult({ findings: [finding("high", { status })] })).verdict, "changes");
+  // S7: non-boolean coverage flags are not complete coverage; missing local metadata is not either.
+  for (const local of [{ contextComplete: true, changedCoverageComplete: null }, { contextComplete: "yes", changedCoverageComplete: true }, undefined]) {
+    assert.equal(recommendLocalReview(withResult({ local })).verdict, "none", JSON.stringify(local));
+  }
+  // S8: a non-string error value blocks approval.
+  assert.equal(recommendLocalReview(clean({ error: { code: "x" } })).verdict, "none");
+  assert.equal(recommendLocalReview(withResult({ error: 7 })).verdict, "none");
+  // S6: a partial run's nit count survives into the structured recommendation.
+  assert.equal(recommendLocalReview(clean({ status: "partial", result: { complete: false, findings: [finding("low")] } })).nits, 1);
+});
+
 test("a resolved v1 reuse receipt in both places does not block approval", () => {
   const reuse = { version: 1, sourceRunId: RUN, reused: [{ path: "app.ts", lens: 0, model: "m" }], unfinished: [] };
   assert.equal(recommendLocalReview(clean({ reuse, result: { ...clean().result, reuse } })).verdict, "approve");
@@ -261,6 +275,30 @@ test("staged, unstaged and untracked selection reaches the upload exactly", asyn
   assert.equal(posts[1].body.profile, "deep");
   const bad = await run(root, svc.base, ["local", "--profile", "huge"]);
   assert.equal(bad.code, 1); assert.match(bad.stderr, /--profile must be quick, standard or deep/);
+});
+
+test("--gate refuses --preview and an empty selection is no recommendation", async t => {
+  const root = await repository(t);
+  const svc = await server(t);
+  const empty = await run(root, svc.base, ["local", "--gate", "--output", "json"]);
+  assert.equal(empty.code, 1, empty.stderr); const data = JSON.parse(empty.stdout);
+  assert.equal(data.reason, "no_changes"); assert.equal(data.recommendation.verdict, "none");
+  const legacy = await run(root, svc.base, ["local"]);
+  assert.equal(legacy.code, 0, "without --gate an empty selection keeps its exit code");
+  await writeFile(path.join(root, "app.ts"), "export const a = 2;\n");
+  const preview = await run(root, svc.base, ["local", "--preview", "--gate"]);
+  assert.equal(preview.code, 1); assert.match(preview.stderr, /--preview starts no review/);
+  assert.equal(svc.calls.filter(c => c.method === "POST").length, 0);
+});
+
+test("a null admission or poll body is a clear error, never a TypeError", async t => {
+  const root = await repository(t); await writeFile(path.join(root, "app.ts"), "export const a = 2;\n");
+  const poll = await server(t, { terminal: () => "null" });
+  const out = await run(root, poll.base, ["local", "--gate"]);
+  assert.equal(out.code, 1); assert.match(out.stderr, /malformed run/); assert.doesNotMatch(out.stderr, /TypeError|Cannot read/);
+  const admission = await server(t, { admission: [202, "null"] });
+  const adm = await run(root, admission.base, ["local", "--gate"]);
+  assert.equal(adm.code, 1); assert.match(adm.stderr, /no valid run ID/); assert.doesNotMatch(adm.stderr, /TypeError|Cannot read/);
 });
 
 test("local-status never approves (it cannot verify the working tree) and local-cancel reports JSON", async t => {
