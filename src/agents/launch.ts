@@ -18,7 +18,7 @@ import {
   revokeKey,
 } from "../api.js";
 import { openInBrowser } from "../browser.js";
-import { apiBaseURL, appBaseURL, configDir, endpointURL, resolveApiKey } from "../config.js";
+import { apiBaseURL, configDir, endpointURL, resolveApiKey } from "../config.js";
 import { deviceLogin } from "../device-login.js";
 import { formatActivation } from "../endpoint-format.js";
 import { readStoredAuth, saveLogin, updateStoredAuth } from "../store.js";
@@ -53,6 +53,7 @@ import { RemoteSession } from "../remote/controller.js";
 import { startHeadlessTurn } from "../remote/headless.js";
 import { type HookServer, claudeHookSettings, codexNotifyOverride, hookScriptPath, startHookServer, withHookArgs } from "../remote/hooks.js";
 import { type PtySession, loadPty, spawnInPty } from "../remote/pty.js";
+import { type SessionRegistration, remoteSessionURL, UNLINKABLE_SESSION_NOTICE } from "../remote/session-link.js";
 import { checkpointPush } from "../teleport/commands.js";
 
 export interface LaunchOptions {
@@ -766,12 +767,15 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   let exitCode: number | null = null;
   let titleWatcher: { stop(): void } | undefined;
   try {
-    const registration = remote !== "off" ? await apiFetch<{ threadId: string; kgID: string; nativeTitleSync?: boolean }>("/api/v5/sessions/register", { method: "POST", body: launchRegistration }).catch((err) => {
+    const registration = remote !== "off" ? await apiFetch<SessionRegistration & { nativeTitleSync?: boolean }>("/api/v5/sessions/register", { method: "POST", body: launchRegistration }).catch((err) => {
       if (options.mcpOnly) throw err;
       log("session link unavailable; the CLI bridge will still announce this launch");
       return undefined;
     }) : undefined;
-    if (registration) log(`session: ${appBaseURL()}/chat/${encodeURIComponent(registration.threadId)}${registration.kgID ? `?graph=${encodeURIComponent(registration.kgID)}` : ""}`);
+    if (registration) {
+      const link = remoteSessionURL(registration);
+      log(link ? `session: ${link}` : UNLINKABLE_SESSION_NOTICE);
+    }
     if (harness === "claude" && harnessSessionId && !explicitLaunchTitle && registration?.nativeTitleSync === true && registration.threadId) {
       const threadId = registration.threadId;
       titleWatcher = watchClaudeSessionTitle({ nativeSessionId: harnessSessionId, cwd, report: async (title, signal) => {

@@ -8,7 +8,7 @@ import { resolveApiKey } from "../config.js";
 import { findProfileEndpoint, repoDefaultProfile } from "../dittoconfig/profiles.js";
 import { readStoredAuth } from "../store.js";
 import { runChannelServer } from "./channel-server.js";
-import { remoteSessionURL } from "./session-link.js";
+import { remoteSessionURL, UNLINKABLE_SESSION_NOTICE, type SessionRegistration } from "./session-link.js";
 
 /** Only these locally constructed setup errors may be shown verbatim. API,
  * configuration-parser and transport causes can contain private information.
@@ -38,11 +38,12 @@ export async function preparePluginSession(cwd = process.env.DITTO_REMOTE_CWD ??
     ? "Check DITTO_REMOTE_ENDPOINT. Unset it or select an existing endpoint slug, then restart Ditto Remote."
     : "Select an existing endpoint with `heyditto endpoints use <slug>` or apply this repository's .ditto profile, then restart Ditto Remote.");
   const sessionId = randomUUID();
-  const registration = await apiFetch<{ threadId: string; kgID?: string; graphAlias?: string }>("/api/v5/sessions/register", { method: "POST", body: {
+  const registration = await apiFetch<SessionRegistration>("/api/v5/sessions/register", { method: "POST", body: {
     sessionId, endpointId: endpoint.id, harness: "claude-code", inference: "native", transport: "channels",
     title: `${path.basename(cwd)} · ${sessionId.slice(0, 8)}`,
   } });
-  process.stderr.write(`Ditto Remote: ${remoteSessionURL(registration)}\n`);
+  const link = remoteSessionURL(registration);
+  process.stderr.write(`Ditto Remote: ${link ?? UNLINKABLE_SESSION_NOTICE}\n`);
   return { sessionId, cwd };
 }
 
