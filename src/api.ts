@@ -59,7 +59,8 @@ export async function apiFetch<T>(
       const parsed = JSON.parse(text) as { message?: unknown; error?: unknown; code?: unknown };
       // Only string fields are prose; a malformed body (an object or number in
       // `error`) must not crash error reporting and hide the HTTP status.
-      const prose = [parsed.message, parsed.error].find((v): v is string => typeof v === "string" && v.length > 0);
+      const nested = parsed.error && typeof parsed.error === "object" ? (parsed.error as { message?: unknown }).message : undefined;
+      const prose = [parsed.message, parsed.error, nested].find((v): v is string => typeof v === "string" && v.length > 0);
       detail = prose ?? text;
       // A coded refusal (api_key_limited, a Review permission or billing refusal)
       // carries its own next step; a generic hint would contradict it.

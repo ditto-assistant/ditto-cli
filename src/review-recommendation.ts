@@ -82,7 +82,8 @@ export function reuseAndInheritanceProblems(run: LocalRunLike): string[] {
       const s = value[key];
       if (s !== undefined && s !== "resolved" && s !== "verified") problems.push(`${where}.${key} is ${JSON.stringify(s)}, not resolved`);
     }
-    if (value.unfinished !== undefined && !Array.isArray(value.unfinished)) problems.push(`${where}.unfinished is not an array`);
+    // null is Go's encoding of an empty list, as for findings.
+    if (value.unfinished !== undefined && value.unfinished !== null && !Array.isArray(value.unfinished)) problems.push(`${where}.unfinished is not an array`);
     else if (Array.isArray(value.unfinished) && value.unfinished.length) problems.push(`${where} has ${value.unfinished.length} unfinished work unit(s)`);
   }
   // Two copies of the receipt must not disagree: a clear alias must not hide
@@ -135,7 +136,8 @@ export function recommendLocalReview(run: LocalRunLike): Recommendation {
   // usable result at all.
   if (result && findingsList(result) && (status === "completed" || status === "partial")) {
     const findings = visibleFindings(result);
-    const blocking = findings.filter(f => !NIT_SEVERITIES.has(String(f.severity ?? "").toLowerCase())).length;
+    // A non-string severity is unknown, and unknown blocks.
+    const blocking = findings.filter(f => !(typeof f.severity === "string" && NIT_SEVERITIES.has(f.severity.toLowerCase()))).length;
     const nits = findings.length - blocking;
     if (blocking) return { verdict: "changes", approved: false, reasons: [`${blocking} blocking finding(s)`], blocking, nits };
     nitCount = nits;

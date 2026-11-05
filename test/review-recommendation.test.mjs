@@ -114,6 +114,10 @@ test("round-1 self-review findings stay fixed", () => {
   // R3.3: equal reuse receipts with different key order are not a disagreement.
   const a = { version: 1, unfinished: [], sourceRunId: RUN }, b = { sourceRunId: RUN, unfinished: [], version: 1 };
   assert.equal(recommendLocalReview(clean({ reuse: a, result: { ...clean().result, reuse: b } })).verdict, "approve");
+  // PR review: an object severity is unknown (blocks) and does not throw.
+  assert.equal(recommendLocalReview(withResult({ findings: [{ status: "posted", severity: { toString: null } }] })).verdict, "changes");
+  // PR review: unfinished: null is an empty list.
+  assert.equal(recommendLocalReview(clean({ reuse: { version: 1, unfinished: null } })).verdict, "approve");
   // S7: non-boolean coverage flags are not complete coverage; missing local metadata is not either.
   for (const local of [{ contextComplete: true, changedCoverageComplete: null }, { contextComplete: "yes", changedCoverageComplete: true }, undefined]) {
     assert.equal(recommendLocalReview(withResult({ local })).verdict, "none", JSON.stringify(local));
@@ -255,7 +259,7 @@ test("a refused admission (the anchorRef HTTP 400) says nothing was admitted or 
   const out = await run(root, svc.base, ["local", "--gate"]);
   assert.equal(out.code, 1); assert.match(out.stderr, /refused the local review request \(HTTP 400 · review_local_input · dbme2rnrfp5gaide20n0 · This Ditto server does not accept the local review field "anchorRef"/);
   // Today's production body (before the backend fix) and older string-error bodies still report their reason.
-  for (const [legacy, want] of [[{ message: "Check the local review input and try again.", code: "review_local_input", ref: "r1", status: 400 }, /review_local_input · r1 · Check the local review input/], [{ error: "snapshot contract mismatch" }, /snapshot contract mismatch/], [{ error: { code: "nested" } }, /HTTP 400 · nested/]]) {
+  for (const [legacy, want] of [[{ message: "Check the local review input and try again.", code: "review_local_input", ref: "r1", status: 400 }, /review_local_input · r1 · Check the local review input/], [{ error: "snapshot contract mismatch" }, /snapshot contract mismatch/], [{ error: { code: "nested" } }, /HTTP 400 · nested/], [{ code: "permission_denied", error: { message: "Ask an organization manager" } }, /Ask an organization manager/]]) {
     const old = await server(t, { admission: [400, legacy] });
     const res = await run(root, old.base, ["local", "--gate"]);
     assert.equal(res.code, 1); assert.match(res.stderr, want); assert.doesNotMatch(res.stderr, /TypeError|slice is not a function/);
