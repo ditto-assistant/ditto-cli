@@ -1,0 +1,274 @@
+// Offline regression coverage for the local review recommendation gate.
+// Every server here is a local fixture: no request leaves 127.0.0.1 and no
+// inference runs. Live runs are recorded separately and are never simulated.
+import assert from "node:assert/strict";
+import { spawn, spawnSync } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import http from "node:http";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { recommendLocalReview, gateExitCode } from "../dist/review-recommendation.js";
+
+const cli = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
+const REPO = { id: "33333333-3333-3333-3333-333333333333", fullName: "acme/project", enabled: true };
+const RUN = "66666666-6666-6666-6666-666666666666";
+
+const clean = (over = {}) => ({ status: "completed", workspaceCurrent: true, result: { complete: true, findings: [], local: { contextComplete: true, changedCoverageComplete: true } }, ...over });
+const withResult = (result, over = {}) => clean({ result: { ...clean().result, ...result }, ...over });
+const finding = (severity, extra = {}) => ({ status: "posted", severity, path: "app.ts", line: 1, title: `${severity} finding`, ...extra });
+
+test("only a completed, complete, current, well-formed run approves", () => {
+  const rec = recommendLocalReview(clean());
+  assert.equal(rec.verdict, "approve"); assert.equal(rec.approved, true); assert.equal(gateExitCode(rec), 0);
+});
+
+for (const [name, run, pattern] of [
+  ["partial", clean({ status: "partial", result: { ...clean().result, complete: false } }), /status is partial/],
+  ["failed", { status: "failed", error: "engine stopped" }, /status is failed/],
+  ["cancelled", { status: "cancelled" }, /status is cancelled/],
+  ["skipped", { status: "skipped" }, /status is skipped/],
+  ["superseded with a complete-looking result", clean({ status: "superseded" }), /status is superseded/],
+  ["completed but incomplete coverage", withResult({ complete: false }), /coverage is incomplete/],
+  ["completed with no findings list", withResult({ findings: undefined }), /no findings list/],
+  ["completed with no result", { status: "completed", workspaceCurrent: true }, /no review result/],
+  ["completed with an error", withResult({ error: "budget exhausted" }), /result error: budget exhausted/],
+  ["changed coverage incomplete", withResult({ local: { contextComplete: true, changedCoverageComplete: false } }), /changed paths were not fully reviewed/],
+  ["context bounded", withResult({ local: { contextComplete: false, changedCoverageComplete: true } }), /context was bounded/],
+  ["working tree changed", clean({ workspaceCurrent: false }), /working tree changed/],
+  ["working tree unverified (status read)", clean({ workspaceCurrent: null }), /could not be verified/],
+]) {
+  test(`no recommendation and no approval: ${name}`, () => {
+    const rec = recommendLocalReview(run);
+    assert.equal(rec.verdict, "none"); assert.equal(rec.approved, false); assert.equal(gateExitCode(rec), 1);
+    assert.match(rec.reasons.join("; "), pattern);
+  });
+}
+
+for (const [name, run, pattern] of [
+  ["findings is a string", withResult({ findings: "none" }), /findings is not an array/],
+  ["findings has a non-object", withResult({ findings: [null] }), /non-object entry/],
+  ["complete is a string", withResult({ complete: "true" }), /complete is not a boolean/],
+  ["result is an array", clean({ result: [] }), /result is not an object/],
+  ["status is missing", { result: clean().result, workspaceCurrent: true }, /status is not a string/],
+  ["local is a string", withResult({ local: "complete" }), /local is not an object/],
+]) {
+  test(`malformed responses fail closed: ${name}`, () => {
+    const rec = recommendLocalReview(run);
+    assert.equal(rec.verdict, "none"); assert.match(rec.reasons.join("; "), /malformed response/); assert.match(rec.reasons.join("; "), pattern);
+  });
+}
+
+test("blocking findings request changes, even from a partial run; nits alone approve", () => {
+  for (const severity of ["critical", "high", "medium", "unknown-severity", undefined]) {
+    const rec = recommendLocalReview(withResult({ findings: [finding(severity)] }));
+    assert.equal(rec.verdict, "changes", String(severity)); assert.equal(gateExitCode(rec), 2); assert.equal(rec.blocking, 1);
+  }
+  const partial = recommendLocalReview(clean({ status: "partial", result: { complete: false, findings: [finding("high")] } }));
+  assert.equal(partial.verdict, "changes");
+  const nits = recommendLocalReview(withResult({ findings: [finding("low"), finding("nit")] }));
+  assert.equal(nits.verdict, "approve"); assert.equal(nits.nits, 2);
+  const partialNits = recommendLocalReview(clean({ status: "partial", result: { complete: false, findings: [finding("low")] } }));
+  assert.equal(partialNits.verdict, "none", "a partial run with only nits is not approval");
+  const withheld = recommendLocalReview(withResult({ findings: [finding("high", { status: "withheld" })] }));
+  assert.equal(withheld.verdict, "approve", "withheld candidates are not posted findings");
+  const failedWithFindings = recommendLocalReview({ status: "failed", result: { findings: [finding("high")] } });
+  assert.equal(failedWithFindings.verdict, "none", "a failed run's findings are not a usable result");
+});
+
+const unfinished = { path: "app.ts", lens: 0, model: "m", reason: "budget exhausted" };
+for (const [name, run, pattern] of [
+  ["unfinished reuse work", clean({ reuse: { version: 1, unfinished: [unfinished] } }), /unfinished work/],
+  ["unfinished work hidden by a clear top-level alias", clean({ reuse: { version: 1, unfinished: [] }, result: { ...clean().result, reuse: { version: 1, unfinished: [unfinished] } } }), /unfinished work|disagree/],
+  ["unsupported reuse version", clean({ reuse: { version: 2 } }), /unsupported version/],
+  ["reuse resolution failed", clean({ reuse: { version: 1, status: "failed" } }), /not resolved/],
+  ["reuse resolution error", clean({ reuse: { version: 1, error: "anchor not reachable" } }), /resolution error: anchor not reachable/],
+  ["reuse is not an object", clean({ reuse: "yes" }), /not an object/],
+  ["unverifiable PR inheritance", clean({ inheritance: { status: "inherited", sourceRunId: RUN } }), /cannot verify PR inheritance/],
+  ["unverifiable inheritance inside result", withResult({ inheritance: { sourceRunId: RUN } }), /cannot verify PR inheritance/],
+]) {
+  test(`reuse/inheritance hard gate fails closed: ${name}`, () => {
+    // Even with blocking findings present, a failed gate yields no recommendation.
+    for (const findings of [[], [finding("high")]]) {
+      const rec = recommendLocalReview({ ...run, result: { ...run.result, findings } });
+      assert.equal(rec.verdict, "none"); assert.equal(rec.approved, false); assert.match(rec.reasons.join("; "), pattern);
+    }
+  });
+}
+
+test("a present null findings list is the engine's empty list; an absent key is not", () => {
+  // Observed in production run c4d4aff0-e78b-44de-97e9-9f72a9132d99 (2026-11-05):
+  // a completed, complete clean review returned "findings": null.
+  assert.equal(recommendLocalReview(withResult({ findings: null })).verdict, "approve");
+  const absent = clean(); delete absent.result.findings;
+  assert.equal(recommendLocalReview(absent).verdict, "none");
+});
+
+test("a resolved v1 reuse receipt in both places does not block approval", () => {
+  const reuse = { version: 1, sourceRunId: RUN, reused: [{ path: "app.ts", lens: 0, model: "m" }], unfinished: [] };
+  assert.equal(recommendLocalReview(clean({ reuse, result: { ...clean().result, reuse } })).verdict, "approve");
+});
+
+// ---- CLI-level coverage against a local fixture server --------------------
+
+function git(cwd, ...args) {
+  const out = spawnSync("git", args, { cwd, encoding: "utf8", env: { ...process.env, LC_ALL: "C", GIT_CONFIG_NOSYSTEM: "1" } });
+  assert.equal(out.status, 0, out.stderr);
+  return out.stdout;
+}
+async function repository(t) {
+  const root = await mkdtemp(path.join(os.tmpdir(), "ditto-local-gate-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  git(root, "init", "-b", "main"); git(root, "config", "user.name", "Gate fixture"); git(root, "config", "user.email", "gate@example.test");
+  git(root, "remote", "add", "origin", "git@github.com:acme/project.git");
+  await writeFile(path.join(root, "app.ts"), "export const a = 1;\n"); await writeFile(path.join(root, "lib.ts"), "export const b = 1;\n");
+  git(root, "add", "."); git(root, "commit", "-m", "fixture");
+  return root;
+}
+
+/** `terminal(body)` builds the terminal run from the admitted request; a raw
+ * string is sent verbatim to exercise malformed JSON. */
+async function server(t, { terminal, admission } = {}) {
+  const calls = [];
+  const srv = http.createServer((req, res) => {
+    let body = ""; req.on("data", c => body += c);
+    req.on("end", () => {
+      const parsed = body ? JSON.parse(body) : undefined;
+      calls.push({ method: req.method, url: req.url, body: parsed });
+      const send = (status, data) => { res.writeHead(status, { "content-type": "application/json" }); res.end(typeof data === "string" ? data : JSON.stringify(data)); };
+      if (req.url === "/api/v5/review") return send(200, { repositories: [REPO] });
+      if (req.url === `/api/v5/review/repositories/${REPO.id}/local`) {
+        if (admission) return send(...admission);
+        calls.digest = parsed.snapshot.digest; calls.profile = parsed.profile;
+        return send(202, { runId: RUN, status: "queued", profile: parsed.profile, snapshotDigest: parsed.snapshot.digest, budgetCents: 25, maxSeconds: 90 });
+      }
+      if (req.url === `/api/v5/review/local/runs/${RUN}/cancel`) return send(200, { runId: RUN, status: "cancelled" });
+      if (req.url === `/api/v5/review/local/runs/${RUN}`) {
+        const out = terminal ? terminal(calls) : { status: "completed", result: clean().result };
+        return send(200, typeof out === "string" ? out : { runId: RUN, profile: calls.profile ?? "quick", snapshotDigest: calls.digest, budgetCents: 25, maxSeconds: 90, ...out });
+      }
+      send(404, { message: "unexpected route" });
+    });
+  });
+  await new Promise(resolve => srv.listen(0, "127.0.0.1", resolve));
+  t.after(() => { srv.closeAllConnections(); srv.close(); });
+  return { base: `http://127.0.0.1:${srv.address().port}`, calls };
+}
+
+function run(root, base, args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [cli, "review", ...args], { cwd: root, env: { ...process.env, DITTO_API_KEY: "ditto_mcp_fixture", DITTO_API_BASE: base, DITTO_CONFIG_DIR: path.join(root, ".git", "fixture-config") }, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "", stderr = ""; child.stdout.on("data", c => stdout += c); child.stderr.on("data", c => stderr += c);
+    child.on("error", reject); child.on("close", code => resolve({ code, stdout, stderr }));
+  });
+}
+
+test("--gate maps approve/changes/none to exit 0/2/1 and JSON carries the recommendation", async t => {
+  const root = await repository(t); await writeFile(path.join(root, "app.ts"), "export const a = 2;\n");
+  const approve = await server(t);
+  const ok = await run(root, approve.base, ["local", "--gate", "--output", "json"]);
+  assert.equal(ok.code, 0, ok.stderr); assert.deepEqual(JSON.parse(ok.stdout).recommendation, { verdict: "approve", approved: true, reasons: [], blocking: 0, nits: 0 });
+  const changes = await server(t, { terminal: () => ({ status: "completed", result: { ...clean().result, findings: [finding("medium")] } }) });
+  const ch = await run(root, changes.base, ["local", "--gate"]);
+  assert.equal(ch.code, 2, ch.stderr); assert.match(ch.stdout, /Recommendation: changes requested — 1 blocking finding/);
+  const partial = await server(t, { terminal: () => ({ status: "partial", result: { complete: false, findings: [], local: { contextComplete: false, changedCoverageComplete: true } } }) });
+  const none = await run(root, partial.base, ["local", "--gate", "--output", "json"]);
+  assert.equal(none.code, 1); const data = JSON.parse(none.stdout);
+  assert.equal(data.recommendation.verdict, "none"); assert.equal(data.recommendation.approved, false);
+  // Without --gate the historical exit codes are unchanged: findings exit 0.
+  const legacy = await run(root, changes.base, ["local"]);
+  assert.equal(legacy.code, 0, legacy.stderr);
+});
+
+test("malformed terminal responses never render a clean review and exit nonzero", async t => {
+  const root = await repository(t); await writeFile(path.join(root, "app.ts"), "export const a = 2;\n");
+  for (const result of [{ complete: true, findings: "none" }, { complete: true, findings: [null] }, { complete: "yes", findings: [] }]) {
+    const svc = await server(t, { terminal: () => ({ status: "completed", result }) });
+    const text = await run(root, svc.base, ["local"]);
+    assert.equal(text.code, 1, JSON.stringify(result)); assert.doesNotMatch(text.stdout, /No findings/); assert.match(text.stdout, /Recommendation: none \(not approval\) — malformed response/);
+    const gated = await run(root, svc.base, ["local", "--gate", "--output", "json"]);
+    assert.equal(gated.code, 1); assert.equal(JSON.parse(gated.stdout).recommendation.verdict, "none");
+  }
+  const noStatus = await server(t, { terminal: () => ({ status: 42 }) });
+  const bad = await run(root, noStatus.base, ["local", "--gate"]);
+  assert.equal(bad.code, 1); assert.match(bad.stderr, /malformed run/); assert.doesNotMatch(bad.stdout, /approve/);
+  assert.ok(noStatus.calls.some(c => c.url.endsWith("/cancel")), "a malformed in-flight run is cancelled, not left running");
+  const notJSON = await server(t, { terminal: () => "{not json" });
+  const garbage = await run(root, notJSON.base, ["local", "--gate"]);
+  assert.equal(garbage.code, 1); assert.doesNotMatch(garbage.stdout, /approve/);
+});
+
+test("a clean production-shaped receipt (findings: null) reports no findings and approves under --gate", async t => {
+  const root = await repository(t); await writeFile(path.join(root, "app.ts"), "export const a = 2;\n");
+  const svc = await server(t, { terminal: () => ({ status: "completed", result: { ...clean().result, findings: null } }) });
+  const out = await run(root, svc.base, ["local", "--gate"]);
+  assert.equal(out.code, 0, out.stderr); assert.match(out.stdout, /No findings in reviewed scope/); assert.match(out.stdout, /Recommendation: approve/);
+  assert.doesNotMatch(out.stdout, /No review result is available/);
+});
+
+test("failed and cancelled runs are no recommendation even with findings attached", async t => {
+  const root = await repository(t); await writeFile(path.join(root, "app.ts"), "export const a = 2;\n");
+  for (const status of ["failed", "cancelled"]) {
+    const svc = await server(t, { terminal: () => ({ status, error: "stopped", result: { complete: false, findings: [finding("high")] } }) });
+    const out = await run(root, svc.base, ["local", "--gate", "--output", "json"]);
+    assert.equal(out.code, 1, status); assert.equal(JSON.parse(out.stdout).recommendation.verdict, "none");
+  }
+});
+
+test("a reuse or inheritance resolution failure blocks any recommendation at the CLI", async t => {
+  const root = await repository(t); await writeFile(path.join(root, "app.ts"), "export const a = 2;\n");
+  for (const extra of [{ reuse: { version: 1, status: "failed" } }, { inheritance: { status: "inherited" } }, { reuse: { version: 1, unfinished: [unfinished] } }]) {
+    const svc = await server(t, { terminal: () => ({ status: "completed", result: { ...clean().result, findings: [finding("high")] }, ...extra }) });
+    const out = await run(root, svc.base, ["local", "--gate", "--output", "json"]);
+    assert.equal(out.code, 1, JSON.stringify(extra)); const rec = JSON.parse(out.stdout).recommendation;
+    assert.equal(rec.verdict, "none"); assert.equal(rec.approved, false);
+  }
+});
+
+test("a refused admission (the anchorRef HTTP 400) says nothing was admitted or approved", async t => {
+  const root = await repository(t); await writeFile(path.join(root, "app.ts"), "export const a = 2;\n");
+  const body = { error: { code: "review_local_input", ref: "dbgfhl8nsvo44krb0cn0", message: "Check the local review input and try again.", detail: "json: unknown field \"anchorRef\"" } };
+  const svc = await server(t, { admission: [400, body] });
+  const out = await run(root, svc.base, ["local", "--gate"]);
+  assert.equal(out.code, 1); assert.match(out.stderr, /refused the local review request \(HTTP 400 · review_local_input · dbgfhl8nsvo44krb0cn0/);
+  assert.match(out.stderr, /No review was admitted and nothing was approved/);
+  assert.equal(svc.calls.filter(c => c.method === "POST").length, 1, "a refusal is never retried");
+});
+
+test("timeouts emit a JSON receipt that is never approval and cancel the admitted run", async t => {
+  const root = await repository(t); await writeFile(path.join(root, "app.ts"), "export const a = 2;\n");
+  const svc = await server(t, { terminal: () => ({ status: "running" }) });
+  const out = await run(root, svc.base, ["local", "--timeout", "2", "--gate", "--output", "json"]);
+  assert.equal(out.code, 124, out.stderr); const data = JSON.parse(out.stdout);
+  assert.equal(data.recommendation.verdict, "none"); assert.match(data.recommendation.reasons[0], /timed out/);
+  if (data.runId) assert.ok(svc.calls.some(c => c.url.endsWith("/cancel") && c.method === "POST"));
+});
+
+test("staged, unstaged and untracked selection reaches the upload exactly", async t => {
+  const root = await repository(t);
+  await writeFile(path.join(root, "app.ts"), "staged\n"); git(root, "add", "app.ts");
+  await writeFile(path.join(root, "lib.ts"), "unstaged\n");
+  await writeFile(path.join(root, "new.ts"), "untracked\n");
+  const svc = await server(t);
+  const staged = await run(root, svc.base, ["local", "--staged", "--output", "json"]);
+  assert.equal(staged.code, 0, staged.stderr);
+  const working = await run(root, svc.base, ["local", "--profile", "deep", "--output", "json"]);
+  assert.equal(working.code, 0, working.stderr);
+  const posts = svc.calls.filter(c => c.method === "POST" && c.url.endsWith("/local"));
+  assert.deepEqual(posts[0].body.snapshot.changedPaths, ["app.ts"]); assert.equal(posts[0].body.snapshot.mode, "staged");
+  assert.deepEqual(posts[1].body.snapshot.changedPaths, ["app.ts", "lib.ts", "new.ts"]); assert.equal(posts[1].body.snapshot.mode, "workspace");
+  assert.equal(posts[1].body.profile, "deep");
+  const bad = await run(root, svc.base, ["local", "--profile", "huge"]);
+  assert.equal(bad.code, 1); assert.match(bad.stderr, /--profile must be quick, standard or deep/);
+});
+
+test("local-status never approves (it cannot verify the working tree) and local-cancel reports JSON", async t => {
+  const root = await repository(t);
+  const svc = await server(t, { terminal: () => ({ status: "completed", result: clean().result }) });
+  const status = await run(root, svc.base, ["local-status", RUN, "--gate", "--output", "json"]);
+  assert.equal(status.code, 1, status.stderr); const rec = JSON.parse(status.stdout).recommendation;
+  assert.equal(rec.verdict, "none"); assert.match(rec.reasons[0], /could not be verified/);
+  const cancel = await run(root, svc.base, ["local-cancel", RUN, "--output", "json"]);
+  assert.equal(cancel.code, 0, cancel.stderr); assert.equal(JSON.parse(cancel.stdout).status, "cancelled");
+});
