@@ -240,10 +240,28 @@ test("a frozen trace re-reads to exactly the trace that was sent", async t => {
   assert.equal(long.truncated, true);
   const id = `test-${process.pid}-${Date.now()}`;
   const file = await freezeAgentTrace(long, id);
-  t.after(() => rm(file, { force: true }));
+  t.after(() => rm(path.dirname(file), { recursive: true, force: true }));
   assert.equal((await stat(file)).mode & 0o777, 0o600);
   assert.deepEqual(await readAgentTrace(file), long);
-  // Created once: a second freeze for the same request keeps the first bytes.
-  assert.equal(await freezeAgentTrace({ format: "x", initialPrompt: "other", steps: [] }, id), file);
+  // Each freeze is its own private file; another one never touches this one.
+  const other = await freezeAgentTrace({ format: "x", initialPrompt: "other", steps: [] }, id);
+  t.after(() => rm(path.dirname(other), { recursive: true, force: true }));
+  assert.notEqual(other, file);
+  assert.equal((await stat(path.dirname(file))).mode & 0o777, 0o700);
   assert.deepEqual(await readAgentTrace(file), long);
+});
+
+test("non-string text blocks are skipped and cleaned steps re-read identically", async t => {
+  const dir = await tmp(t);
+  const file = path.join(dir, "s.jsonl");
+  await writeFile(file, jsonl([
+    { type: "user", message: { role: "user", content: [{ type: "text", text: 42 }, { type: "text", text: "Do it" }] } },
+    { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: { x: 1 } }, { type: "tool_use", name: "Bash", input: { command: "a <system-reminder>r</system-reminder> b" } }] } },
+  ]));
+  const trace = await readAgentTrace(file);
+  assert.equal(trace.initialPrompt, "Do it");
+  assert.deepEqual(trace.steps, ["tool Bash: command=a b"]);
+  const frozen = await freezeAgentTrace(trace, "replay");
+  t.after(() => rm(path.dirname(frozen), { recursive: true, force: true }));
+  assert.deepEqual(await readAgentTrace(frozen), trace);
 });

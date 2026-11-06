@@ -277,7 +277,11 @@ export async function cmdReviewLocal(options: LocalOptions): Promise<void> {
     if (options.base) args.push("--base", options.base);
     if (options.contextFile) args.push("--context-file", path.resolve(options.contextFile));
     // The session file keeps growing; recover with the exact trace sent.
-    if (trace) args.push("--trace", await freezeAgentTrace(trace, requestId));
+    if (trace) {
+      // Never fall back to the live session file: it may have grown since.
+      try { args.push("--trace", await freezeAgentTrace(trace, requestId)); }
+      catch (error) { return `unavailable: the exact trace could not be saved (${error instanceof Error ? error.message : String(error)})`; }
+    }
     if (issueKey) args.push("--issue", issueKey);
     if (options.repository) args.push("--repository", options.repository);
     if (company) args.push("--org", company.id);
@@ -799,7 +803,7 @@ export function registerReviewCommands(
     .option("--timeout <seconds>", "cancel after this many seconds including capture and queue time (1-1800)", "1200")
     .option("--request-id <uuid>", "recover an uncertain admission with exactly the same source, profile and context")
     .option("--trace <file>", "the coding agent's session (Claude Code or Codex JSONL): its prompt and steps become review input, and its linked issue's written requirements are checked; read only, never deleted")
-    .option("--issue <key>", "the Jira issue this change delivers (default: a key found in the trace prompt or context)"))
+    .option("--issue <key>", "the Jira issue this change delivers (default: a [KEY-1] tag or tracker link in the trace prompt or context)"))
     .action(cmdReviewLocal),
     `  heyditto review local --preview\n  heyditto review local --staged --profile quick --org omniaura\n  heyditto review local --base main --context-file .tmp/task.md --output json\n  heyditto review local --base main --trace ~/.claude/projects/<project>/<session>.jsonl --issue DITTO-2434\n\nExit status: 0 approved or no blocking issue, 1 incomplete or failed, ${REQUEST_CHANGES_EXIT} changes requested.`);
   scoped(review.command("local-status").description("inspect a pre-PR review run without starting or retrying it")
