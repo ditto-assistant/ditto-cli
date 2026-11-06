@@ -550,6 +550,16 @@ test("a launch attaches the profile's Stop hook; --no-hooks and another endpoint
     assert.equal(same.status, 0, same.stderr);
     assert.deepEqual(JSON.parse(same.stdout).hooks, ["Stop (unpushed)"], "naming the profile's endpoint keeps its hooks");
 
+    const elsewhere = await startStub([{ id: "ep-other-org", slug: "ditto-dev", companyId: "dddddddd-dddd-dddd-dddd-dddddddddddd", model: "m", status: "active", providerOptions: {} }]);
+    try {
+      const sameSlug = await run(["claude", "--dry-run", "--endpoint", "ditto-dev"], elsewhere.base, dir);
+      assert.equal(sameSlug.status, 0, sameSlug.stderr);
+      assert.equal(JSON.parse(sameSlug.stdout).endpoint.id, "ep-other-org");
+      assert.deepEqual(JSON.parse(sameSlug.stdout).hooks, [], "the same slug in another organization is not the profile's endpoint");
+    } finally {
+      elsewhere.close();
+    }
+
     const other = await run(["claude", "--dry-run", "--endpoint", "alpha"], stub.base, dir);
     assert.equal(other.status, 0, other.stderr);
     assert.deepEqual([JSON.parse(other.stdout).hooks, stopCommands(other.stdout)], [[], []], "another endpoint gets none of this repository's hooks");

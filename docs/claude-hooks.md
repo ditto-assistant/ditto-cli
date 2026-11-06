@@ -97,9 +97,16 @@ eight consecutive blocks.
 
 It **under-reports rather than guesses**. A repository with no remote, a
 detached HEAD, an unreachable remote, a remote tip this clone never fetched,
-or any git error counts as nothing to report. The script exits 0 in every
-case. Git calls time out after 5 s (8 s for `ls-remote`), at most 64
-repositories are checked, and the hook's own timeout is 60 s.
+or any git error counts as nothing to report. Input it cannot parse (cut
+short, or not JSON) is never blocked, because the hook cannot tell whether it
+already asked; only an empty input reads as a first stop. The script exits 0
+in every case.
+
+It is **bounded**. Git calls time out after 5 s (8 s for `ls-remote`) and
+share one 50 s budget inside the hook's 60 s timeout, so a slow repository
+costs the ones after it their check, never the decision. At most 64
+repositories are checked. A pattern that resolves through a symlink to
+somewhere outside the repository is skipped.
 
 What it carries: the hook command holds the repository root, check names, path
 patterns and profile file name, base64url-encoded in argv. That is no key and

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { planClaude } from "../dist/agents/claude.js";
 import { claudeHookAttachment, decodeHookArgs, parseClaudeHooks, stopHookScriptPath } from "../dist/agents/claude-hooks.js";
 import { claudeMcpAttachment } from "../dist/agents/claude-mcp.js";
-import { expandRepos, stopFindings, stopHookOutput, unpushedProblems } from "../dist/agents/claude-stop-hook.js";
+import { expandRepos, hookInput, stopFindings, stopHookOutput, unpushedProblems } from "../dist/agents/claude-stop-hook.js";
 import { claudeHookSettings, withHookArgs } from "../dist/remote/hooks.js";
 
 const GIT_ENV = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.test", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.test", GIT_CONFIG_NOSYSTEM: "1", HOME: os.tmpdir() };
@@ -230,9 +230,61 @@ test("the compiled Stop hook: a block decision on stdout, exit 0 always", async 
   const again = await runHook([encoded], JSON.stringify({ hook_event_name: "Stop", stop_hook_active: true }));
   assert.deepEqual([again.status, again.stdout], [0, ""]);
 
-  for (const [argv, stdin] of [[[], input], [["not-base64-json"], input], [[encoded], "not json"]]) {
+  // Input cut short mid-JSON: the hook cannot see stop_hook_active, so it must not block.
+  for (const [argv, stdin] of [[[], input], [["not-base64-json"], input], [[encoded], "not json"], [[encoded], input.slice(0, 40)]]) {
     const r = await runHook(argv, stdin);
-    assert.equal(r.status, 0, `${argv} must never fail the turn`);
-    if (argv[0] !== encoded) assert.equal(r.stdout, "");
+    assert.deepEqual([r.status, r.stdout], [0, ""], `${argv} / ${stdin.slice(0, 20)} must neither fail nor block the turn`);
   }
+  // No input at all still reads as a first stop.
+  const empty = await runHook([encoded], "");
+  assert.equal(JSON.parse(empty.stdout).decision, "block");
+});
+
+test("hookInput: empty is a first stop, unreadable is unknown", () => {
+  assert.equal(hookInput(""), undefined);
+  assert.equal(hookInput("  \n"), undefined);
+  assert.deepEqual(hookInput('{"stop_hook_active":true}'), { stop_hook_active: true });
+  assert.equal(hookInput('{"stop_hook_active":tr'), null);
+  assert.equal(hookInput("[1]"), null);
+  assert.equal(hookInput("null"), null);
+});
+
+test("expandRepos: symlinks never lead outside the root", async () => {
+  const root = tmp("ditto-hooks-root-");
+  const outside = tmp("ditto-hooks-outside-");
+  mkdirSync(path.join(outside, "repo", ".git"), { recursive: true });
+  mkdirSync(path.join(outside, ".git"));
+  mkdirSync(path.join(root, "real", "repo", ".git"), { recursive: true });
+  symlinkSync(outside, path.join(root, "out"));
+  symlinkSync(path.join(root, "real"), path.join(root, "alias"));
+  const rel = async (patterns) => (await expandRepos(root, patterns)).map((r) => path.relative(root, r));
+  assert.deepEqual(await rel(["out", "out/repo"]), [], "a link out of the root is refused");
+  assert.deepEqual(await rel(["alias/repo"]), [path.join("alias", "repo")], "a link that stays inside is fine");
+  assert.deepEqual(await rel(["real/*"]), [path.join("real", "repo")]);
+});
+
+test("expandRepos: stops at 64 repositories, even across patterns", async () => {
+  const root = tmp("ditto-hooks-cap-");
+  for (let i = 0; i < 70; i += 1) mkdirSync(path.join(root, "a", `r${String(i).padStart(2, "0")}`, ".git"), { recursive: true });
+  mkdirSync(path.join(root, "b", "late", ".git"), { recursive: true });
+  const found = await expandRepos(root, ["a/*", "b/*"]);
+  assert.equal(found.length, 64);
+  assert.ok(found.every((r) => r.includes(`${path.sep}a${path.sep}`)), "a later pattern adds nothing once the cap is reached");
+});
+
+test("stopFindings: one shared budget bounds every git call", async () => {
+  const root = tmp("ditto-hooks-budget-");
+  for (const r of ["r1", "r2", "r3", "r4"]) mkdirSync(path.join(root, r, ".git"), { recursive: true });
+  const timeouts = [];
+  // A git that is always slow: each call takes its whole timeout and answers dirty.
+  const slow = (cwd, args, timeoutMs) => {
+    timeouts.push(timeoutMs);
+    return new Promise((resolve) => setTimeout(() => resolve(args[0] === "status" ? " M f\n" : undefined), Math.min(timeoutMs, 80)));
+  };
+  const started = Date.now();
+  const findings = await stopFindings({ root, checks: ["unpushed"], repos: ["*"], source: "s" }, slow, 200);
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 600, `finished in ${elapsed} ms`);
+  assert.ok(findings.length >= 1 && findings.length < 4, `checked ${findings.length} of 4 before the budget ran out`);
+  assert.ok(timeouts.every((t) => t <= 200), "no call is given more than what is left");
 });

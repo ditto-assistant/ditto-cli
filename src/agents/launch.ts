@@ -148,8 +148,16 @@ async function repoHooks(
       log(`${c("yellow", "repository hooks skipped")}: ${(err as Error).message}`);
       return undefined;
     }
-    const sameOwner = profile && (profile.owner.kind === "org" ? Boolean(endpoint.companyId) : !endpoint.companyId);
-    if (!profile || profile.slug !== endpoint.slug || !sameOwner) return undefined;
+    if (!profile || profile.slug !== endpoint.slug) return undefined;
+    // The same slug can exist in another organization: only the profile's own
+    // endpoint (its exact owner) gets the repository's hooks.
+    let own = false;
+    try {
+      own = (await findProfileEndpoint(profile, [endpoint])) !== undefined;
+    } catch {
+      own = false;
+    }
+    if (!own) return undefined;
   }
   if (!profile?.hooks) return undefined;
   const source = profile.file ?? ".ditto";

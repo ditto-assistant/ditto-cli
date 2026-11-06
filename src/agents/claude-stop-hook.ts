@@ -16,7 +16,7 @@
  */
 import { execFile } from "node:child_process";
 import { realpathSync } from "node:fs";
-import { readdir, stat } from "node:fs/promises";
+import { readdir, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { decodeHookArgs, type StopHookArgs } from "./claude-hooks.js";
@@ -25,6 +25,12 @@ import { decodeHookArgs, type StopHookArgs } from "./claude-hooks.js";
 const MAX_REPOS = 64;
 const GIT_TIMEOUT_MS = 5_000;
 const REMOTE_TIMEOUT_MS = 8_000;
+/**
+ * All checks share one deadline inside the hook's 60 s timeout
+ * (STOP_HOOK_TIMEOUT_S), so a slow repository costs the ones after it their
+ * check, never the block decision for the ones already found.
+ */
+export const STOP_BUDGET_MS = 50_000;
 
 export interface RepoFinding {
   /** Path relative to the root, "." for the root itself. */
@@ -59,14 +65,33 @@ async function exists(p: string): Promise<boolean> {
   }
 }
 
+/** `dir` resolves (symlinks included) to `root` or somewhere beneath it. */
+async function within(realRoot: string, dir: string): Promise<boolean> {
+  try {
+    const rel = path.relative(realRoot, await realpath(dir));
+    return rel === "" || (rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Expands the profile's repo patterns under `root`. `*` matches one directory
  * name (hidden ones excluded); anything else is literal. Only directories that
- * hold a `.git` (a clone or a worktree) count. Sorted, deduplicated, bounded.
+ * hold a `.git` (a clone or a worktree) and resolve inside `root` count, so a
+ * symlink in a pattern never points the checks at another repository.
+ * Sorted, deduplicated, bounded.
  */
 export async function expandRepos(root: string, patterns: string[]): Promise<string[]> {
   const found = new Set<string>();
+  let realRoot: string;
+  try {
+    realRoot = await realpath(root);
+  } catch {
+    return [];
+  }
   for (const pattern of patterns) {
+    if (found.size >= MAX_REPOS) break;
     let dirs = [path.resolve(root)];
     for (const segment of pattern.split(/[\\/]/).filter((s) => s && s !== ".")) {
       const next: string[] = [];
@@ -88,7 +113,7 @@ export async function expandRepos(root: string, patterns: string[]): Promise<str
     }
     for (const dir of dirs) {
       if (found.size >= MAX_REPOS) break;
-      if (await exists(path.join(dir, ".git"))) found.add(dir);
+      if ((await exists(path.join(dir, ".git"))) && (await within(realRoot, dir))) found.add(dir);
     }
   }
   return [...found].sort();
@@ -139,12 +164,22 @@ export async function unpushedProblems(repo: string, git: Git = runGit): Promise
   return problems;
 }
 
-/** Every listed repository's problems; repositories with none are omitted. */
-export async function stopFindings(args: StopHookArgs, git: Git = runGit): Promise<RepoFinding[]> {
+/**
+ * Every listed repository's problems; repositories with none are omitted.
+ * Each git call gets only what is left of the shared budget, and repositories
+ * reached after it runs out are not checked.
+ */
+export async function stopFindings(args: StopHookArgs, git: Git = runGit, budgetMs = STOP_BUDGET_MS): Promise<RepoFinding[]> {
   if (!args.checks.includes("unpushed")) return [];
+  const deadline = Date.now() + budgetMs;
+  const bounded: Git = (cwd, gitArgs, timeoutMs = GIT_TIMEOUT_MS) => {
+    const left = deadline - Date.now();
+    return left <= 0 ? Promise.resolve(undefined) : git(cwd, gitArgs, Math.min(timeoutMs, left));
+  };
   const findings: RepoFinding[] = [];
   for (const repo of await expandRepos(args.root, args.repos)) {
-    const problems = await unpushedProblems(repo, git);
+    if (Date.now() >= deadline) break;
+    const problems = await unpushedProblems(repo, bounded);
     if (problems.length) findings.push({ repo: path.relative(args.root, repo) || ".", problems });
   }
   return findings;
@@ -187,16 +222,26 @@ function readStdin(timeoutMs: number): Promise<string> {
   });
 }
 
+/**
+ * The Stop input. No input at all reads as a first stop. Input that cannot be
+ * parsed (cut short, or not JSON) returns null: the hook cannot tell whether
+ * it already blocked this stop, so it must not block it.
+ */
+export function hookInput(raw: string): Record<string, unknown> | undefined | null {
+  if (!raw.trim()) return undefined;
+  try {
+    const v = JSON.parse(raw) as unknown;
+    return typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
 async function main(): Promise<void> {
   const args = decodeHookArgs(process.argv[2] ?? "");
   if (!args) return;
-  let input: Record<string, unknown> | undefined;
-  try {
-    const v = JSON.parse(await readStdin(2000)) as unknown;
-    if (typeof v === "object" && v !== null) input = v as Record<string, unknown>;
-  } catch {
-    // No input: treat as a first stop.
-  }
+  const input = hookInput(await readStdin(5000));
+  if (input === null) return;
   const out = await stopHookOutput(input, args);
   // stdout is an asynchronous pipe on macOS: exit only once it is flushed.
   if (out) await new Promise<void>((resolve) => process.stdout.write(`${out}\n`, () => resolve()));
