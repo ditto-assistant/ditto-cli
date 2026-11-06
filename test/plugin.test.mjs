@@ -70,7 +70,12 @@ test("session links select a public graph alias and never use an internal storag
   const link=new URL(remoteSessionURL({threadId:"external:session",kgID:"app_ditto-private-owner",graphAlias:"omniaura/ditto"}));
   assert.equal(link.searchParams.get("graph"),"omniaura/ditto");
   assert.equal(link.pathname,"/chat/external%3Asession");
-  assert.equal(new URL(remoteSessionURL({threadId:"t",kgID:"app_ditto-private-owner"})).search,"");
+  // No selectable alias for a non-personal home: no link, rather than a bare
+  // /chat/<id> that would open Personal Space where the thread does not live.
+  assert.equal(remoteSessionURL({threadId:"t",kgID:"app_ditto-private-owner"}),undefined);
+  assert.equal(remoteSessionURL({threadId:"t",kgID:"app_ditto-private-owner",graphAlias:""}),undefined);
+  assert.equal(new URL(remoteSessionURL({threadId:"t",kgID:""})).search,"");
+  assert.equal(new URL(remoteSessionURL({threadId:"t",kgID:"",graphAlias:"main"})).searchParams.get("graph"),"main");
 });
 
 
