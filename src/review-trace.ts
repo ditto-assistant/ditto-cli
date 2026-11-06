@@ -83,8 +83,9 @@ function codex(lines: unknown[]): Collected | null {
     const p = o.payload;
     if (p.type === "message") {
       const text = clean((p.content ?? []).map(c => c.text ?? "").join("\n"));
-      // Codex injects AGENTS.md and an environment block as user turns.
-      if (!text || text.startsWith("<") || text.startsWith("# AGENTS.md")) continue;
+      // Codex injects AGENTS.md, user instructions and an environment block
+      // as user turns; a real prompt may itself start with "<".
+      if (!text || /^(?:# AGENTS\.md|<environment_context>|<user_instructions>|<permissions instructions>)/.test(text)) continue;
       if (p.role === "user") { if (!out.prompt) out.prompt = text; else out.steps.push("user: " + oneLine(text)); }
       else if (p.role === "assistant") out.steps.push("said: " + oneLine(text));
     } else if (p.type === "function_call" || p.type === "custom_tool_call" || p.type === "local_shell_call") {
@@ -129,9 +130,11 @@ export async function readAgentTrace(file: string): Promise<AgentTrace> {
   if (info.size > MAX_TRACE_FILE_BYTES) throw new Error("--trace file is larger than 256 MiB");
   const text = new TextDecoder("utf-8", { fatal: false }).decode(await readFile(file));
   const trimmed = text.trim();
-  if (trimmed.startsWith("{") && !trimmed.includes("\n")) {
-    // A single JSON object: the generic shape any agent can write.
-    const o = JSON.parse(trimmed) as Partial<AgentTrace>;
+  let whole: unknown;
+  if (trimmed.startsWith("{")) { try { whole = JSON.parse(trimmed); } catch { /* JSONL, one object per line */ } }
+  if (whole && typeof whole === "object" && !Array.isArray(whole)) {
+    // A single JSON object (pretty-printed or not): the generic shape any agent can write.
+    const o = whole as Partial<AgentTrace>;
     if (typeof o.initialPrompt === "string") {
       return boundTrace(o.format ?? "json", clean(o.initialPrompt), Array.isArray(o.steps) ? o.steps.filter((s): s is string => typeof s === "string").map(s => oneLine(clean(s))) : []);
     }
