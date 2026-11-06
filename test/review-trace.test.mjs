@@ -36,6 +36,7 @@ const codexRollout = jsonl([
   { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "# AGENTS.md instructions" }] } },
   { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "<environment_context>cwd</environment_context>" }] } },
   { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "Fix OPS-9 retries" }] } },
+  { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "<b>also</b> keep the logs" }] } },
   { type: "response_item", payload: { type: "reasoning", summary: [] } },
   { type: "response_item", payload: { type: "function_call", name: "shell", arguments: JSON.stringify({ command: ["go", "test"] , cmd: "go test ./webhooks" }) } },
   { type: "response_item", payload: { type: "custom_tool_call", name: "apply_patch", input: "*** Begin Patch\n*** Update File: webhooks/retry.go" } },
@@ -64,13 +65,13 @@ test("reads a Codex rollout, skipping injected AGENTS.md and environment turns",
   const trace = await readAgentTrace(file);
   assert.equal(trace.format, "codex");
   assert.equal(trace.initialPrompt, "Fix OPS-9 retries");
-  assert.deepEqual(trace.steps, ["tool shell: cmd=go test ./webhooks", "tool apply_patch: *** Begin Patch *** Update File: webhooks/retry.go", "said: Done."]);
+  assert.deepEqual(trace.steps, ["user: <b>also</b> keep the logs", "tool shell: cmd=go test ./webhooks", "tool apply_patch: *** Begin Patch *** Update File: webhooks/retry.go", "said: Done."]);
 });
 
 test("reads the generic {initialPrompt, steps} JSON and rejects files with no prompt", async t => {
   const dir = await tmp(t);
   const generic = path.join(dir, "trace.json");
-  await writeFile(generic, JSON.stringify({ format: "my-agent", initialPrompt: "Do DITTO-1", steps: ["edited a.go", 3, "ran\ntests"] }));
+  await writeFile(generic, JSON.stringify({ format: "my-agent", initialPrompt: "Do DITTO-1", steps: ["edited a.go", 3, "ran\ntests"] }, null, 2));
   assert.deepEqual(await readAgentTrace(generic), { format: "my-agent", initialPrompt: "Do DITTO-1", steps: ["edited a.go", "ran tests"] });
   const empty = path.join(dir, "empty.jsonl");
   await writeFile(empty, jsonl([{ type: "assistant", message: { content: [{ type: "text", text: "no prompt" }] } }]));
@@ -189,5 +190,5 @@ test("preview reports the trace without uploading it", async t => {
   const out = await run(root, "http://127.0.0.1:9", ["local", "--preview", "--trace", traceFile, "--output", "json"]);
   assert.equal(out.code, 0, out.stderr);
   const preview = JSON.parse(out.stdout);
-  assert.deepEqual(preview.trace, { format: "codex", promptBytes: 17, steps: 3, truncated: false });
+  assert.deepEqual(preview.trace, { format: "codex", promptBytes: 17, steps: 4, truncated: false });
 });
