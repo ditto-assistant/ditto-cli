@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { boundTrace, MAX_STEPS, MAX_STEPS_BYTES, readAgentTrace } from "../dist/review-trace.js";
+import { boundTrace, freezeAgentTrace, MAX_STEPS, MAX_STEPS_BYTES, readAgentTrace } from "../dist/review-trace.js";
 
 const cli = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
 const REPO = { id: "33333333-3333-3333-3333-333333333333", fullName: "acme/project", enabled: true };
@@ -191,4 +191,59 @@ test("preview reports the trace without uploading it", async t => {
   assert.equal(out.code, 0, out.stderr);
   const preview = JSON.parse(out.stdout);
   assert.deepEqual(preview.trace, { format: "codex", promptBytes: 17, steps: 4, truncated: false });
+});
+
+test("null content blocks are skipped and a Codex local shell call keeps its command", async t => {
+  const dir = await tmp(t);
+  const claude = path.join(dir, "claude.jsonl");
+  await writeFile(claude, jsonl([
+    { type: "user", message: { role: "user", content: [null, 7, { type: "text", text: "Do DITTO-9" }] } },
+    { type: "assistant", message: { role: "assistant", content: [null, { type: "tool_use", name: "Bash", input: { command: "ls" } }] } },
+  ]));
+  const a = await readAgentTrace(claude);
+  assert.equal(a.initialPrompt, "Do DITTO-9");
+  assert.deepEqual(a.steps, ["tool Bash: command=ls"]);
+  const rollout = path.join(dir, "codex.jsonl");
+  await writeFile(rollout, jsonl([
+    { type: "response_item", payload: { type: "message", role: "user", content: [null, { type: "input_text", text: "Fix it" }] } },
+    { type: "response_item", payload: { type: "local_shell_call", action: { type: "exec", command: ["go", "test", "./..."] } } },
+  ]));
+  const b = await readAgentTrace(rollout);
+  assert.equal(b.initialPrompt, "Fix it");
+  assert.deepEqual(b.steps, ["tool local_shell_call: command=go test ./..."]);
+});
+
+test("generic JSON needs a non-empty prompt and a string format", async t => {
+  const dir = await tmp(t);
+  const empty = path.join(dir, "empty.json");
+  await writeFile(empty, JSON.stringify({ initialPrompt: "  ", format: 123 }));
+  await assert.rejects(readAgentTrace(empty), /user prompt/);
+  const odd = path.join(dir, "odd.json");
+  await writeFile(odd, JSON.stringify({ initialPrompt: "Do it", format: 123 }));
+  assert.equal((await readAgentTrace(odd)).format, "json");
+  await writeFile(odd, JSON.stringify({ initialPrompt: "Do it", format: "x".repeat(80) }));
+  assert.equal((await readAgentTrace(odd)).format.length, 40);
+});
+
+test("verbose early steps cannot crowd out the session's ending", () => {
+  const steps = [...Array.from({ length: 150 }, (_, i) => `early ${i} ` + "x".repeat(2000)), ...Array.from({ length: 30 }, (_, i) => `late ${i}`)];
+  const trace = boundTrace("x", "p", steps);
+  assert.equal(trace.truncated, true);
+  assert.ok(trace.steps.reduce((n, s) => n + Buffer.byteLength(s), 0) <= MAX_STEPS_BYTES);
+  assert.match(trace.steps[0], /^early 0 /);
+  assert.equal(trace.steps.at(-1), "late 29");
+  assert.ok(trace.steps.includes("late 0"));
+});
+
+test("a frozen trace re-reads to exactly the trace that was sent", async t => {
+  const long = boundTrace("claude-code", "Do DITTO-2434 <x>", Array.from({ length: 900 }, (_, i) => `step ${i} ` + "y".repeat(100)));
+  assert.equal(long.truncated, true);
+  const id = `test-${process.pid}-${Date.now()}`;
+  const file = await freezeAgentTrace(long, id);
+  t.after(() => rm(file, { force: true }));
+  assert.equal((await stat(file)).mode & 0o777, 0o600);
+  assert.deepEqual(await readAgentTrace(file), long);
+  // Created once: a second freeze for the same request keeps the first bytes.
+  assert.equal(await freezeAgentTrace({ format: "x", initialPrompt: "other", steps: [] }, id), file);
+  assert.deepEqual(await readAgentTrace(file), long);
 });

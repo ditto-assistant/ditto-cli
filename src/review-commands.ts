@@ -8,7 +8,7 @@ import { cmdReviewAccess, diagnoseLinkRefusal, guideAccessForAdd } from "./githu
 import { registerReviewFindingCommands } from "./review-findings.js";
 import { readStoredAuth } from "./store.js";
 import { captureReviewSnapshot, reviewGit } from "./review-snapshot.js";
-import { readAgentTrace, type AgentTrace } from "./review-trace.js";
+import { freezeAgentTrace, readAgentTrace, type AgentTrace } from "./review-trace.js";
 
 /**
  * Ditto Review repository settings: the developer console's Review →
@@ -270,13 +270,14 @@ export async function cmdReviewLocal(options: LocalOptions): Promise<void> {
   process.on("SIGINT", onInt); process.on("SIGTERM", onTerm);
   const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeout);
   const requestId = options.requestId?.toLowerCase() ?? randomUUID();
-  const recovery = (): string => {
+  const recovery = async (): Promise<string> => {
     const args = ["heyditto", "review", "local", "--request-id", requestId, "--profile", profile];
     if (capturedRoot) args.push("--directory", capturedRoot);
     if (options.staged) args.push("--staged");
     if (options.base) args.push("--base", options.base);
     if (options.contextFile) args.push("--context-file", path.resolve(options.contextFile));
-    if (options.trace) args.push("--trace", path.resolve(options.trace));
+    // The session file keeps growing; recover with the exact trace sent.
+    if (trace) args.push("--trace", await freezeAgentTrace(trace, requestId));
     if (issueKey) args.push("--issue", issueKey);
     if (options.repository) args.push("--repository", options.repository);
     if (company) args.push("--org", company.id);
@@ -353,16 +354,16 @@ export async function cmdReviewLocal(options: LocalOptions): Promise<void> {
     }
     if (interrupted || timedOut) {
       process.stderr.write(`${timedOut ? "Local review timed out" : "Local review interrupted"}${runId ? ` (run ${runId})` : posted ? `; admission outcome is unknown (request ${requestId})` : ""}.\n`);
-      if (posted && !runId) process.stderr.write(`Recover the same admission: ${recovery()}\nChanged source, profile or context is refused; no automatic retry was made.\n`);
+      if (posted && !runId) process.stderr.write(`Recover the same admission: ${await recovery()}\nChanged source, profile or context is refused; no automatic retry was made.\n`);
       process.exitCode = interrupted || 124;
       return;
     }
     if (posted && !runId && error instanceof ApiError && error.status >= 400 && error.status < 500) {
       if (error.status === 404) throw new Error("The local review endpoint is unavailable on this Ditto backend; no local review was admitted.");
-      if (error.status === 400 && (issueKey || trace)) throw new Error(`${error.message}\nThis Ditto backend may not accept --trace or --issue yet; no local review was admitted.`);
+      if (error.status === 400 && (issueKey || trace)) throw new Error(`${error.message}\nThe review API refused the request (HTTP 400); no local review was admitted.`);
       throw error;
     }
-    if (posted && !runId) throw new Error(`${error instanceof Error ? error.message : String(error)}\nAdmission outcome is unknown; request ${requestId}.\nRecover the same admission: ${recovery()}\nChanged source, profile or context is refused; no automatic retry was made.`);
+    if (posted && !runId) throw new Error(`${error instanceof Error ? error.message : String(error)}\nAdmission outcome is unknown; request ${requestId}.\nRecover the same admission: ${await recovery()}\nChanged source, profile or context is refused; no automatic retry was made.`);
     throw error;
   } finally {
     clearTimeout(timer); process.removeListener("SIGINT", onInt); process.removeListener("SIGTERM", onTerm);

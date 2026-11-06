@@ -5,7 +5,9 @@
 // and the diff, and can request changes when a written requirement is
 // missing. The file is only read: it is never modified, moved or deleted.
 
-import { readFile, stat } from "node:fs/promises";
+import { readFile, stat, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 export interface AgentTrace {
   format: string;
@@ -31,6 +33,7 @@ function clip(text: string, bytes: number): string {
   return cut + "…";
 }
 
+const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const oneLine = (text: string) => text.replace(/\s+/g, " ").trim();
 const clean = (text: string) => text.replace(/\0/g, "").replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "").trim();
 
@@ -59,7 +62,8 @@ function claudeCode(lines: unknown[]): Collected | null {
     if ((o.type !== "user" && o.type !== "assistant") || !o.message || o.isSidechain) continue;
     seen = true;
     const content = o.message.content;
-    const blocks: { type?: string; text?: string; name?: string; input?: unknown }[] = typeof content === "string" ? [{ type: "text", text: content }] : Array.isArray(content) ? content : [];
+    type Block = { type?: string; text?: string; name?: string; input?: unknown };
+    const blocks: Block[] = typeof content === "string" ? [{ type: "text", text: content }] : Array.isArray(content) ? content.filter(isObject) as Block[] : [];
     for (const b of blocks) {
       if (o.type === "user" && b.type === "text" && !o.isMeta) {
         const text = clean(b.text ?? "");
@@ -77,19 +81,21 @@ function codex(lines: unknown[]): Collected | null {
   const out: Collected = { prompt: "", steps: [] };
   let seen = false;
   for (const raw of lines) {
-    const o = raw as { type?: string; payload?: { type?: string; role?: string; content?: { type?: string; text?: string }[]; name?: string; arguments?: string; input?: unknown } };
+    const o = raw as { type?: string; payload?: { type?: string; role?: string; content?: { type?: string; text?: string }[]; name?: string; arguments?: string; input?: unknown; action?: { command?: unknown } } };
     if (o.type !== "response_item" || !o.payload) continue;
     seen = true;
     const p = o.payload;
     if (p.type === "message") {
-      const text = clean((p.content ?? []).map(c => c.text ?? "").join("\n"));
+      const text = clean((Array.isArray(p.content) ? p.content.filter(isObject) : []).map(c => typeof c.text === "string" ? c.text : "").join("\n"));
       // Codex injects AGENTS.md, user instructions and an environment block
       // as user turns; a real prompt may itself start with "<".
       if (!text || /^(?:# AGENTS\.md|<environment_context>|<user_instructions>|<permissions instructions>)/.test(text)) continue;
       if (p.role === "user") { if (!out.prompt) out.prompt = text; else out.steps.push("user: " + oneLine(text)); }
       else if (p.role === "assistant") out.steps.push("said: " + oneLine(text));
     } else if (p.type === "function_call" || p.type === "custom_tool_call" || p.type === "local_shell_call") {
-      let input: unknown = p.input ?? p.arguments;
+      // A local shell call carries its command in action.command.
+      const command = p.action?.command;
+      let input: unknown = p.input ?? p.arguments ?? (Array.isArray(command) ? { command: command.join(" ") } : typeof command === "string" ? { command } : undefined);
       if (typeof input === "string") { try { input = JSON.parse(input); } catch { /* raw text input */ } }
       out.steps.push(toolStep(p.name ?? p.type, input));
     }
@@ -106,21 +112,42 @@ export function boundTrace(format: string, prompt: string, steps: string[]): Age
   const size = (list: string[]) => list.reduce((n, s) => n + Buffer.byteLength(s), 0);
   if (kept.length > MAX_STEPS || size(kept) > MAX_STEPS_BYTES) {
     truncated = true;
-    const head = clipped.slice(0, HEAD_STEPS);
-    const tail: string[] = [];
-    let budget = MAX_STEPS_BYTES - size(head);
-    for (let i = clipped.length - 1; i >= HEAD_STEPS && tail.length < MAX_STEPS - head.length; i--) {
-      const n = Buffer.byteLength(clipped[i]);
+    // The head may use at most half the byte budget, so verbose early steps
+    // cannot crowd out the session's ending; the tail fills the rest from
+    // the end, skipping a step that does not fit rather than stopping.
+    const head: string[] = [];
+    let budget = MAX_STEPS_BYTES / 2;
+    for (const s of clipped.slice(0, HEAD_STEPS)) {
+      const n = Buffer.byteLength(s);
       if (n > budget) break;
+      head.push(s);
+      budget -= n;
+    }
+    budget = MAX_STEPS_BYTES - size(head);
+    const tail: string[] = [];
+    for (let i = clipped.length - 1; i >= head.length && tail.length < MAX_STEPS - head.length; i--) {
+      const n = Buffer.byteLength(clipped[i]);
+      if (n > budget) continue;
       tail.unshift(clipped[i]);
       budget -= n;
     }
     kept = [...head, ...tail];
-    while (size(kept) > MAX_STEPS_BYTES) kept.splice(Math.floor(kept.length / 2), 1);
   }
   const trace: AgentTrace = { format, initialPrompt: clip(prompt, MAX_PROMPT_BYTES), steps: kept };
   if (truncated) trace.truncated = true;
   return trace;
+}
+
+/**
+ * Save the exact trace an uncertain admission sent, so its recovery command
+ * re-sends the same bytes even though the agent's own session file keeps
+ * growing. The file is private (0600), created once, and never deleted.
+ */
+export async function freezeAgentTrace(trace: AgentTrace, requestId: string): Promise<string> {
+  const file = path.join(os.tmpdir(), `ditto-review-trace-${requestId}.json`);
+  try { await writeFile(file, JSON.stringify(trace), { mode: 0o600, flag: "wx" }); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+  return file;
 }
 
 /** Read an agent trace: Claude Code or Codex JSONL, or {initialPrompt, steps} JSON. */
@@ -135,8 +162,13 @@ export async function readAgentTrace(file: string): Promise<AgentTrace> {
   if (whole && typeof whole === "object" && !Array.isArray(whole)) {
     // A single JSON object (pretty-printed or not): the generic shape any agent can write.
     const o = whole as Partial<AgentTrace>;
-    if (typeof o.initialPrompt === "string") {
-      return boundTrace(o.format ?? "json", clean(o.initialPrompt), Array.isArray(o.steps) ? o.steps.filter((s): s is string => typeof s === "string").map(s => oneLine(clean(s))) : []);
+    const prompt = typeof o.initialPrompt === "string" ? clean(o.initialPrompt) : "";
+    if (prompt) {
+      const format = typeof o.format === "string" && o.format.trim() ? o.format.trim().slice(0, 40) : "json";
+      const trace = boundTrace(format, prompt, Array.isArray(o.steps) ? o.steps.filter((s): s is string => typeof s === "string").map(s => oneLine(clean(s))) : []);
+      // A frozen trace (see freezeAgentTrace) reproduces the one it saved.
+      if (o.truncated === true) trace.truncated = true;
+      return trace;
     }
   }
   const lines: unknown[] = [];
