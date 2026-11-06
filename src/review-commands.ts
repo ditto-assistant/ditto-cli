@@ -209,7 +209,8 @@ export async function cmdReviewLocal(options: LocalOptions): Promise<void> {
   const profile = options.profile ?? "quick";
   if (!["quick", "standard", "deep"].includes(profile)) throw new Error("--profile must be quick, standard or deep");
   if (options.requestId) { try { runPath(options.requestId); } catch { throw new Error("--request-id must be a UUID"); } }
-  const timeout = intFlag("--timeout", options.timeout ?? "1200", 1, 1800) * 1000;
+  // A deep run may wait up to 10 minutes queued and then run 15 (DITTO-2455).
+  const timeout = intFlag("--timeout", options.timeout ?? (profile === "deep" ? "1800" : "1200"), 1, 1800) * 1000;
   const context = options.contextFile ? new TextDecoder("utf-8", { fatal: true }).decode(await readFile(options.contextFile)) : undefined;
   if (context && (Buffer.byteLength(context) > 16000 || context.includes("\0"))) throw new Error("--context-file must contain at most 16000 UTF-8 bytes without NUL characters");
   // Preview deliberately has no auth or network dependency.
@@ -739,7 +740,7 @@ export function registerReviewCommands(
     .option("--repository <owner/name>", "Review repository (default: current checkout's GitHub origin)")
     .option("--directory <directory>", "checkout to review (default: current directory)")
     .option("--preview", "inspect selected paths and upload size locally; no auth, upload or inference")
-    .option("--timeout <seconds>", "cancel after this many seconds including capture and queue time (1-1800)", "1200")
+    .option("--timeout <seconds>", "cancel after this many seconds including capture and queue time (1-1800; default 1200, 1800 for deep)")
     .option("--request-id <uuid>", "recover an uncertain admission with exactly the same source, profile and context"))
     .action(cmdReviewLocal),
     `  heyditto review local --preview\n  heyditto review local --staged --profile quick --org omniaura\n  heyditto review local --base main --context-file .tmp/task.md --output json`);
