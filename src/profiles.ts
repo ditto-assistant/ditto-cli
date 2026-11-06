@@ -206,13 +206,21 @@ export async function cmdProfileList(options: OutputOptions): Promise<void> {
 export async function cmdProfileCreate(rawName: string, options: OutputOptions & { endpoint: string; inference?: string; use?: boolean }): Promise<void> {
   const name = validateProfileName(rawName);
   const inference = inferenceOf(options.inference);
+  const assertCreatable = (view: ProfileView): void => {
+    if (!view.implicit && Object.hasOwn(view.profiles, name)) throw new Error(`profile "${name}" already exists; change it with \`heyditto profile set ${name}\``);
+    if (view.implicit && name === LEGACY_PROFILE && view.profiles[LEGACY_PROFILE].endpoint) {
+      throw new Error(`"${LEGACY_PROFILE}" already names your saved default endpoint; change it with \`heyditto profile set ${LEGACY_PROFILE} --endpoint <slug>\``);
+    }
+  };
+  // Fail fast on a name clash before the network lookup...
+  assertCreatable(profileView(await readStoredAuth()));
+  const endpoint = await canonicalEndpoint(options.endpoint);
+  // ...but build the write from state read after it: another heyditto may
+  // have changed profiles while the lookup was in flight, and a patch built
+  // from the earlier snapshot would silently drop that change.
   const stored = await readStoredAuth();
   const view = profileView(stored);
-  if (!view.implicit && Object.hasOwn(view.profiles, name)) throw new Error(`profile "${name}" already exists; change it with \`heyditto profile set ${name}\``);
-  if (view.implicit && name === LEGACY_PROFILE && view.profiles[LEGACY_PROFILE].endpoint) {
-    throw new Error(`"${LEGACY_PROFILE}" already names your saved default endpoint; change it with \`heyditto profile set ${LEGACY_PROFILE} --endpoint <slug>\``);
-  }
-  const endpoint = await canonicalEndpoint(options.endpoint);
+  assertCreatable(view);
   const { profiles, active } = materialize(stored);
   const created: EndpointProfile = { endpoint, ...(inference ? { inference } : {}), createdAt: new Date().toISOString() };
   const nextActive = options.use || active === undefined ? name : active;

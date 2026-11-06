@@ -21,15 +21,24 @@ const ENDPOINTS = {
   ],
 };
 
-function startStub() {
+/** `hold` parks each endpoint-list request until `release()`; `held` resolves when one is parked. */
+function startStub({ hold = false } = {}) {
   const calls = [];
+  const parked = [];
+  let onParked;
+  const held = new Promise((resolve) => { onParked = resolve; });
   const server = http.createServer((req, res) => {
     req.resume();
     req.on("end", () => {
       calls.push({ method: req.method, url: req.url });
       res.setHeader("content-type", "application/json");
       const json = (status, payload) => { res.statusCode = status; res.end(JSON.stringify(payload)); };
-      if (req.url === "/api/v5/inference/endpoints" && req.method === "GET") return json(200, ENDPOINTS);
+      if (req.url === "/api/v5/inference/endpoints" && req.method === "GET") {
+        if (!hold) return json(200, ENDPOINTS);
+        parked.push(() => json(200, ENDPOINTS));
+        onParked();
+        return;
+      }
       if (listEndpointsStubHandler(req, json)) return;
       json(404, {});
     });
@@ -38,6 +47,8 @@ function startStub() {
     server.listen(0, "127.0.0.1", () => resolve({
       base: `http://127.0.0.1:${server.address().port}`,
       calls,
+      held,
+      release: () => { hold = false; for (const send of parked.splice(0)) send(); },
       close: () => { server.closeAllConnections(); server.close(); },
     }));
   });
@@ -68,8 +79,8 @@ function run(stub, cfg, args, env = {}) {
   });
 }
 
-async function withStub(fn) {
-  const stub = await startStub();
+async function withStub(fn, options) {
+  const stub = await startStub(options);
   try { await fn(stub); } finally { stub.close(); }
 }
 
@@ -141,6 +152,32 @@ test("creating a profile migrates the current default into an active `default` p
     assert.match(bad.stderr, /invalid profile name/);
     assert.deepEqual(Object.keys(cfg.read().profiles).sort(), ["default", "subnet"], "rejected creates write nothing");
   });
+});
+
+test("profile create keeps a profile another process saved during the endpoint lookup", async (t) => {
+  const cfg = configFixture(t);
+  await withStub(async (stub) => {
+    assert.equal((await run(stub, cfg, ["profile", "create", "subnet", "--endpoint", "subnet-dev"])).status, 0);
+  });
+  await withStub(async (stub) => {
+    // `profile create work` parks on the endpoint lookup...
+    const creating = run(stub, cfg, ["profile", "create", "work", "--endpoint", "beta"]);
+    await stub.held;
+    // ...while a second heyditto saves another profile and switches to it.
+    const concurrent = cfg.read();
+    concurrent.profiles.other = { endpoint: "alpha", createdAt: "2026-11-05T00:00:00.000Z" };
+    concurrent.activeProfile = "subnet";
+    concurrent.defaultEndpoint = "subnet-dev";
+    writeFileSync(cfg.file, `${JSON.stringify(concurrent, null, 2)}\n`);
+    stub.release();
+    const created = await creating;
+    assert.equal(created.status, 0, created.stderr);
+    const stored = cfg.read();
+    assert.deepEqual(Object.keys(stored.profiles).sort(), ["default", "other", "subnet", "work"], "the concurrent profile must survive");
+    assert.equal(stored.activeProfile, "subnet", "the concurrent switch must survive");
+    assert.equal(stored.defaultEndpoint, "subnet-dev");
+    assert.equal(stored.profiles.work.endpoint, "beta");
+  }, { hold: true });
 });
 
 test("the first profile of an install with no default becomes active", async (t) => {
