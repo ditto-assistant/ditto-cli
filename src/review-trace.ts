@@ -5,7 +5,7 @@
 // and the diff, and can request changes when a written requirement is
 // missing. The file is only read: it is never modified, moved or deleted.
 
-import { readFile, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -63,7 +63,7 @@ function claudeCode(lines: unknown[]): Collected | null {
     seen = true;
     const content = o.message.content;
     type Block = { type?: string; text?: string; name?: string; input?: unknown };
-    const blocks: Block[] = typeof content === "string" ? [{ type: "text", text: content }] : Array.isArray(content) ? content.filter(isObject) as Block[] : [];
+    const blocks: Block[] = typeof content === "string" ? [{ type: "text", text: content }] : Array.isArray(content) ? content.filter((b): b is Block => isObject(b) && (b.text === undefined || typeof b.text === "string")) : [];
     for (const b of blocks) {
       if (o.type === "user" && b.type === "text" && !o.isMeta) {
         const text = clean(b.text ?? "");
@@ -141,12 +141,14 @@ export function boundTrace(format: string, prompt: string, steps: string[]): Age
 /**
  * Save the exact trace an uncertain admission sent, so its recovery command
  * re-sends the same bytes even though the agent's own session file keeps
- * growing. The file is private (0600), created once, and never deleted.
+ * growing. Each freeze gets its own private directory (mkdtemp, 0700) and
+ * file (0600), so no other local user can plant or swap its bytes; it is
+ * never deleted.
  */
 export async function freezeAgentTrace(trace: AgentTrace, requestId: string): Promise<string> {
-  const file = path.join(os.tmpdir(), `ditto-review-trace-${requestId}.json`);
-  try { await writeFile(file, JSON.stringify(trace), { mode: 0o600, flag: "wx" }); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+  const dir = await mkdtemp(path.join(os.tmpdir(), `ditto-review-trace-${requestId.replace(/[^0-9a-f-]/gi, "")}-`));
+  const file = path.join(dir, "trace.json");
+  await writeFile(file, JSON.stringify(trace), { mode: 0o600, flag: "wx" });
   return file;
 }
 
@@ -178,7 +180,8 @@ export async function readAgentTrace(file: string): Promise<AgentTrace> {
   }
   for (const [format, parse] of [["claude-code", claudeCode], ["codex", codex]] as const) {
     const got = parse(lines);
-    if (got && got.prompt) return boundTrace(format, got.prompt, got.steps.map(clean).filter(Boolean));
+    // Normalize after cleaning, so a frozen trace re-reads to the same bytes.
+    if (got && got.prompt) return boundTrace(format, got.prompt, got.steps.map(step => oneLine(clean(step))).filter(Boolean));
   }
   throw new Error("--trace is not a Claude Code or Codex session file, or {\"initialPrompt\", \"steps\"} JSON, with a user prompt");
 }
