@@ -12,7 +12,8 @@ const ORG = { id: "cccccccc-cccc-cccc-cccc-cccccccccccc", slug: "omniaura", name
 const PROMPT = "You are an autonomous coding agent. Merge when CI is green.\n";
 
 /** A stateful endpoints API: personal endpoints carry no companyId, org ones carry ORG.id. */
-function startStub(initial = [], beforePatch = () => {}) {
+function startStub(initial = [], beforePatch = () => {}, { companiesFailAfter = Infinity } = {}) {
+  let companyCalls = 0;
   const endpoints = initial.map((e) => ({ ...e }));
   const writes = [];
   const server = http.createServer((req, res) => {
@@ -25,7 +26,10 @@ function startStub(initial = [], beforePatch = () => {}) {
         res.end(JSON.stringify(payload));
       };
       const url = new URL(req.url, "http://x");
-      if (url.pathname === "/api/v5/companies") return json(200, { companies: [ORG] });
+      if (url.pathname === "/api/v5/companies") {
+        companyCalls += 1;
+        return companyCalls > companiesFailAfter ? json(503, { error: "companies unavailable" }) : json(200, { companies: [ORG] });
+      }
       if (url.pathname === "/api/v5/inference/endpoints" && req.method === "GET") {
         const company = url.searchParams.get("company");
         // Like the backend: the bare listing is every endpoint the caller CREATED,
@@ -558,6 +562,16 @@ test("a launch attaches the profile's Stop hook; --no-hooks and another endpoint
       assert.deepEqual(JSON.parse(sameSlug.stdout).hooks, [], "the same slug in another organization is not the profile's endpoint");
     } finally {
       elsewhere.close();
+    }
+
+    const flaky = await startStub([{ id: "ep-org", slug: "ditto-dev", companyId: ORG.id, model: "m", status: "active", providerOptions: {} }], () => {}, { companiesFailAfter: 1 });
+    try {
+      const unknown = await run(["claude", "--dry-run", "--endpoint", "ditto-dev"], flaky.base, dir);
+      assert.equal(unknown.status, 0, unknown.stderr); // the catalog read (first call) succeeds; the ownership check (second) fails
+      assert.deepEqual(JSON.parse(unknown.stdout).hooks, [], "ownership that cannot be confirmed attaches nothing");
+      assert.match(unknown.stderr, /repository hooks skipped: .*companies unavailable/, "and says why");
+    } finally {
+      flaky.close();
     }
 
     const other = await run(["claude", "--dry-run", "--endpoint", "alpha"], stub.base, dir);
