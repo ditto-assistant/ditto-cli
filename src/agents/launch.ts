@@ -31,6 +31,7 @@ import { liftResumeFlags, planClaude } from "./claude.js";
 import { resolveClaudeResume, transcriptCwd } from "./claude-resume.js";
 import { type ClaudeTranscript, findTranscriptById, isUuid, listTranscriptsIn } from "./claude-transcripts.js";
 import { watchClaudeSessionTitle } from "./claude-title-sync.js";
+import { type ClaudeHookAttachment, claudeHookAttachment } from "./claude-hooks.js";
 import { planCodex } from "./codex.js";
 import { cliProxyModel, resolveCliProxy } from "./cliproxy.js";
 import { readHarnessVersion } from "./harness-headers.js";
@@ -95,6 +96,12 @@ export interface LaunchOptions {
    */
   mcp?: boolean;
   mcpOnly?: boolean;
+  /**
+   * Claude only: `--no-hooks` leaves out the Claude Code hooks the repository's
+   * .ditto profile declares (`claude_hooks`) for this launch. Commander sets
+   * it true by default.
+   */
+  hooks?: boolean;
   /** Direct inference through a loopback CLIProxy; URL is persisted, keys are not. */
   cliproxy?: string | boolean;
   remoteTransport?: "cli" | "channels";
@@ -118,6 +125,46 @@ const DRY_RUN_KEY = "ditto_inf_<minted-at-launch>";
 export function wantsMcp(options: Pick<LaunchOptions, "mcp">, endpoint: Pick<InferenceEndpoint, "providerOptions">): boolean {
   if (options.mcp !== undefined) return options.mcp;
   return endpoint.providerOptions?.claude_tool_surface !== "router";
+}
+
+/**
+ * Ditto's hooks for this launch, from the repository profile that names this
+ * endpoint. Without --endpoint that is the profile that picked it. With one
+ * (or a resumed session's), the repository's profile still applies when it
+ * names the same endpoint; an unreadable .ditto then costs only the hooks,
+ * since such a launch never needed the file before.
+ */
+async function repoHooks(
+  endpoint: InferenceEndpoint,
+  profile: Awaited<ReturnType<typeof repoDefaultProfile>>,
+  cwd: string,
+  requested: boolean,
+  enabled: boolean,
+): Promise<{ attachment?: ClaudeHookAttachment; banner?: string } | undefined> {
+  if (requested) {
+    try {
+      profile = await repoDefaultProfile(cwd);
+    } catch (err) {
+      log(`${c("yellow", "repository hooks skipped")}: ${(err as Error).message}`);
+      return undefined;
+    }
+    if (!profile || profile.slug !== endpoint.slug) return undefined;
+    // The same slug can exist in another organization: only the profile's own
+    // endpoint (its exact owner) gets the repository's hooks.
+    let own = false;
+    try {
+      own = (await findProfileEndpoint(profile, [endpoint])) !== undefined;
+    } catch {
+      own = false;
+    }
+    if (!own) return undefined;
+  }
+  if (!profile?.hooks) return undefined;
+  const source = profile.file ?? ".ditto";
+  const attachment = claudeHookAttachment(profile.hooks, { root: profile.repoDir, source });
+  if (!attachment) return undefined;
+  if (!enabled) return { banner: c("dim", "off (--no-hooks)") };
+  return { attachment, banner: `${attachment.summary.join(", ")} ${c("dim", `(${source})`)}` };
 }
 
 /** Someone chose native MCP for this launch, rather than getting it by default. */
@@ -556,8 +603,10 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   // resume or --cwd may have moved away from process.cwd().
   let endpoint: InferenceEndpoint | undefined;
   let repoLaunchDefaults: Record<string, unknown> | undefined;
+  let repoProfile: Awaited<ReturnType<typeof repoDefaultProfile>>;
   if (!requestedEndpoint?.trim()) {
     const profile = await repoDefaultProfile(cwd);
+    repoProfile = profile;
     if (profile) {
       endpoint = await findProfileEndpoint(profile, catalog.endpoints);
       repoLaunchDefaults = profile.launchDefaults;
@@ -571,6 +620,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     }
   }
   endpoint ??= await resolveEndpoint(requestedEndpoint, catalog.endpoints, selected);
+  const hooks = harness === "claude" ? await repoHooks(endpoint, repoProfile, cwd, Boolean(requestedEndpoint?.trim()), options.hooks !== false) : undefined;
   if (harness === "claude") {
     endpoint = { ...endpoint, providerOptions: { ...endpoint.providerOptions, ...repoLaunchDefaults } };
     options = resolveClaudeLaunchDefaults(options, endpoint.providerOptions);
@@ -680,6 +730,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     passthrough,
     toolDeny: harness === "claude" ? claudeDittoDenyRules(cwd, process.env) : undefined,
     mcp,
+    hooks: hooks?.attachment,
     mcpOnly: options.mcpOnly,
     remoteTransport: options.remoteTransport,
     cwd,
@@ -696,6 +747,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     budget !== undefined ? field("budget", `${budget.toLocaleString()} tokens`) : undefined,
     field("session", c("bold", sessionId)),
     wantMcp ? field("tools", mcpBanner(mcp, { dryRun: options.dryRun, noTools, chosen })) : undefined,
+    hooks?.banner ? field("hooks", hooks.banner) : undefined,
   ]
     .filter(Boolean)
     .join("  ");
@@ -724,6 +776,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
           toolSurfaceRequested: wantMcp ? "mcp" : proxy ? "none" : "router",
           inference: proxy ? "cliproxy" : options.mcpOnly ? "native" : "router",
           remoteTransport: options.remoteTransport ?? "cli",
+          hooks: hooks?.attachment?.summary ?? [],
           key: { name: keyName, expiresIn, spendLimitTokens: budget ?? null },
         },
         null,
@@ -801,6 +854,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
         record: nextRecord,
         grokHome,
         mcp,
+        hooks: hooks?.attachment,
         claudeStarted: harness === "claude" && !resumeLast ? Boolean(transcript) : undefined,
       });
     } else if (remote === "tui") {
@@ -987,6 +1041,8 @@ interface HeadlessRunContext extends RemoteRunContext {
   grokHome?: string;
   /** claude: the endpoint's tools as MCP servers, attached to every turn. */
   mcp?: ClaudeMcpAttachment;
+  /** claude: Ditto's hooks from the repository profile, attached to every turn. */
+  hooks?: ClaudeHookAttachment;
   /** claude: the session already has a conversation, so the first turn resumes it. */
   claudeStarted?: boolean;
 }
@@ -1050,6 +1106,7 @@ async function runHeadless(harness: Harness, ctx: HeadlessRunContext): Promise<n
         yellow: ctx.options.yellow,
         toolDeny: harness === "claude" ? claudeDittoDenyRules(ctx.cwd, process.env) : undefined,
         mcp: ctx.mcp,
+        hooks: ctx.hooks,
         mcpOnly: ctx.options.mcpOnly,
         cwd: ctx.cwd,
         env: process.env,

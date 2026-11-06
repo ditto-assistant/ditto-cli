@@ -1,5 +1,6 @@
 /** Shared types for the coding-agent launchers. Pure data, no I/O. */
 
+import type { ClaudeHookAttachment } from "./claude-hooks.js";
 import type { ClaudeMcpAttachment } from "./claude-mcp.js";
 
 export type Harness = "claude" | "codex" | "grok";
@@ -78,6 +79,8 @@ export interface PlanInput {
   toolDeny?: string[];
   /** The endpoint's tools attached as Claude Code MCP servers (claude-mcp.ts); Claude only. */
   mcp?: ClaudeMcpAttachment;
+  /** Ditto's own Claude Code hooks from the repository profile (claude-hooks.ts); Claude only. */
+  hooks?: ClaudeHookAttachment;
   /** Keep model inference on the user's native Claude Code account. */
   mcpOnly?: boolean;
   remoteTransport?: "cli" | "channels";

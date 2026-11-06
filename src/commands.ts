@@ -1549,6 +1549,7 @@ export function registerHarnessCommands(program: Command, addExamples: (c: Comma
     }
     if (harness === "claude" || harness === "grok") cmd.option("--plan", "start in plan mode (--permission-mode plan)");
     if (harness === "claude") {
+      cmd.option("--no-hooks", "leave out the Claude Code hooks this repository's .ditto profile declares (claude_hooks)");
       // --mcp first, then --no-mcp: neither flag leaves the endpoint's
       // claude_tool_surface default in charge (commander keeps it undefined).
       cmd.option("--mcp", "attach the endpoint's tools as Claude Code MCP servers, one per app (default unless the endpoint sets claude_tool_surface = \"router\")");

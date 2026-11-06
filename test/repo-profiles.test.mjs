@@ -497,3 +497,73 @@ test("Claude launch defaults: repo overrides cloud, endpoint flag bypasses repo,
     assert.equal(stub.writes.at(-1).body.providerOptions.claude_remote_transport, "channels");
   } finally { stub.close(); }
 });
+
+const HOOKS_LINE = 'claude_hooks = { stop = { checks = ["unpushed"], repos = [".", "workspaces/*/*"] } }\n';
+
+test("claude_hooks is repository policy: validated by repo apply, never sent to the endpoint", async () => {
+  const stub = await startStub([
+    { id: "ep-org", slug: "ditto-dev", companyId: ORG.id, model: "openai/gpt-6.1-sol", modelMode: "passthrough", codeMode: true,
+      kindRoutes: { aside: "z-ai/glm-5.3-flash" }, providerOptions: { claude_system_prompt: PROMPT, claude_prompt_mode: "replace" } },
+  ]);
+  const dir = await repo({ ".ditto/config.toml": CONFIG, ".ditto/endpoints/dev.toml": ORG_PROFILE + HOOKS_LINE, ".ditto/prompts/claude.md": PROMPT });
+  try {
+    const out = await run(["repo", "apply"], stub.base, dir);
+    assert.equal(out.status, 0, out.stderr);
+    assert.equal(stub.writes.length, 0, "the hooks alone change nothing on the endpoint");
+    const bad = await repo({ ".ditto/config.toml": CONFIG, ".ditto/endpoints/dev.toml": ORG_PROFILE + 'claude_hooks = { stop = { checks = ["unpushd"] } }\n', ".ditto/prompts/claude.md": PROMPT });
+    const refused = await run(["repo", "apply"], stub.base, bad);
+    assert.notEqual(refused.status, 0);
+    assert.match(refused.stderr, /claude_hooks\.stop\.checks: unknown check "unpushd"/);
+  } finally {
+    stub.close();
+  }
+});
+
+test("a launch attaches the profile's Stop hook; --no-hooks and another endpoint leave it out", async () => {
+  const stub = await startStub([
+    { id: "ep-personal", slug: "alpha", model: "m", status: "active", providerOptions: {} },
+    { id: "ep-org", slug: "ditto-dev", companyId: ORG.id, model: "m", status: "active", providerOptions: {} },
+  ]);
+  const dir = await repo({ ".ditto/config.toml": CONFIG, ".ditto/endpoints/dev.toml": ORG_PROFILE + HOOKS_LINE, ".ditto/prompts/claude.md": PROMPT });
+  const stopCommands = (stdout) => {
+    const { args } = JSON.parse(stdout);
+    const i = args.indexOf("--settings");
+    if (i < 0) return [];
+    return (JSON.parse(args[i + 1]).hooks?.Stop ?? []).map((g) => g.hooks[0].command);
+  };
+  try {
+    const on = await run(["claude", "--dry-run"], stub.base, dir);
+    assert.equal(on.status, 0, on.stderr);
+    assert.deepEqual(JSON.parse(on.stdout).hooks, ["Stop (unpushed)"]);
+    assert.match(on.stderr, /hooks=Stop \(unpushed\)/);
+    const [command] = stopCommands(on.stdout);
+    assert.match(command, /claude-stop-hook\.js' '[A-Za-z0-9_-]+'$/);
+    const args = JSON.parse(Buffer.from(/'([A-Za-z0-9_-]+)'$/.exec(command)[1], "base64url").toString());
+    assert.deepEqual(args, { root: await realpath(dir), checks: ["unpushed"], repos: [".", "workspaces/*/*"], source: path.join(".ditto", "endpoints", "dev.toml") });
+
+    const off = await run(["claude", "--dry-run", "--no-hooks"], stub.base, dir);
+    assert.equal(off.status, 0, off.stderr);
+    assert.deepEqual([JSON.parse(off.stdout).hooks, stopCommands(off.stdout)], [[], []]);
+    assert.match(off.stderr, /hooks=off \(--no-hooks\)/);
+
+    const same = await run(["claude", "--dry-run", "--endpoint", "ditto-dev"], stub.base, dir);
+    assert.equal(same.status, 0, same.stderr);
+    assert.deepEqual(JSON.parse(same.stdout).hooks, ["Stop (unpushed)"], "naming the profile's endpoint keeps its hooks");
+
+    const elsewhere = await startStub([{ id: "ep-other-org", slug: "ditto-dev", companyId: "dddddddd-dddd-dddd-dddd-dddddddddddd", model: "m", status: "active", providerOptions: {} }]);
+    try {
+      const sameSlug = await run(["claude", "--dry-run", "--endpoint", "ditto-dev"], elsewhere.base, dir);
+      assert.equal(sameSlug.status, 0, sameSlug.stderr);
+      assert.equal(JSON.parse(sameSlug.stdout).endpoint.id, "ep-other-org");
+      assert.deepEqual(JSON.parse(sameSlug.stdout).hooks, [], "the same slug in another organization is not the profile's endpoint");
+    } finally {
+      elsewhere.close();
+    }
+
+    const other = await run(["claude", "--dry-run", "--endpoint", "alpha"], stub.base, dir);
+    assert.equal(other.status, 0, other.stderr);
+    assert.deepEqual([JSON.parse(other.stdout).hooks, stopCommands(other.stdout)], [[], []], "another endpoint gets none of this repository's hooks");
+  } finally {
+    stub.close();
+  }
+});

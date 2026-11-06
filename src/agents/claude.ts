@@ -1,5 +1,5 @@
 import { TOOL_DENY_HEADER } from "./claude-deny.js";
-import { MCP_KEY_ENV, TOOL_SURFACE_HEADER, TOOL_SURFACE_MCP, attachmentSettings, withClaudeSettings } from "./claude-mcp.js";
+import { MCP_KEY_ENV, TOOL_SURFACE_HEADER, TOOL_SURFACE_MCP, attachmentSettings, mergeSettings, withClaudeSettings } from "./claude-mcp.js";
 import { harnessHeaders } from "./harness-headers.js";
 import { HARNESS_HEADER, HARNESS_VERSION_HEADER, type HarnessPlan, type PlanInput, SESSION_HEADER, apiRootOf } from "./types.js";
 
@@ -32,7 +32,11 @@ export function planClaude(input: PlanInput): HarnessPlan {
   // the router told not to inject them a second time.
   if (input.mcp) args.push("--mcp-config", input.mcp.config);
   args.push(...input.passthrough);
-  const finalArgs = input.mcp ? withClaudeSettings(args, attachmentSettings(input.mcp), { cwd: input.cwd }) : args;
+  // One --settings carries everything Ditto adds: native MCP's permission
+  // rules and Ditto's own hooks, merged into any --settings the user passed.
+  // Hooks apply whoever runs inference (Router, CLIProxy or --mcp-only).
+  const ours = mergeSettings(input.mcp ? attachmentSettings(input.mcp) : {}, input.hooks?.settings ?? {});
+  const finalArgs = withClaudeSettings(args, ours, { cwd: input.cwd });
 
   const deny = input.toolDeny?.length ? `${TOOL_DENY_HEADER}: ${input.toolDeny.join(",")}` : undefined;
   const surface = input.mcp ? `${TOOL_SURFACE_HEADER}: ${TOOL_SURFACE_MCP}` : undefined;
