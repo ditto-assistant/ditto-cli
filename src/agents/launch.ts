@@ -154,7 +154,8 @@ async function repoHooks(
     let own = false;
     try {
       own = (await findProfileEndpoint(profile, [endpoint])) !== undefined;
-    } catch {
+    } catch (err) {
+      log(`${c("yellow", "repository hooks skipped")}: ${err instanceof Error ? err.message : String(err)}`);
       own = false;
     }
     if (!own) return undefined;
