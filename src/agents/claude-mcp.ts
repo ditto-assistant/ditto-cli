@@ -310,7 +310,7 @@ export function writePrivateSettings(json: string, tmp: string = os.tmpdir()): s
  * silently replacing either. Inline JSON is merged in place. A settings file is
  * read from Claude's launch directory and merged into a private copy whose path
  * replaces it. A file that cannot be read stops the launch, since dropping it
- * would lose the user's settings and dropping ours their MCP permissions.
+ * would lose the user's settings and dropping ours their MCP permissions or hooks.
  */
 export function withClaudeSettings(args: string[], settings: Json, io: SettingsIO = {}): string[] {
   const read = io.read ?? ((f: string) => readFileSync(f, "utf8"));
@@ -327,7 +327,7 @@ export function withClaudeSettings(args: string[], settings: Json, io: SettingsI
     try {
       parsed = JSON.parse(isJSON ? value : read(path.resolve(io.cwd ?? process.cwd(), value)));
     } catch (err) {
-      throw new Error(`--settings ${value}: cannot be merged with native MCP permissions (${(err as Error).message})`);
+      throw new Error(`--settings ${value}: cannot be merged with Ditto's session settings (${(err as Error).message})`);
     }
     if (!isObject(parsed)) throw new Error(`--settings ${value}: not a JSON object`);
     const json = JSON.stringify(mergeSettings(parsed, settings));

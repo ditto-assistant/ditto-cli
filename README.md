@@ -637,6 +637,7 @@ Options shared by both commands:
 | `--resume [id]` / `-c, --continue` | resume a local session (`heyditto sessions`) / the agent's most recent conversation. Claude also takes a Claude session id or title here, including sessions started in Claude Desktop or plain `claude`, and runs in the directory that session ran in; with no value, a terminal gets a searchable picker. Claude's own `-r` / `--resume` / `-c` after `--` do the same. |
 | `--yolo` / `--yellow` / `--plan` | bypass permissions / auto-accept edits / plan mode (Claude only) |
 | `--mcp` / `--no-mcp` | attach the endpoint's tools to Claude Code as its own MCP servers, or keep them on the router (default: the endpoint's `claude_tool_surface`, else MCP) |
+| `--no-hooks` | leave out the Claude Code hooks the repository's `.ditto` profile declares (`claude_hooks`); Claude only |
 | `-p, --prompt <text>` | headless run: `claude -p` or `codex exec` |
 | `-m, --model <id>` | model to request (default: the agent's own model id passes through and the endpoint routes it) |
 | `-w, --worktree [name]` | run inside `<repo>/.worktrees/<name>` on a branch of that name; `.worktrees/` is added to `.gitignore` |
@@ -1302,6 +1303,34 @@ project and path: a directory named `build` is only excluded under a project who
 says so. Tracked artifact directories are flagged rather than claimed excluded.
 `heyditto offload` refuses to delete a folder when unrelated files, unknown projects or
 escaping symlinks beneath it would be lost.
+
+### Claude Code hooks (`claude_hooks`)
+
+A profile can attach Ditto's own Claude Code hooks to `heyditto claude`
+sessions in this repository. They apply in every inference mode (Router,
+`--cliproxy`, `--mcp-only`):
+
+```toml
+# .ditto/endpoints/dev.toml
+[settings]
+claude_hooks = { stop = { checks = ["unpushed"], repos = [".", "workspaces/*/*"] } }
+```
+
+`stop.checks = ["unpushed"]` is the only hook so far. When Claude finishes a
+turn while a listed repository has uncommitted changes, or commits its remote
+does not have, the hook asks Claude once to push them or to say why they are
+left. `repos` are paths relative to this repository; `*` matches one directory
+name; the default is `["."]`. Remote problems that cannot be confirmed (no
+remote, offline) are not reported.
+
+The setting is read from the checked-in file at launch and is not sent to the
+endpoint by `repo apply`, so a launch outside this repository, or with another
+endpoint, gets none. `--no-hooks` turns them off for one launch. A session with
+hooks is no longer plain Claude Code, so the banner lists them
+(`hooks=Stop (unpushed) (.ditto/endpoints/dev.toml)`). Hooks do not give the
+Router control of inference in CLIProxy or native mode. See
+[docs/claude-hooks.md](docs/claude-hooks.md) for the survey of hook events and
+what comes next.
 
 ### Cloud-assisted CLIProxy inference
 

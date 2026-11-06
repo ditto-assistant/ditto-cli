@@ -24,6 +24,7 @@ import {
   listCompanies,
   updateEndpoint,
 } from "../api.js";
+import { type ClaudeHooksConfig, ClaudeHooksError, parseClaudeHooks } from "../agents/claude-hooks.js";
 import type { EndpointDecl } from "./types.js";
 
 /** `[settings]` keys a profile may set, mapped to the PATCH body field. */
@@ -166,6 +167,13 @@ export async function profileBody(decl: EndpointDecl, profileDir: string): Promi
     if (v !== "mcp" && v !== "router") throw new ProfileError(`endpoints.${decl.name}.settings.claude_tool_surface must be "mcp" or "router"`);
     options.claude_tool_surface = v;
   }
+  // Ditto's Claude Code hooks are repository policy, read from this file at
+  // launch (repoDefaultProfile). Their paths mean nothing outside the
+  // repository, so they are validated here and never written to the endpoint.
+  if (settings.claude_hooks !== undefined) {
+    hooksOf(decl);
+    delete settings.claude_hooks;
+  }
   for (const [key, choices] of Object.entries({ claude_inference: ["router", "native"], claude_remote_transport: ["cli", "channels"] })) {
     const value = settings[key];
     delete settings[key];
@@ -177,7 +185,7 @@ export async function profileBody(decl: EndpointDecl, profileDir: string): Promi
     const field = SETTING_FIELDS[key];
     if (!field) {
       throw new ProfileError(
-        `endpoints.${decl.name}.settings.${key}: unknown setting. Known: owner, claude_prompt, codex_prompt, claude_native_tool_blocks, claude_tool_surface, claude_inference, claude_remote_transport, ${Object.keys(SETTING_FIELDS).join(", ")}`,
+        `endpoints.${decl.name}.settings.${key}: unknown setting. Known: owner, claude_prompt, codex_prompt, claude_native_tool_blocks, claude_tool_surface, claude_inference, claude_remote_transport, claude_hooks, ${Object.keys(SETTING_FIELDS).join(", ")}`,
       );
     }
     body[field] = field === "toolDeny" ? denyRules(decl.name, value) : value;
@@ -319,6 +327,10 @@ export interface RepoProfile {
   owner: ProfileOwner;
   repoDir: string;
   launchDefaults?: Record<string, unknown>;
+  /** Ditto's Claude Code hooks this profile asks for (claude-hooks.ts). */
+  hooks?: ClaudeHooksConfig;
+  /** The profile file, for messages: ".ditto/endpoints/dev.toml". */
+  file?: string;
 }
 
 /**
@@ -337,7 +349,11 @@ export async function repoDefaultProfile(startDir: string): Promise<RepoProfile 
       if (!wanted) return undefined;
       const decl = eff.endpoints[wanted];
       if (!decl) return { name: wanted, slug: wanted, owner: { kind: "personal" }, repoDir: dir };
-      return { name: decl.name, slug: decl.slug ?? decl.name, owner: parseOwner((decl.settings as Record<string, unknown> | undefined)?.owner, decl.name), repoDir: dir, launchDefaults: claudeLaunchDefaults(decl) };
+      const file = eff.sources[`endpoints.${decl.name}`]?.path;
+      return {
+        name: decl.name, slug: decl.slug ?? decl.name, owner: parseOwner((decl.settings as Record<string, unknown> | undefined)?.owner, decl.name), repoDir: dir, launchDefaults: claudeLaunchDefaults(decl),
+        hooks: hooksOf(decl), file: file ? path.relative(dir, file) : undefined,
+      };
     } catch (e) {
       if (!(e instanceof DittoConfigNotFound)) throw e;
     }
@@ -353,6 +369,16 @@ export async function findProfileEndpoint(profile: RepoProfile, endpoints: Infer
   const org = (await listCompanies()).find((c) => c.slug === profile.owner.org || c.id === profile.owner.org);
   if (!org) throw new ProfileError(`this repository's profile ${profile.name} requires organization @${profile.owner.org}, and you are not a member of it. Pass --endpoint to use another.`);
   return endpoints.find((e) => e.slug === profile.slug && e.companyId === org.id);
+}
+
+/** `settings.claude_hooks`, validated; a bad value is a ProfileError like any other setting. */
+function hooksOf(decl: EndpointDecl): ClaudeHooksConfig | undefined {
+  try {
+    return parseClaudeHooks((decl.settings as Record<string, unknown> | undefined)?.claude_hooks, `endpoints.${decl.name}.settings`);
+  } catch (e) {
+    if (e instanceof ClaudeHooksError) throw new ProfileError(e.message);
+    throw e;
+  }
 }
 
 /** Read only launch settings; launching must not require reading prompt files or applying the profile. */

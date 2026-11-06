@@ -133,7 +133,7 @@ test("withClaudeSettings merges into the one --settings, inline or a file", () =
   assert.equal(statSync(copy).mode & 0o777, 0o600);
   assert.equal(statSync(path.dirname(copy)).mode & 0o777, 0o700);
   assert.deepEqual(JSON.parse(readFileSync(copy, "utf8")), { model: "y", env: { TOKEN: "s3cret" }, permissions: { deny: ["WebFetch"], allow: ["mcp__ditto"] } });
-  assert.throws(() => withClaudeSettings(["--settings", "s.json"], { a: 1 }, { cwd: os.tmpdir() + "/nowhere" }), /cannot be merged with native MCP permissions/);
+  assert.throws(() => withClaudeSettings(["--settings", "s.json"], { a: 1 }, { cwd: os.tmpdir() + "/nowhere" }), /cannot be merged with Ditto.s session settings/);
   assert.throws(() => withClaudeSettings(["--settings", "[1]"], { a: 1 }), /cannot be merged|not a JSON object/);
   // "__proto__" in settings JSON is data, never a prototype swap.
   const proto = JSON.parse(withClaudeSettings(["--settings", '{"a":1}'], JSON.parse('{"__proto__":{"polluted":true}}'))[1]);
