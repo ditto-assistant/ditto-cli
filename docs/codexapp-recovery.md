@@ -67,10 +67,13 @@ and contains no credentials.
 ## Limits
 
 The existing `--unset` restore operation remains outside this multi-file setup
-transaction. It first settles any pending setup recovery under the same lock, but
-its own configuration/login restoration is not journaled as one recoverable unit.
-The shared profile save is atomic; that does not make the whole undo operation
-crash-atomic. This change does not claim transactional undo/redo for `--unset`.
+transaction. On macOS and Linux it first settles pending setup recovery under
+the same lock; its own configuration/login restoration is not journaled as one
+recoverable unit. On Windows, protected setup recovery is unavailable and
+`--unset` checks for a pending recovery without acquiring that lock, so
+concurrent invocations are not serialized. Do not run concurrent setup or undo
+operations on Windows. The shared profile save is atomic; that does not make the
+whole undo operation crash-atomic.
 
 The existing revoke API returns404 for both an unknown key and an already-revoked
 key. If a process dies after successful revocation but before recording cleanup,
