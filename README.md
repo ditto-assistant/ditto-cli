@@ -331,7 +331,10 @@ surrounding tracked source to Ditto Review, which uses the existing independent
 review and verification engine. The immutable snapshot is limited to 16 MiB of
 decoded source and 4096 files per tree. Every eligible changed file must fit;
 nearby surrounding files fill the remaining budget. Binary files, symlinks and
-submodules are recorded as skipped rather than followed or executed.
+submodules are recorded as skipped rather than followed or executed. Unchanged
+ones do not make surrounding context incomplete (a reviewer could not read
+them anyway); a skipped changed file, or context omitted to fit the limits,
+does.
 Git paths must be valid UTF-8. Unsupported path encodings abort capture before
 upload rather than changing path identity or silently omitting changes.
 

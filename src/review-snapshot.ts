@@ -24,6 +24,15 @@ export interface ReviewSnapshot {
 }
 interface GitEntry { oid: string; mode: string }
 export interface SnapshotOptions { staged?: boolean; base?: string; cwd?: string; signal?: AbortSignal }
+/** Skip reasons that withhold only bytes a text reviewer could not read
+ * anyway: an unchanged binary, or an unchanged symlink/submodule entry. They
+ * stay listed in `skipped` but do not make surrounding context incomplete.
+ * Any skipped changed path, any other reason, and any size/file-cap omission
+ * still does. ditto-review's engine applies the same rule. */
+export const CONTEXT_ONLY_SKIP_REASONS = new Set(["symlink or submodule", "binary or non-UTF-8 file"]);
+export function contextOnlySkip(skip: { path: string; reason: string }, changed: ReadonlySet<string>): boolean {
+  return !changed.has(skip.path) && CONTEXT_ONLY_SKIP_REASONS.has(skip.reason);
+}
 const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 const order = (a: string, b: string): number => Buffer.compare(Buffer.from(a), Buffer.from(b));
 
@@ -273,7 +282,7 @@ export async function captureReviewSnapshot(options: SnapshotOptions = {}): Prom
   if (sealedChanges.length > LOCAL_REVIEW_MAX_FILES || omittedContext.length > 20000 || skipped.length > 20000) throw new Error("local review manifest exceeds path limits; narrow the diff");
   const bytes = [...baseFiles, ...headFiles].reduce((n, f) => n + Buffer.byteLength(f.contentBase64, "base64"), 0);
   if (bytes > LOCAL_REVIEW_MAX_BYTES) throw new Error("files grew beyond the local review content limit during capture; retry with a smaller diff");
-  const snapshot: ReviewSnapshot = { version: 1, mode, ...(options.base ? { baseRef: options.base } : {}), ...(baseSha ? { baseSha } : {}), digest: "", baseFiles, headFiles, changedPaths: sealedChanges, contextComplete: omittedContext.length === 0 && skipped.length === 0, omittedContext, skipped };
+  const snapshot: ReviewSnapshot = { version: 1, mode, ...(options.base ? { baseRef: options.base } : {}), ...(baseSha ? { baseSha } : {}), digest: "", baseFiles, headFiles, changedPaths: sealedChanges, contextComplete: omittedContext.length === 0 && skipped.every(skip => contextOnlySkip(skip, changed)), omittedContext, skipped };
   snapshot.digest = snapshotDigest(snapshot);
   if (Buffer.byteLength(JSON.stringify(snapshot)) > LOCAL_REVIEW_MAX_JSON_BYTES) throw new Error("local review snapshot exceeds the 24 MiB transport limit; narrow the diff");
   return { root, snapshot, bytes };
