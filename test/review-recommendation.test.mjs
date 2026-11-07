@@ -338,6 +338,8 @@ test("a null admission or poll body is a clear error, never a TypeError", async 
   const poll = await server(t, { terminal: () => "null" });
   const out = await run(root, poll.base, ["local", "--gate"]);
   assert.equal(out.code, 1); assert.match(out.stderr, /malformed run/); assert.doesNotMatch(out.stderr, /TypeError|Cannot read/);
+  const status = await run(root, poll.base, ["local-status", RUN, "--gate"]);
+  assert.equal(status.code, 1); assert.match(status.stderr, /malformed run/); assert.doesNotMatch(status.stderr, /TypeError|Cannot (read|set)/);
   const admission = await server(t, { admission: [202, "null"] });
   const adm = await run(root, admission.base, ["local", "--gate"]);
   assert.equal(adm.code, 1); assert.match(adm.stderr, /no valid run ID/); assert.doesNotMatch(adm.stderr, /TypeError|Cannot read/);

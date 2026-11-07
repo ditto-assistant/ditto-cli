@@ -337,6 +337,7 @@ export async function cmdReviewLocalStatus(id: string, options: ScopeOptions & {
   runPath(id);
   const company = await resolveScope(options);
   const run = await apiFetch<LocalRun>(`/api/v5/review/local/runs/${encodeURIComponent(id)}${scopeQuery(company)}`);
+  if (!run || typeof run !== "object" || typeof run.status !== "string") throw new Error("Review API returned a malformed run (no status); no recommendation was produced");
   run.workspaceCurrent = null;
   run.workspaceCurrentReason = "Status reads do not recapture a local checkout";
   const recommendation = printLocalRun(run, options);
