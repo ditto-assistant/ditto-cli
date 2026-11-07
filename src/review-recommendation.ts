@@ -152,6 +152,17 @@ export function recommendLocalReview(run: LocalRunLike): Recommendation {
     nitCount = nits;
     reasons.push(...(nits ? [`${nits} non-blocking finding(s)`] : []));
   }
+  // DITTO-2434: the linked issue's written scope. An unmet required item
+  // requests changes, as the backend's local verdict does; a scope result that
+  // was not fully checked (incomplete, unavailable, not found) never approves.
+  // No scope result (check off, no linked issue) leaves the recommendation alone.
+  if (result && (status === "completed" || status === "partial")) {
+    const scope = isObj(result.scope) ? result.scope : undefined;
+    const verdict = isObj(result.verdict) ? result.verdict : undefined;
+    const unmet = scope?.status === "checked" && Array.isArray(scope.items) ? scope.items.filter(i => isObj(i) && i.required !== false && i.met !== true).length : 0;
+    if (unmet || verdict?.event === "REQUEST_CHANGES") return { verdict: "changes", approved: false, reasons: [unmet ? `${unmet} written requirement(s) of the linked issue are unmet` : "the review verdict requests changes"], blocking: unmet, nits: nitCount };
+    if (scope && scope.status !== "checked" && scope.status !== "no_items") return none([`the linked issue's written scope could not be checked (${typeof scope.status === "string" ? scope.status : "unknown"})`]);
+  }
   if (status !== "completed") return none([`run status is ${status}; only a completed run can approve`]);
   if (!result) return none(["no review result is available"]);
   if (result.complete !== true) return none(["review coverage is incomplete (result.complete is not true)"]);

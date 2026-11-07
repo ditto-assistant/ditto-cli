@@ -363,3 +363,22 @@ test("local-status never approves (it cannot verify the working tree) and local-
   const cancel = await run(root, svc.base, ["local-cancel", RUN, "--output", "json"]);
   assert.equal(cancel.code, 0, cancel.stderr); assert.equal(JSON.parse(cancel.stdout).status, "cancelled");
 });
+
+test("DITTO-2434: an unmet written requirement requests changes; an unchecked scope never approves", () => {
+  const item = (met, required = true) => ({ scope_item: "Expose a cancel endpoint", evidence_refs: met ? ["app.ts:1"] : [], met, required });
+  // Every required item met: the scope does not change a clean approval.
+  assert.equal(recommendLocalReview(withResult({ scope: { source: "jira", key: "DITTO-1", status: "checked", items: [item(true), item(false, false)] } })).verdict, "approve");
+  assert.equal(recommendLocalReview(withResult({ scope: { source: "jira", key: "DITTO-1", status: "no_items", items: [] } })).verdict, "approve");
+  // An unmet required item, even on an otherwise clean and complete run.
+  const unmet = recommendLocalReview(withResult({ scope: { source: "jira", key: "DITTO-1", status: "checked", items: [item(true), item(false)] } }));
+  assert.equal(unmet.verdict, "changes"); assert.equal(gateExitCode(unmet), 2); assert.match(unmet.reasons.join(), /1 written requirement/);
+  // The backend's local verdict requesting changes is honoured as well.
+  assert.equal(recommendLocalReview(withResult({ verdict: { event: "REQUEST_CHANGES", scopeKey: "DITTO-1" } })).verdict, "changes");
+  // A partial run with an unmet requirement still requests changes (findings-style evidence).
+  assert.equal(recommendLocalReview(withResult({ complete: false, scope: { status: "checked", items: [item(false)] } }, { status: "partial" })).verdict, "changes");
+  // Scope that was not fully checked never approves, and is not called a request for changes.
+  for (const status of ["incomplete", "unavailable", "not_found", "some_future_status", undefined]) {
+    const rec = recommendLocalReview(withResult({ scope: { key: "DITTO-1", status, items: [item(false)] } }));
+    assert.equal(rec.verdict, "none", String(status)); assert.match(rec.reasons.join(), /written scope could not be checked/);
+  }
+});
