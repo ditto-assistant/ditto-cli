@@ -45,7 +45,7 @@ import {
   updateEndpoint,
 } from "./api.js";
 import { openInBrowser } from "./browser.js";
-import { endpointURL } from "./config.js";
+import { endpointURL, resolveApiKey } from "./config.js";
 import { activationLink, formatActivation } from "./endpoint-format.js";
 import {
   STORE_IDS,
@@ -638,7 +638,10 @@ function checkAliases(map: Record<string, string>, slug: string): void {
 export async function cmdEndpointSet(ref: string, options: EndpointSetOptions): Promise<void> {
   const patch: EndpointInput = {};
   if (options.name !== undefined) patch.name = options.name.trim();
-  if (options.model !== undefined) patch.model = options.model.trim();
+  if (options.model !== undefined) {
+    patch.model = options.model.trim();
+    if (!patch.model) throw new Error("--model must not be empty");
+  }
   if (options.systemPrompt !== undefined) patch.systemPrompt = options.systemPrompt;
   if (options.spendLimit !== undefined) {
     const raw = options.spendLimit.trim().toLowerCase();
@@ -748,6 +751,14 @@ export async function cmdEndpointSet(ref: string, options: EndpointSetOptions): 
     throw new Error("nothing to change; pass at least one --flag (see `heyditto endpoints set --help`)");
   }
 
+  const credential = (await resolveApiKey()).key;
+  if (credential?.startsWith("ditto_svc_")) {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(ref)) throw new Error("service credentials require the exact endpoint UUID");
+    if (Object.keys(patch).length !== 1 || patch.model === undefined || Object.keys(agent).length || touchesMaps || touchesFailover) throw new Error("service credential endpoint set currently supports only --model without a configuration read");
+    const updated = await updateEndpoint(ref, patch);
+    process.stdout.write(isJSON(options) ? `${JSON.stringify(updated, null, 2)}\n` : `Updated endpoint ${ref}: model.\n`);
+    return;
+  }
   const { endpoint } = await getEndpoint(ref);
   if (touchesFailover) {
     const current = endpoint.failover ?? { enabled: false, model: "", maxCostUsd: 0 };
@@ -1558,8 +1569,8 @@ export function registerHarnessCommands(program: Command, addExamples: (c: Comma
       cmd.option("--no-mcp-only", "use Ditto Router inference for this launch, overriding the saved native-account default");
       cmd.addOption(new Option("--remote-transport <transport>", "remote prompt delivery: CLI terminal bridge (default) or MCP Channels (native account only, research preview)").choices(["cli", "channels"]));
     }
-    cmd.action(async (args: string[], options) => {
-      await launchHarness(harness, args, options);
+    cmd.action(async (args: string[], options, command: Command) => {
+      await launchHarness(harness, args, { ...options, expiresExplicit: command.getOptionValueSource("expires") === "cli" });
     });
     addExamples(
       cmd,

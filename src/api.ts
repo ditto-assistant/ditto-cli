@@ -35,6 +35,47 @@ async function requireKey(): Promise<string> {
   return key;
 }
 
+/** A mint response can contain a one-time secret, even on a broken server. */
+export async function issueServiceCredential(path: string, body: unknown): Promise<unknown> {
+  const key = await requireKey();
+  let response: Response;
+  try {
+    response = await fetch(`${apiBase()}${path}`, {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json", Authorization: `Bearer ${key}`, "User-Agent": userAgent() },
+      body: JSON.stringify(body), redirect: "error", signal: AbortSignal.timeout(35_000),
+    });
+  } catch {
+    throw new Error("credential issuance request failed; a credential may have been issued, check and revoke it if necessary");
+  }
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new Error(`credential issuance returned HTTP ${response.status}; check for an issued credential before retrying`);
+  }
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error("invalid credential issuance response; check for an issued credential before retrying");
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  let data: Buffer | undefined;
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > 65536) { value.fill(0); throw new Error(); }
+      chunks.push(value);
+    }
+    data = Buffer.concat(chunks);
+    return JSON.parse(data.toString("utf8")) as unknown;
+  } catch {
+    void reader.cancel().catch(() => undefined);
+    throw new Error("invalid credential issuance response; check for an issued credential before retrying");
+  } finally {
+    data?.fill(0);
+    for (const chunk of chunks) chunk.fill(0);
+  }
+}
+
 export async function apiFetch<T>(
   path: string,
   init: { method?: string; body?: unknown; auth?: boolean; signal?: AbortSignal } = {},
@@ -103,6 +144,8 @@ export interface EndpointActivation {
 export interface RouterFailover { enabled: boolean; model: string; maxCostUsd: number }
 
 export interface InferenceEndpoint {
+  /** Server-resolved rights; never inferred from membership role names. */
+  access?: { level?: string; use?: boolean; mint?: boolean; manage?: boolean; iamEnforced?: boolean; createSession?: boolean; createKey?: boolean; maxSessionSeconds?: number };
   failover?: RouterFailover;
   id: string;
   slug: string;
