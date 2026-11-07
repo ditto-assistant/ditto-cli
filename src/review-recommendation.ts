@@ -27,7 +27,7 @@ export interface Recommendation {
 
 /** Severities that block approval. Anything not listed as a nit blocks, so an
  * unknown or missing severity can never be read as clean. */
-const NIT_SEVERITIES = new Set(["low", "info", "nit", "note", "trivial"]);
+const NIT_SEVERITIES = new Set(["low", "info", "nit"]);
 
 export interface LocalRunLike {
   status?: unknown;

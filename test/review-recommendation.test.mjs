@@ -66,6 +66,7 @@ test("blocking findings request changes, even from a partial run; nits alone app
   }
   const partial = recommendLocalReview(clean({ status: "partial", result: { complete: false, findings: [finding("high")] } }));
   assert.equal(partial.verdict, "changes");
+  for (const severity of ["note", "trivial"]) assert.equal(recommendLocalReview(withResult({ findings: [finding(severity)] })).verdict, "changes", `${severity} is not a documented nit severity`);
   const nits = recommendLocalReview(withResult({ findings: [finding("low"), finding("nit")] }));
   assert.equal(nits.verdict, "approve"); assert.equal(nits.nits, 2);
   const partialNits = recommendLocalReview(clean({ status: "partial", result: { complete: false, findings: [finding("low")] } }));
@@ -255,6 +256,13 @@ test("a clean production-shaped receipt (findings: null) reports no findings and
   assert.doesNotMatch(out.stdout, /No review result is available/);
 });
 
+test("a partial run with a null findings list does not claim an empty reviewed scope", async t => {
+  const root = await repository(t); await writeFile(path.join(root, "app.ts"), "export const a = 2;\n");
+  const svc = await server(t, { terminal: () => ({ status: "partial", result: { complete: false, findings: null, files: { completed: [], abbreviated: [], failed: [] }, local: { contextComplete: true, changedCoverageComplete: false } } }) });
+  const out = await run(root, svc.base, ["local"]);
+  assert.equal(out.code, 1); assert.doesNotMatch(out.stdout, /No findings in reviewed scope/); assert.match(out.stdout, /No review result is available/);
+});
+
 test("failed and cancelled runs are no recommendation even with findings attached", async t => {
   const root = await repository(t); await writeFile(path.join(root, "app.ts"), "export const a = 2;\n");
   for (const status of ["failed", "cancelled"]) {
@@ -298,7 +306,8 @@ test("timeouts emit a JSON receipt that is never approval and cancel the admitte
   const out = await run(root, svc.base, ["local", "--timeout", "2", "--gate", "--output", "json"]);
   assert.equal(out.code, 124, out.stderr); const data = JSON.parse(out.stdout);
   assert.equal(data.recommendation.verdict, "none"); assert.match(data.recommendation.reasons[0], /timed out/);
-  if (data.runId) assert.ok(svc.calls.some(c => c.url.endsWith("/cancel") && c.method === "POST"));
+  assert.equal(data.runId, RUN, "the receipt identifies the admitted run that timed out");
+  assert.ok(svc.calls.some(c => c.url.endsWith("/cancel") && c.method === "POST"), "a timed-out admitted run is cancelled, not left running");
 });
 
 test("staged, unstaged and untracked selection reaches the upload exactly", async t => {

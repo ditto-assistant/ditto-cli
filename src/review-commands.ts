@@ -186,7 +186,8 @@ function printLocalRun(run: LocalRun, options: LocalOptions): Recommendation {
   process.stdout.write(`Local review ${run.status} · ${run.profile}\nRun: ${run.runId}\nSnapshot: ${run.snapshotDigest}\n`);
   const list = findingsList(result);
   const findings = (list ?? []).filter(isVisibleFinding) as NonNullable<NonNullable<LocalRun["result"]>["findings"]>;
-  const reportable = list !== undefined && malformedLocalRun(run).length === 0 && ["completed", "partial"].includes(run.status);
+  // A null list is empty only when the engine also says the review is complete.
+  const reportable = list !== undefined && (Array.isArray(result?.findings) || result?.complete === true) && malformedLocalRun(run).length === 0 && ["completed", "partial"].includes(run.status);
   if (reportable) {
     process.stdout.write(`${findings.length ? `${findings.length} finding${findings.length === 1 ? "" : "s"} in reviewed scope` : "No findings in reviewed scope"}\n`);
     for (const f of findings) process.stdout.write(`\n${f.severity ?? "finding"} · ${f.path ?? ""}:${f.line ?? f.startLine ?? ""} · ${f.title ?? ""}\n${f.body ?? f.explanation ?? ""}\n`);
