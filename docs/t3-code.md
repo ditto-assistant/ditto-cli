@@ -37,6 +37,50 @@ and it changes the saved default endpoint only when you create a first endpoint
 or accept the picker's "use by default" prompt. Session keys are minted by the launcher when
 a chat starts and revoked on normal exit.
 
+## Two providers, two endpoints (profiles)
+
+Each T3 provider created by setup is bound to one endpoint, so it sees that
+endpoint's MCP tools. To orchestrate between, say, your normal endpoint and a
+subnet endpoint, give each a [named profile](../README.md#profile--named-endpoint-profiles)
+and set up one provider per profile:
+
+```sh
+# Your existing default endpoint becomes profile "default" (still active).
+heyditto profile create subnet --endpoint <subnet-endpoint-slug>
+heyditto profile                           # * default → ditto-dev, subnet → <subnet-endpoint-slug>
+
+heyditto t3 setup --profile subnet --dry-run
+# quit T3, then
+heyditto t3 setup --profile subnet
+```
+
+| Profile | T3 instance id | Display name |
+| --- | --- | --- |
+| `default` | `claude_ditto_cliproxy` | Claude CLIProxy + Ditto |
+| `subnet` | `claude_ditto_subnet_cliproxy` | Claude Subnet |
+| `<name>`, `--inference router` | `claude_ditto_<name>_router` | Claude `<Name>` (Router) |
+
+`--instance`, `--name` and `--inference` still override what the profile
+implies; the profile's inference mode (`profile create --inference`) is the
+default. `--profile` and `--endpoint` are mutually exclusive; an explicit
+`--endpoint` (without `--profile`) keeps the original behaviour and instance id
+even when `DITTO_PROFILE` is set. Once you have
+saved profiles, a bare `heyditto t3 setup` uses the *active* profile's endpoint
+and instance, so after `heyditto profile use subnet` it updates the subnet
+provider and never re-points the original one.
+
+The endpoint is written into each provider's own launcher, so `heyditto profile
+use` changes only which endpoint new `heyditto claude`/`codex` sessions in your
+terminal use. It does not edit any T3 provider, its Claude home or its launcher,
+and the normal Claude subscription provider is untouched. To re-point a
+provider, change the profile (`heyditto profile set subnet --endpoint <slug>`)
+and rerun `heyditto t3 setup --profile subnet` with T3 closed. Renaming or
+deleting a profile leaves the provider it created in place. Profiles, launchers
+and T3 settings hold no credentials: each chat still mints its own session key
+and revokes it on exit.
+
+## Options
+
 Use `--inference router` for Router inference instead. `--instance` and `--name`
 choose a separate provider id and label. An id belonging to another provider is
 refused rather than overwritten. To update a provider created by this command,

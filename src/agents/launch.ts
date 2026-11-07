@@ -21,7 +21,8 @@ import { openInBrowser } from "../browser.js";
 import { apiBaseURL, appBaseURL, configDir, endpointURL, resolveApiKey } from "../config.js";
 import { deviceLogin } from "../device-login.js";
 import { formatActivation } from "../endpoint-format.js";
-import { readStoredAuth, saveLogin, updateStoredAuth } from "../store.js";
+import { explicitProfileEndpoint, readDefaultEndpoint, writeDefaultEndpoint } from "../profiles.js";
+import { readStoredAuth, saveLogin } from "../store.js";
 import { findProfileEndpoint, repoDefaultProfile } from "../dittoconfig/profiles.js";
 import { err as c } from "../ui.js";
 import { holdNotesForTui, type NoteOptions, releaseNotes, writeNote } from "../terminal-note.js";
@@ -326,19 +327,19 @@ async function resolveEndpoint(
     if (!readOnly && interactive() && (await confirmYes("You have no inference endpoints yet. Create your first one now?"))) {
       const created = await createEndpoint({});
       log(`created endpoint ${created.slug} (model ${created.model})`);
-      await updateStoredAuth({ defaultEndpoint: created.slug });
+      await writeDefaultEndpoint(created.slug);
       return created;
     }
     throw new Error(
       `you have no inference endpoints yet. Create one with \`heyditto endpoints create\`, or at ${endpointURL()}.`,
     );
   }
-  const stored = (await readStoredAuth())?.defaultEndpoint;
   if (wanted?.trim()) {
     const match = findEndpoint(endpoints, wanted);
     if (match) return match;
     throw new Error(`no endpoint named "${wanted.trim()}". Available: ${endpoints.map((e) => e.slug).join(", ")}`);
   }
+  const stored = await readDefaultEndpoint();
   if (selected) {
     // Chosen in the browser moments ago during the device login.
     const match = findEndpoint(endpoints, selected.id) ?? findEndpoint(endpoints, selected.slug);
@@ -353,7 +354,7 @@ async function resolveEndpoint(
   if (endpoints.length === 1) return endpoints[0];
   const picked = await pickEndpoint(endpoints, stored);
   if (!readOnly && (await confirmYes(`Use ${picked.slug} by default next time?`))) {
-    await updateStoredAuth({ defaultEndpoint: picked.slug });
+    await writeDefaultEndpoint(picked.slug);
     log(`default endpoint set to ${picked.slug} (change it with \`heyditto endpoints use <slug>\`)`);
   }
   return picked;
@@ -366,8 +367,9 @@ async function resolveEndpoint(
  * `readOnly` (a dry run) never creates an endpoint or saves a default.
  */
 export async function chooseEndpoint(harness: Harness, readOnly = false): Promise<InferenceEndpoint> {
-  const { selected, catalog } = await signInAndListEndpoints(harness, undefined, readOnly);
-  return resolveEndpoint(undefined, catalog.endpoints, selected, readOnly);
+  const named = (await explicitProfileEndpoint())?.endpoint;
+  const { selected, catalog } = await signInAndListEndpoints(harness, named, readOnly);
+  return resolveEndpoint(named, catalog.endpoints, selected, readOnly);
 }
 
 /** Signs in when needed and lists endpoints; a dry run never opens the browser. */
@@ -557,7 +559,14 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   const proxy = options.cliproxy ? await resolveCliProxy(options.cliproxy) : undefined;
   if (proxy) options = { ...options, cliproxy: proxy.baseUrl, mcpOnly: false };
 
-  const requestedEndpoint = options.endpoint ?? record?.endpointSlug;
+  // An explicitly named profile (--profile, DITTO_PROFILE) counts as naming
+  // its endpoint, so it also beats a repository's .ditto default. Only the
+  // flag moves a resumed session off the endpoint it was recorded on; a
+  // shell-wide DITTO_PROFILE does not.
+  const named = options.endpoint?.trim() ? undefined : await explicitProfileEndpoint();
+  const fromFlag = named?.source === "flag" ? named.endpoint : undefined;
+  const requestedEndpoint = options.endpoint ?? (fromFlag ?? record?.endpointSlug ?? named?.endpoint);
+  if (named) log(`using profile ${named.name} → ${named.endpoint}`);
   const { selected, catalog } = await signInAndListEndpoints(harness, requestedEndpoint, Boolean(options.dryRun));
 
   // Sent as X-Ditto-Harness-Version so the router serves this release's own
