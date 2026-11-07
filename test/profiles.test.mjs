@@ -162,7 +162,16 @@ test("profile create keeps a profile another process saved during the endpoint l
   await withStub(async (stub) => {
     // `profile create work` parks on the endpoint lookup...
     const creating = run(stub, cfg, ["profile", "create", "work", "--endpoint", "beta"]);
-    await stub.held;
+    // Fail instead of hanging if the child exits before its lookup parks.
+    // The flag keeps the normal path (child finishes after release) from
+    // rejecting once the race is already settled.
+    let parked = false;
+    await Promise.race([
+      stub.held.then(() => { parked = true; }),
+      creating.then(({ status, stderr }) => {
+        if (!parked) throw new Error(`profile create exited before the endpoint lookup (status ${status}): ${stderr}`);
+      }),
+    ]);
     // ...while a second heyditto saves another profile and switches to it.
     const concurrent = cfg.read();
     concurrent.profiles.other = { endpoint: "alpha", createdAt: "2026-11-05T00:00:00.000Z" };
