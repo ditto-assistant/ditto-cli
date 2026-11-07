@@ -70,7 +70,7 @@ test("blocking findings request changes, even from a partial run; nits alone app
   assert.equal(nits.verdict, "approve"); assert.equal(nits.nits, 2);
   const partialNits = recommendLocalReview(clean({ status: "partial", result: { complete: false, findings: [finding("low")] } }));
   assert.equal(partialNits.verdict, "none", "a partial run with only nits is not approval");
-  const withheld = recommendLocalReview(withResult({ findings: [finding("high", { status: "withheld" })] }));
+  const withheld = recommendLocalReview(withResult({ findings: [finding("high", { status: "withheld", withheldReason: "rejected_by_verifier" })] }));
   assert.equal(withheld.verdict, "approve", "withheld candidates are not posted findings");
   const failedWithFindings = recommendLocalReview({ status: "failed", result: { findings: [finding("high")] } });
   assert.equal(failedWithFindings.verdict, "none", "a failed run's findings are not a usable result");
@@ -137,12 +137,14 @@ test("round-1 self-review findings stay fixed", () => {
 test("DITTO-2455: bounded context is reported but does not block; unverified candidates do", () => {
   const bounded = recommendLocalReview(withResult({ local: { contextComplete: false, changedCoverageComplete: true } }));
   assert.equal(bounded.verdict, "approve"); assert.match(bounded.reasons.join(), /surrounding context was bounded/);
-  for (const withheldReason of ["verification_unavailable", "candidate_limit", "file_evidence_unavailable"]) {
+  for (const withheldReason of ["verification_unavailable", "candidate_limit", "file_evidence_unavailable", "comment_limit", "repeat_with_new_evidence", "some_future_reason", "", undefined]) {
     const rec = recommendLocalReview(withResult({ findings: [finding("high", { status: "withheld", withheldReason })] }));
-    assert.equal(rec.verdict, "none", withheldReason); assert.match(rec.reasons.join(), /could not be verified/);
+    assert.equal(rec.verdict, "none", String(withheldReason)); assert.match(rec.reasons.join(), /were not decided/);
   }
-  // A verifier rejection is a decided candidate, not an unverified one.
-  assert.equal(recommendLocalReview(withResult({ findings: [finding("high", { status: "withheld", withheldReason: "verifier_rejected" })] })).verdict, "approve");
+  // Decided withheld candidates (the engine's own decisions) do not block.
+  for (const withheldReason of ["rejected_by_verifier", "below_confidence", "below_severity", "path_filtered", "documentation", "not_on_changed_line", "declined_earlier"]) {
+    assert.equal(recommendLocalReview(withResult({ findings: [finding("high", { status: "withheld", withheldReason })] })).verdict, "approve", withheldReason);
+  }
   // Changed coverage still has to be complete on every lens.
   assert.equal(recommendLocalReview(withResult({ local: { contextComplete: false, changedCoverageComplete: false } })).verdict, "none");
 });

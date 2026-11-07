@@ -362,7 +362,8 @@ Every result carries a `recommendation` (`verdict`: `approve`, `changes` or
 
 - `approve` only for a `completed` run whose result is complete and well formed
   (findings list present, every changed file fully reviewed on every lens, no
-  candidate held as unverified), whose working tree still matches the reviewed
+  withheld candidate left undecided: only the engine's own decisions such as
+  `rejected_by_verifier` or `below_confidence` do not block), whose working tree still matches the reviewed
   snapshot, with no blocking finding. Bounded surrounding context is listed in
   `reasons` but does not block (DITTO-2455).
   Findings of severity `low`, `info` or `nit` do not block; any other or

@@ -105,8 +105,12 @@ export function reuseAndInheritanceProblems(run: LocalRunLike): string[] {
  * internal/hosted: "withheld" after verification, "duplicate" when folded). */
 const UNPOSTED_STATUSES = new Set(["withheld", "duplicate"]);
 
-/** Withheld reasons meaning a candidate on a change was never verified. */
-const HELD_UNVERIFIED = new Set(["verification_unavailable", "candidate_limit", "file_evidence_unavailable"]);
+/** Withheld reasons that are a decision about the candidate (ditto-review
+ * internal/hosted triage.go / declined.go). Any other withheld candidate,
+ * including verification_unavailable, candidate_limit,
+ * file_evidence_unavailable, comment_limit, repeat_with_new_evidence and
+ * reasons this client does not know, was never decided and blocks approval. */
+const DECIDED_WITHHELD = new Set(["rejected_by_verifier", "below_confidence", "below_severity", "path_filtered", "documentation", "not_on_changed_line", "declined_earlier"]);
 
 /** A finding counts unless the engine explicitly withheld or deduplicated it.
  * Any other status, including a missing, empty or unrecognized one, counts, so
@@ -165,10 +169,11 @@ export function recommendLocalReview(run: LocalRunLike): Recommendation {
   // Local receipts always carry both flags; anything but true is incomplete.
   const local = isObj(result.local) ? result.local : {};
   if (local.changedCoverageComplete !== true) return none(["changed paths were not fully reviewed"]);
-  // Held candidates mean a change was not verified. The engine already clears
-  // changedCoverageComplete for these (ditto-review#96); check independently.
-  const held = (findingsList(result) ?? []).filter(f => typeof f.withheldReason === "string" && HELD_UNVERIFIED.has(f.withheldReason)).length;
-  if (held) return none([`${held} candidate finding(s) could not be verified`]);
+  // An undecided withheld candidate means a change was not fully judged. The
+  // engine clears changedCoverageComplete for some (ditto-review#96); this
+  // check is independent and allowlist-based.
+  const held = (findingsList(result) ?? []).filter(f => f.status === "withheld" && !(typeof f.withheldReason === "string" && DECIDED_WITHHELD.has(f.withheldReason))).length;
+  if (held) return none([`${held} withheld candidate finding(s) were not decided (unverified, over a limit, or an unknown reason)`]);
   // DITTO-2455 (owner decision): a local review is complete once every change
   // is fully reviewed, even when surrounding context is bounded. Bounded
   // context is reported, never treated as approval-blocking.

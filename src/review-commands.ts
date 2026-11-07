@@ -778,7 +778,7 @@ export function registerReviewCommands(
     .option("--preview", "inspect selected paths and upload size locally; no auth, upload or inference")
     .option("--timeout <seconds>", "cancel after this many seconds including capture and queue time (1-1800; default 1200, 1800 for deep)")
     .option("--request-id <uuid>", "recover an uncertain admission with exactly the same source, profile and context")
-    .option("--gate", "exit 0 only on an approve recommendation, 2 on changes requested, 1 when there is no recommendation"))
+    .option("--gate", "exit 0 only on an approve recommendation, 2 on changes requested, 1 when there is no recommendation; a timeout (124) or interrupt (130/143) keeps its own code and is never approval"))
     .action(cmdReviewLocal),
     `  heyditto review local --preview\n  heyditto review local --staged --profile quick --org omniaura\n  heyditto review local --base main --context-file .tmp/task.md --output json`);
   scoped(review.command("local-status").description("inspect a pre-PR review run without starting or retrying it")
