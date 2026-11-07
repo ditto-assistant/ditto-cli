@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import {spawn} from "node:child_process";
-import {mkdtempSync,writeFileSync} from "node:fs";
+import {existsSync,mkdtempSync,readFileSync,writeFileSync} from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -100,4 +100,36 @@ test("an explicit org UUID skips human directory resolution and leaves service i
  const s=await stub();try{
   const r=await run(s.base,["iam","mode","get","--org",org.id,"--output","json"]);assert.equal(r.status,0,r.stderr);assert.equal(s.calls.length,1);assert.equal(s.calls[0].url,`/api/v5/companies/${org.id}/iam/mode.get`);
  }finally{s.close();}
+});
+
+test("credential issuance suppresses untrusted diagnostics, redirects and extra success fields",async()=>{
+ const secret=`ditto_svc_${"A".repeat(43)}`;
+ const id="bbbbbbbb-0000-0000-0000-000000000002";
+ let mode="error",redirectHits=0;
+ const server=http.createServer((req,res)=>{
+  req.resume();req.on("end",()=>{
+   if(req.url==="/redirect-target"){redirectHits++;res.end("{}");return;}
+   res.setHeader("Content-Type","application/json");
+   if(mode==="error"){res.statusCode=500;res.end(JSON.stringify({message:secret}));}
+   else if(mode==="redirect"){res.statusCode=307;res.setHeader("Location","/redirect-target");res.end(secret);}
+   else if(mode==="malformed")res.end(`{"secret":"${secret}`);
+   else if(mode==="invalid-secret")res.end(JSON.stringify({id,secret:"bad"}));
+   else if(mode==="unsafe-id")res.end(JSON.stringify({id:secret,secret}));
+   else res.end(JSON.stringify({id,secret,unexpected:secret}));
+  });
+ });
+ await new Promise(r=>server.listen(0,"127.0.0.1",r));
+ const base=`http://127.0.0.1:${server.address().port}`;
+ try{
+  for(mode of ["error","redirect","malformed","unsafe-id","invalid-secret","success"]){
+   const dir=mkdtempSync(path.join(os.tmpdir(),"iam-credential-"));const filename=path.join(dir,"secret");
+   const r=await run(base,["iam","service-credentials","issue","--org",org.id,"--file","-","--secret-file",filename],"{}");
+   assert.equal(r.status,mode==="success"?0:1,r.stderr);
+   assert.ok(!r.stdout.includes(secret)&&!r.stderr.includes(secret),mode);
+   assert.equal(existsSync(filename),true,mode);
+   if(mode==="invalid-secret")assert.match(r.stderr,new RegExp(id));
+   if(mode==="success"){assert.deepEqual(JSON.parse(r.stdout),{id});assert.equal(readFileSync(filename,"utf8"),`${secret}\n`);}
+  }
+  assert.equal(redirectHits,0);
+ }finally{server.closeAllConnections();server.close();}
 });

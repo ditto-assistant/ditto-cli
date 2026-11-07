@@ -720,8 +720,9 @@ How the wiring works:
 
 ### `codex-app`
 
-Use Codex Desktop (ChatGPT.app) with your Ditto Router key and choose models
-in the app, including Claude, OpenAI and open models from Ditto's catalog.
+Use Codex Desktop (ChatGPT.app) with your Ditto Router key and choose among
+models exposed by the Router's current Codex catalog in the app. Catalog
+coverage and the availability of individual provider models can vary.
 Quit Desktop, then run:
 
 ```bash
@@ -731,7 +732,7 @@ heyditto codex-app --endpoint ditto-dev
 ```
 
 Sign in and choose a router if prompted. Setup saves the API key and loads
-the complete model picker automatically; no model flag, pasted key or config
+the current model picker automatically; no model flag, pasted key or config
 edit is needed. Reopen Desktop and start a new chat, then choose your model
 in the app. The initial selection uses the endpoint's routing; selecting a
 provider model still follows that endpoint's routing and billing policy.
@@ -739,7 +740,7 @@ provider model still follows that endpoint's routing and billing policy.
 Setup works for company members without changing the shared endpoint's
 settings. It also replaces a previously selected custom provider locally.
 The picker is a local snapshot: rerun the command to refresh it or switch
-routers. Catalog reads are paginated so the full list is loaded without
+routers. Catalog reads are paginated so the available list is loaded without
 making an unbounded gateway response.
 
 ```bash
@@ -1550,6 +1551,12 @@ another principal needs a separate permission. Policy files use canonical
 snake_case fields. `--file -` reads stdin; policy bodies never belong in shell
 arguments. IAM commands fail on API refusals and never substitute a different
 identity or raise a spending allowance.
+
+`iam service-credentials issue` creates the requested secret file with mode
+0600. If issuance or writing fails, inspect that file before retrying; it may
+be empty or partial. The command reports a validated credential ID when one is
+available so it can be revoked. Do not replace or move the destination while
+issuance is running; concurrent changes are not coordinated.
 
 `iam mode get --org your-team` reads rollout state for the inference domain.
 `iam mode set shadow --revision 0 --dry-run --org your-team` validates a change

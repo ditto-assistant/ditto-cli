@@ -1,7 +1,7 @@
 import { createReadStream } from "node:fs";
-import { open, unlink } from "node:fs/promises";
+import { open } from "node:fs/promises";
 import type { Command, Option } from "commander";
-import { apiFetch, resolveCompany } from "./api.js";
+import { apiFetch, issueServiceCredential, resolveCompany } from "./api.js";
 import { readStoredAuth } from "./store.js";
 
 interface IAMOptions { org?: string; output?: string; file?: string; secretFile?: string; revision?: string; domain?: string; dryRun?: boolean }
@@ -92,18 +92,28 @@ export function registerIAMCommands(program: Command, outputOption: () => Option
       const payload = await policyFile(o.file);
       const filename = o.secretFile!;
       const file = await open(filename, "wx", 0o600);
-      let issued = false;
+      let issuedID: string | undefined;
+      let saved = false;
       try {
-        const result = await apiFetch<Record<string, unknown>>(`/api/v5/companies/${encodeURIComponent(company)}/iam/serviceCredentials.issue`, { method: "POST", body: payload });
-        const { secret, ...metadata } = result;
-        if (typeof secret !== "string" || !/^ditto_svc_[A-Za-z0-9_-]{43}$/.test(secret)) throw new Error("server returned an invalid credential");
-        issued = true;
-        try { await file.writeFile(`${secret}\n`); }
-        catch { throw new Error(`credential ${String(metadata.id)} was issued but could not be written; revoke it`); }
-        process.stdout.write(`${JSON.stringify(metadata, null, 2)}\n`);
-      } finally {
+        const result = await issueServiceCredential(`/api/v5/companies/${encodeURIComponent(company)}/iam/serviceCredentials.issue`, payload);
+        if (!result || typeof result !== "object" || Array.isArray(result)) throw new Error("invalid credential issuance response; check for an issued credential before retrying");
+        const { secret, id } = result as Record<string, unknown>;
+        if (typeof id === "string" && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(id)) issuedID = id;
+        if (typeof secret !== "string" || !/^ditto_svc_[A-Za-z0-9_-]{43}$/.test(secret) || !issuedID) throw new Error("invalid credential issuance response; check for an issued credential before retrying");
+        await file.writeFile(`${secret}\n`);
         await file.close();
-        if (!issued) await unlink(filename).catch(() => {});
+        saved = true;
+        process.stdout.write(`${JSON.stringify({ id: issuedID }, null, 2)}\n`);
+      } catch (error) {
+        if (issuedID && !saved) throw new Error(`credential ${issuedID} was issued but could not be saved; revoke it and check --secret-file`);
+        if (!saved) throw new Error(`${error instanceof Error ? error.message : "credential issuance failed"}; check --secret-file`);
+        throw error;
+      } finally {
+        if (!saved) {
+          await file.close().catch(() => {});
+          // Never unlink by pathname here: another process may have replaced it
+          // while the request was in flight. Tell the operator to inspect it.
+        }
       }
     });
   scoped(credentials.command("revoke").description("revoke an issued credential")
