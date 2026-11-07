@@ -159,7 +159,10 @@ export function recommendLocalReview(run: LocalRunLike): Recommendation {
   if (result && (status === "completed" || status === "partial")) {
     const scope = isObj(result.scope) ? result.scope : undefined;
     const verdict = isObj(result.verdict) ? result.verdict : undefined;
-    const unmet = scope?.status === "checked" && Array.isArray(scope.items) ? scope.items.filter(i => isObj(i) && i.required !== false && i.met !== true).length : 0;
+    // A checked scope must carry a list of item objects; anything else is
+    // malformed and never approval.
+    if (scope?.status === "checked" && !(Array.isArray(scope.items) && scope.items.every(isObj))) return none(["the linked issue's scope result is malformed (checked without a list of items)"]);
+    const unmet = scope?.status === "checked" ? (scope.items as Obj[]).filter(i => i.required !== false && i.met !== true).length : 0;
     if (unmet || verdict?.event === "REQUEST_CHANGES") return { verdict: "changes", approved: false, reasons: [unmet ? `${unmet} written requirement(s) of the linked issue are unmet` : "the review verdict requests changes"], blocking: unmet, nits: nitCount };
     if (scope && scope.status !== "checked" && scope.status !== "no_items") return none([`the linked issue's written scope could not be checked (${typeof scope.status === "string" ? scope.status : "unknown"})`]);
   }
