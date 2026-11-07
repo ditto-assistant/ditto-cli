@@ -116,6 +116,13 @@ test("service credential files report their distinct source",async()=>{
  }
 });
 
+test("empty model is rejected before a service credential sends a request",async()=>{
+ const s=await stub();try{
+  const r=await run(s.base,["endpoints","set",org.id,"--model","  "],undefined,{DITTO_API_KEY:`ditto_svc_${"A".repeat(43)}`});
+  assert.equal(r.status,1);assert.match(r.stderr,/--model must not be empty/);assert.equal(s.calls.length,0);
+ }finally{s.close();}
+});
+
 test("credential issuance suppresses untrusted diagnostics, redirects and extra success fields",async()=>{
  const secret=`ditto_svc_${"A".repeat(43)}`;
  const id="bbbbbbbb-0000-0000-0000-000000000002";

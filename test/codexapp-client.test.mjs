@@ -14,7 +14,7 @@ function run(command, args, env, cwd) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { env, cwd, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "", stderr = "";
-    const timer = setTimeout(() => child.kill(), 30000);
+    const timer = setTimeout(() => { child.kill("SIGKILL"); reject(new Error("local client timed out")); }, 30000);
     child.stdout.on("data", c => stdout += c);
     child.stderr.on("data", c => stderr += c);
     child.on("error", error => { clearTimeout(timer); reject(error); });
@@ -39,11 +39,13 @@ test("installed Codex uses the Desktop setup key and selected Claude/open model 
     default_reasoning_level: "medium", experimental_supported_tools: [], input_modalities: ["text"],
   }));
   let base;
+  let handlerError;
   const server = http.createServer((req, res) => {
     let body = "";
     req.on("data", c => body += c);
     req.on("end", () => {
       const json = (status, value) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(value)); };
+      try {
       if (req.url === "/api/v5/companies") return json(200, { companies: [] });
       if (req.url === "/api/v5/inference/endpoints") return json(200, { baseUrl: `${base}/v1`, endpoints: [{ id: "endpoint-1", companyId: "company-1", slug: "ditto-dev", name: "Ditto Dev", model: ids[0], status: "active", access: {iamEnforced:true,createSession:true,createKey:false,maxSessionSeconds:43200} }] });
       if (req.url.endsWith("/keys")) { assert.equal(JSON.parse(body).expiresIn,"12h"); return json(201, { id: "key-1", key, keyHint: "only" }); }
@@ -60,6 +62,11 @@ test("installed Codex uses the Desktop setup key and selected Claude/open model 
         return;
       }
       json(404, { error: "fixture route not found" });
+      } catch (error) {
+        handlerError = error;
+        if (!res.headersSent) json(500, { error: "fixture assertion failed" });
+        else res.destroy();
+      }
     });
   });
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
@@ -69,11 +76,13 @@ test("installed Codex uses the Desktop setup key and selected Claude/open model 
   delete env.OPENAI_BASE_URL;
   try {
     const setup = await run(process.execPath, [cliPath, "codex-app", "--endpoint", "ditto-dev"], env, home);
-    assert.equal(setup.status, 0, setup.stderr);
+    assert.equal(setup.status, 0, handlerError?.message ?? setup.stderr);
+    assert.ifError(handlerError);
     assert.ok(!setup.stderr.includes(key));
     for (const model of ids) {
       const result = await run(binary, ["--no-daemon", "exec", "--skip-git-repo-check", "--ephemeral", "--json", "-m", model, "Reply with exactly gateway-ok"], env, home);
-      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.status, 0, handlerError?.message ?? result.stderr);
+      assert.ifError(handlerError);
       assert.match(result.stdout, /gateway-ok/);
     }
     assert.deepEqual(selected, ids, "the exact selected IDs reach the gateway with the installed endpoint key");

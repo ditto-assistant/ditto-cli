@@ -26,6 +26,6 @@ test("unrelated Node22 CLI commands do not load experimental SQLite", { skip: !n
     assert.equal(result.status, expectedStatus, result.stderr);
     assert.doesNotMatch(result.stderr, /SQLite|ExperimentalWarning/u, "unrelated commands must not import the recovery database");
     assert.deepEqual(JSON.parse(await readFile(marker, "utf8")), [], "early process.exit may suppress a queued warning, so inspect actual module loading too");
-    assert.ok(result.stdout.trim());
+    assert.ok((expectedStatus === 0 ? result.stdout : result.stdout + result.stderr).trim());
   }
 });

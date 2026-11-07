@@ -638,7 +638,10 @@ function checkAliases(map: Record<string, string>, slug: string): void {
 export async function cmdEndpointSet(ref: string, options: EndpointSetOptions): Promise<void> {
   const patch: EndpointInput = {};
   if (options.name !== undefined) patch.name = options.name.trim();
-  if (options.model !== undefined) patch.model = options.model.trim();
+  if (options.model !== undefined) {
+    patch.model = options.model.trim();
+    if (!patch.model) throw new Error("--model must not be empty");
+  }
   if (options.systemPrompt !== undefined) patch.systemPrompt = options.systemPrompt;
   if (options.spendLimit !== undefined) {
     const raw = options.spendLimit.trim().toLowerCase();
