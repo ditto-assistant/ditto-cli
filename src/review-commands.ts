@@ -226,11 +226,12 @@ function printScope(scope: ScopeResult | undefined): void {
     return;
   }
   const items = scope.items ?? [];
-  const required = items.filter(i => i.required);
-  process.stdout.write(`\nLinked issue ${name}: ${required.filter(i => i.met).length} of ${required.length} written requirements met${scope.error ? ` (${scope.error})` : ""}\n`);
+  // The recommendation's rule: required unless explicitly false, met only when true.
+  const required = items.filter(i => i.required !== false);
+  process.stdout.write(`\nLinked issue ${name}: ${required.filter(i => i.met === true).length} of ${required.length} written requirements met${scope.error ? ` (${scope.error})` : ""}\n`);
   for (const it of items) {
-    const mark = !it.required ? "-" : it.met ? "✓" : "✗";
-    const detail = it.met ? (it.evidence_refs ?? []).slice(0, 3).join(", ") : it.reason ?? "";
+    const mark = it.required === false ? "-" : it.met === true ? "✓" : "✗";
+    const detail = it.met === true ? (it.evidence_refs ?? []).slice(0, 3).join(", ") : it.reason ?? "";
     process.stdout.write(`  ${mark} ${it.scope_item}${detail ? `\n      ${detail}` : ""}\n`);
   }
 }

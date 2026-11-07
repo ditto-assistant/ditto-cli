@@ -193,6 +193,11 @@ test("an unmet written requirement exits 2 without --gate even when no verdict w
   assert.match(out.stdout, /Recommendation: changes requested/);
   // A checked scope's note (here, the requirement cap) is shown beside the count.
   assert.match(out.stdout, /1 of 2 written requirements met \(more than 25 written requirements; only the first 25 were checked\)/);
+  // An item without "required" is required, as the recommendation treats it.
+  const unflagged = await stub(t, undefined, { ...MET_SCOPE, items: [...MET_SCOPE.items, { scope_item: "Document the flag", evidence_refs: [] }] });
+  const out2 = await run(root, unflagged.base, ["local"]);
+  assert.equal(out2.code, 2, out2.stdout + out2.stderr);
+  assert.match(out2.stdout, /1 of 2 written requirements met/); assert.match(out2.stdout, /✗ Document the flag/);
 });
 
 test("preview reports the trace without uploading it", async t => {
