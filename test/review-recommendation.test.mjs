@@ -35,7 +35,6 @@ for (const [name, run, pattern] of [
   ["completed with no result", { status: "completed", workspaceCurrent: true }, /no review result/],
   ["completed with an error", withResult({ error: "budget exhausted" }), /result error: budget exhausted/],
   ["changed coverage incomplete", withResult({ local: { contextComplete: true, changedCoverageComplete: false } }), /changed paths were not fully reviewed/],
-  ["context bounded", withResult({ local: { contextComplete: false, changedCoverageComplete: true } }), /context was bounded/],
   ["working tree changed", clean({ workspaceCurrent: false }), /working tree changed/],
   ["working tree unverified (status read)", clean({ workspaceCurrent: null }), /could not be verified/],
 ]) {
@@ -125,7 +124,7 @@ test("round-1 self-review findings stay fixed", () => {
   // Abbreviated work with a blocking finding is still CHANGES (findings are evidence).
   assert.equal(recommendLocalReview(withResult({ findings: [finding("high")], files: { completed: [], abbreviated: [{ path: "app.ts", reason: "x" }], failed: [] } })).verdict, "changes");
   // S7: non-boolean coverage flags are not complete coverage; missing local metadata is not either.
-  for (const local of [{ contextComplete: true, changedCoverageComplete: null }, { contextComplete: "yes", changedCoverageComplete: true }, undefined]) {
+  for (const local of [{ contextComplete: true, changedCoverageComplete: null }, { contextComplete: true, changedCoverageComplete: "yes" }, undefined]) {
     assert.equal(recommendLocalReview(withResult({ local })).verdict, "none", JSON.stringify(local));
   }
   // S8: a non-string error value blocks approval.
@@ -133,6 +132,19 @@ test("round-1 self-review findings stay fixed", () => {
   assert.equal(recommendLocalReview(withResult({ error: 7 })).verdict, "none");
   // S6: a partial run's nit count survives into the structured recommendation.
   assert.equal(recommendLocalReview(clean({ status: "partial", result: { complete: false, findings: [finding("low")] } })).nits, 1);
+});
+
+test("DITTO-2455: bounded context is reported but does not block; unverified candidates do", () => {
+  const bounded = recommendLocalReview(withResult({ local: { contextComplete: false, changedCoverageComplete: true } }));
+  assert.equal(bounded.verdict, "approve"); assert.match(bounded.reasons.join(), /surrounding context was bounded/);
+  for (const withheldReason of ["verification_unavailable", "candidate_limit", "file_evidence_unavailable"]) {
+    const rec = recommendLocalReview(withResult({ findings: [finding("high", { status: "withheld", withheldReason })] }));
+    assert.equal(rec.verdict, "none", withheldReason); assert.match(rec.reasons.join(), /could not be verified/);
+  }
+  // A verifier rejection is a decided candidate, not an unverified one.
+  assert.equal(recommendLocalReview(withResult({ findings: [finding("high", { status: "withheld", withheldReason: "verifier_rejected" })] })).verdict, "approve");
+  // Changed coverage still has to be complete on every lens.
+  assert.equal(recommendLocalReview(withResult({ local: { contextComplete: false, changedCoverageComplete: false } })).verdict, "none");
 });
 
 test("a resolved v1 reuse receipt in both places does not block approval", () => {

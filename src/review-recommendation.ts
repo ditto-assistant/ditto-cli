@@ -2,9 +2,11 @@
  * The local review recommendation: the one place that decides whether a
  * local review run may be read as approval.
  *
- * Fail closed. Only a completed run with complete coverage, a well-formed
- * result, a verified current working tree, no blocking finding, and no
- * unresolved reuse or PR-inheritance claim yields "approve". A run with
+ * Fail closed. Only a completed run in which every changed file was fully
+ * reviewed on every lens, with a well-formed result, a verified current
+ * working tree, no blocking finding, no unverified candidate, and no
+ * unresolved reuse or PR-inheritance claim yields "approve". Bounded
+ * surrounding context is reported but does not block (DITTO-2455). A run with
  * blocking findings yields "changes" (findings are evidence even from a
  * partial run). Everything else, including failed, partial, cancelled,
  * timed-out, malformed or budget-exhausted runs, yields "none": no
@@ -103,6 +105,9 @@ export function reuseAndInheritanceProblems(run: LocalRunLike): string[] {
  * internal/hosted: "withheld" after verification, "duplicate" when folded). */
 const UNPOSTED_STATUSES = new Set(["withheld", "duplicate"]);
 
+/** Withheld reasons meaning a candidate on a change was never verified. */
+const HELD_UNVERIFIED = new Set(["verification_unavailable", "candidate_limit", "file_evidence_unavailable"]);
+
 /** A finding counts unless the engine explicitly withheld or deduplicated it.
  * Any other status, including a missing, empty or unrecognized one, counts, so
  * a blocking finding can never hide from the gate. */
@@ -160,7 +165,14 @@ export function recommendLocalReview(run: LocalRunLike): Recommendation {
   // Local receipts always carry both flags; anything but true is incomplete.
   const local = isObj(result.local) ? result.local : {};
   if (local.changedCoverageComplete !== true) return none(["changed paths were not fully reviewed"]);
-  if (local.contextComplete !== true) return none(["surrounding context was bounded"]);
+  // Held candidates mean a change was not verified. The engine already clears
+  // changedCoverageComplete for these (ditto-review#96); check independently.
+  const held = (findingsList(result) ?? []).filter(f => typeof f.withheldReason === "string" && HELD_UNVERIFIED.has(f.withheldReason)).length;
+  if (held) return none([`${held} candidate finding(s) could not be verified`]);
+  // DITTO-2455 (owner decision): a local review is complete once every change
+  // is fully reviewed, even when surrounding context is bounded. Bounded
+  // context is reported, never treated as approval-blocking.
+  if (local.contextComplete !== true) reasons.push("surrounding context was bounded; omitted files were not reviewed");
   if (run.workspaceCurrent !== true) return none([run.workspaceCurrent === false ? "the working tree changed after capture" : "the current working tree could not be verified against the reviewed snapshot"]);
   const nits = visibleFindings(result).length;
   return { verdict: "approve", approved: true, reasons, blocking: 0, nits };

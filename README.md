@@ -361,8 +361,10 @@ Every result carries a `recommendation` (`verdict`: `approve`, `changes` or
 `none`; `approved`; `reasons`). It fails closed:
 
 - `approve` only for a `completed` run whose result is complete and well formed
-  (findings list present, changed paths and context fully covered), whose
-  working tree still matches the reviewed snapshot, with no blocking finding.
+  (findings list present, every changed file fully reviewed on every lens, no
+  candidate held as unverified), whose working tree still matches the reviewed
+  snapshot, with no blocking finding. Bounded surrounding context is listed in
+  `reasons` but does not block (DITTO-2455).
   Findings of severity `low`, `info` or `nit` do not block; any other or
   missing severity does.
 - `changes` when a completed or partial run has a blocking finding.
