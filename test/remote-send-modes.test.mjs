@@ -10,7 +10,7 @@ import { spawnInPty } from "../dist/remote/pty.js";
 import { startHostStub } from "./helpers/host-stub.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-async function world(t, { harness = "claude", mode = "tui", inject, hookCompletionTimeoutMs, finalCloseTimeoutMs = 1000 } = {}) {
+async function world(t, { harness = "claude", mode = "tui", inject, hookCompletionTimeoutMs, finalCloseTimeoutMs = 1000, persistHostId } = {}) {
   const cwd = await mkdtemp(path.join(os.tmpdir(), "ditto-send-modes-"));
   const prior = process.env.DITTO_CONFIG_DIR;
   process.env.DITTO_CONFIG_DIR = path.join(cwd, "config");
@@ -24,7 +24,7 @@ async function world(t, { harness = "claude", mode = "tui", inject, hookCompleti
   let endTerminal;
   const exit = new Promise(resolve => { endTerminal = resolve; });
   const pty = { pid: 1, write(data) { writes.push(data); }, inject: async (...args) => { calls.push(args); await inject?.(...args); }, interrupt() { interrupts++; }, quietFor: () => quiet, exit, kill() {} };
-  const session = new RemoteSession({ harness, mode, cwd, sessionId: "owned-session", apiKey: "ditto_mcp_test", baseUrl: stub.base, log(line) { notes.push(line); }, quietFallbackMs: 400, hookCompletionTimeoutMs, hostOptions: { reconnectBaseMs: 20, reconnectMaxMs: 50, finalCloseTimeoutMs } }, { events });
+  const session = new RemoteSession({ harness, mode, cwd, sessionId: "owned-session", apiKey: "ditto_mcp_test", baseUrl: stub.base, log(line) { notes.push(line); }, quietFallbackMs: 400, hookCompletionTimeoutMs, hostOptions: { reconnectBaseMs: 20, reconnectMaxMs: 50, finalCloseTimeoutMs, persistHostId } }, { events });
   if (mode === "tui") session.attachTui(pty);
   t.after(async () => { await session.stop(); await stub.close(); if (prior === undefined) delete process.env.DITTO_CONFIG_DIR; else process.env.DITTO_CONFIG_DIR = prior; await rm(cwd, { recursive: true, force: true }); });
   await session.start();
@@ -47,6 +47,20 @@ async function world(t, { harness = "claude", mode = "tui", inject, hookCompleti
   const finished = (id) => stub.waitFor((f) => f.type === "turn.finished" && f.turnId === id);
   return { stub, events, calls, writes, notes, session, send, started, finished, permission, permissionPayload, question, endTerminal: () => endTerminal(0), interrupts: () => interrupts, quiet: () => { quiet = Infinity; }, busy: () => { quiet = 0; } };
 }
+
+test("session stop waits for its in-flight host identity save", async (t) => {
+  let release;
+  const blockedWrite = new Promise((resolve) => { release = resolve; });
+  const w = await world(t, { persistHostId: () => blockedWrite });
+  t.after(() => release());
+  let stopped = false;
+  const closing = w.session.stop().then(() => { stopped = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(stopped, false);
+  release();
+  await closing;
+  assert.equal(stopped, true);
+});
 
 test("Claude normal FIFO survives immediate steering and stale Stop cannot finish its replacement", async (t) => {
   const w = await world(t);

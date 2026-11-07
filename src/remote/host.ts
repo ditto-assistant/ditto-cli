@@ -54,6 +54,10 @@ export interface HostClientOptions {
   reconnectMaxMs?: number;
   /** Maximum graceful-exit wait for final frames; tests can shorten it. */
   finalCloseTimeoutMs?: number;
+  /** Overrides profile persistence in tests. */
+  persistHostId?: (hostId: string) => Promise<unknown>;
+  /** Maximum additional shutdown wait for a pending profile write. */
+  hostIdWriteTimeoutMs?: number;
 }
 
 const SEEN_TURNS_MAX = 1000;
@@ -87,6 +91,7 @@ export class HostClient {
   private outageTimer?: NodeJS.Timeout;
   /** True once a drop has been reported, until the next welcome. */
   private outageReported = false;
+  private hostIdWrites: Promise<unknown> = Promise.resolve();
 
   constructor(options: HostClientOptions) {
     this.options = options;
@@ -208,6 +213,7 @@ export class HostClient {
   }
 
   private onWelcome(frame: WelcomeFrame): void {
+    if (this.closing) return;
     if (this.outageReported) this.options.log?.("remote control: reconnected");
     this.clearOutage();
     this.connected = true;
@@ -215,7 +221,8 @@ export class HostClient {
     this.missedPongs = 0;
     if (frame.hostId && frame.hostId !== this.hostId) {
       this.hostId = frame.hostId;
-      void updateStoredAuth({ hostId: frame.hostId }).catch(() => undefined);
+      const hostId = frame.hostId;
+      this.hostIdWrites = this.hostIdWrites.then(() => (this.options.persistHostId ?? ((id) => updateStoredAuth({ hostId: id })))(hostId)).catch(() => undefined);
     }
     this.startHeartbeat(frame.heartbeatSeconds || this.options.heartbeatSeconds || 30);
     for (const session of this.sessions.values()) {
@@ -368,10 +375,28 @@ export class HostClient {
       });
       if (!delivered) this.options.log?.("remote control: could not report the terminal's final state before disconnecting");
       this.close();
+      await this.waitForHostIdWrites();
       return delivered;
     }
     this.close();
+    await this.waitForHostIdWrites();
     return true;
+  }
+
+  /** Stop immediately, then wait for profile writes already started by this host. */
+  async closeAndWait(): Promise<void> {
+    this.close();
+    await this.waitForHostIdWrites();
+  }
+
+  private async waitForHostIdWrites(): Promise<void> {
+    let timer: NodeJS.Timeout | undefined;
+    const completed = await Promise.race([
+      this.hostIdWrites.then(() => true),
+      new Promise<false>((resolve) => { timer = setTimeout(() => resolve(false), this.options.hostIdWriteTimeoutMs ?? 5000); }),
+    ]);
+    if (timer) clearTimeout(timer);
+    if (!completed) this.options.log?.("remote control: host identity save is still pending after shutdown");
   }
 
   /** Announces every session closed and stops reconnecting. */

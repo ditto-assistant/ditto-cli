@@ -180,8 +180,7 @@ export class RemoteSession {
     if (this.uncertainCompletion) {
       this.stopTask = this.host.closeAfterFinals().then(() => undefined);
     } else {
-      this.host.close();
-      this.stopTask = Promise.resolve();
+      this.stopTask = this.host.closeAndWait();
     }
     return this.stopTask;
   }
