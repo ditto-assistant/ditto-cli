@@ -357,6 +357,31 @@ checkout is bug-free. Results are unpublished local reviews and post nothing
 to GitHub. Organization learning-memory and complete hosted repository-policy
 parity remain separate capabilities and are not implied by this command.
 
+Every result carries a `recommendation` (`verdict`: `approve`, `changes` or
+`none`; `approved`; `reasons`). It fails closed:
+
+- `approve` only for a `completed` run whose result is complete and well formed
+  (findings list present, every changed file fully reviewed on every lens, no
+  withheld candidate left undecided: only the engine's own decisions such as
+  `rejected_by_verifier` or `below_confidence` do not block), whose working tree still matches the reviewed
+  snapshot, with no blocking finding. Bounded surrounding context is listed in
+  `reasons` but does not block (DITTO-2455).
+  Findings of severity `low`, `info` or `nit` do not block; any other or
+  missing severity does.
+- `changes` when a completed or partial run has a blocking finding.
+- `none` otherwise: failed, partial, cancelled, skipped, superseded, timed-out
+  or interrupted runs, malformed responses, budget exhaustion, and any reuse
+  receipt or PR-inheritance claim this CLI cannot verify as resolved. `none` is
+  never approval. `local-status` always reports `none` for a completed run
+  because a status read cannot verify the working tree.
+
+`--gate` turns the recommendation into the exit code: `0` approve, `2` changes
+requested, `1` no recommendation (`124` timeout and `130`/`143` interrupt are
+unchanged). With `--output json`, a timeout or interrupt still prints a receipt
+whose recommendation is `none`. Without `--gate`, exit codes are as before.
+A refused admission (HTTP 4xx, such as a CLI/server snapshot-contract mismatch)
+names the error code and reference and states that nothing was admitted.
+
 Manage Ditto Review and follow reviews with `heyditto`.
 Commands use your selected organization (`orgs use`) or `--org`; without one,
 they use your personal workspace. Repositories must already be set up for

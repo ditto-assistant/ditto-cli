@@ -56,11 +56,15 @@ export async function apiFetch<T>(
     let detail = text;
     let explained = false;
     try {
-      const parsed = JSON.parse(text) as { message?: string; error?: string; code?: unknown };
-      detail = parsed.message || parsed.error || text;
+      const parsed = JSON.parse(text) as { message?: unknown; error?: unknown; code?: unknown };
+      // Only string fields are prose; a malformed body (an object or number in
+      // `error`) must not crash error reporting and hide the HTTP status.
+      const nested = parsed.error && typeof parsed.error === "object" ? (parsed.error as { message?: unknown }).message : undefined;
+      const prose = [parsed.message, parsed.error, nested].find((v): v is string => typeof v === "string" && v.length > 0);
+      detail = prose ?? text;
       // A coded refusal (api_key_limited, a Review permission or billing refusal)
       // carries its own next step; a generic hint would contradict it.
-      explained = typeof parsed.code === "string" && Boolean(parsed.message || parsed.error);
+      explained = typeof parsed.code === "string" && prose !== undefined;
     } catch {
       /* raw body */
     }
