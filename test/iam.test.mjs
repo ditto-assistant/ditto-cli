@@ -5,7 +5,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import {fileURLToPath} from "node:url";
+import {fileURLToPath,pathToFileURL} from "node:url";
 const cli=fileURLToPath(new URL("../dist/cli.js",import.meta.url));
 const org={id:"aaaaaaaa-0000-0000-0000-000000000001",slug:"team",name:"Team",role:"owner"};
 async function stub({denied=false,conflict=false}={}){
@@ -29,8 +29,8 @@ async function stub({denied=false,conflict=false}={}){
  await new Promise(r=>server.listen(0,"127.0.0.1",r));
  return {base:`http://127.0.0.1:${server.address().port}`,calls,close(){server.closeAllConnections();server.close();}};
 }
-function run(base,args,stdin){return new Promise((resolve,reject)=>{
- const child=spawn(process.execPath,[cli,"--no-auto-update",...args],{env:{...process.env,DITTO_API_KEY:"ditto_mcp_iam_test",DITTO_API_BASE:base,DITTO_CONFIG_DIR:mkdtempSync(path.join(os.tmpdir(),"ditto-iam-test-"))},stdio:["pipe","pipe","pipe"]});
+function run(base,args,stdin,extra={}){return new Promise((resolve,reject)=>{
+ const child=spawn(process.execPath,[cli,"--no-auto-update",...args],{env:{...process.env,DITTO_API_KEY:"ditto_mcp_iam_test",DITTO_API_BASE:base,DITTO_CONFIG_DIR:mkdtempSync(path.join(os.tmpdir(),"ditto-iam-test-")),...extra},stdio:["pipe","pipe","pipe"]});
  let stdout="",stderr="";child.stdout.on("data",x=>stdout+=x);child.stderr.on("data",x=>stderr+=x);child.on("error",reject);child.on("close",status=>resolve({status,stdout,stderr}));child.stdin.end(stdin);
 });}
 const scope=["--org","team","--output","json"];
@@ -102,6 +102,20 @@ test("an explicit org UUID skips human directory resolution and leaves service i
  }finally{s.close();}
 });
 
+test("service credential files report their distinct source",async()=>{
+ const {resolveApiKey}=await import("../dist/config.js");
+ const dir=mkdtempSync(path.join(os.tmpdir(),"iam-source-"));const filename=path.join(dir,"secret");
+ writeFileSync(filename,`ditto_svc_${"A".repeat(43)}\n`);
+ const oldKey=process.env.DITTO_API_KEY,oldFile=process.env.DITTO_SERVICE_CREDENTIAL_FILE;
+ try{
+  delete process.env.DITTO_API_KEY;process.env.DITTO_SERVICE_CREDENTIAL_FILE=filename;
+  const resolved=await resolveApiKey();assert.equal(resolved.source,"service-file");
+ }finally{
+  if(oldKey===undefined)delete process.env.DITTO_API_KEY;else process.env.DITTO_API_KEY=oldKey;
+  if(oldFile===undefined)delete process.env.DITTO_SERVICE_CREDENTIAL_FILE;else process.env.DITTO_SERVICE_CREDENTIAL_FILE=oldFile;
+ }
+});
+
 test("credential issuance suppresses untrusted diagnostics, redirects and extra success fields",async()=>{
  const secret=`ditto_svc_${"A".repeat(43)}`;
  const id="bbbbbbbb-0000-0000-0000-000000000002";
@@ -121,13 +135,17 @@ test("credential issuance suppresses untrusted diagnostics, redirects and extra 
  await new Promise(r=>server.listen(0,"127.0.0.1",r));
  const base=`http://127.0.0.1:${server.address().port}`;
  try{
-  for(mode of ["error","redirect","malformed","unsafe-id","invalid-secret","success"]){
+  for(mode of ["error","redirect","malformed","unsafe-id","invalid-secret","write-failure","close-failure","success"]){
    const dir=mkdtempSync(path.join(os.tmpdir(),"iam-credential-"));const filename=path.join(dir,"secret");
-   const r=await run(base,["iam","service-credentials","issue","--org",org.id,"--file","-","--secret-file",filename],"{}");
+   const preload=path.join(dir,"preload.mjs");
+   writeFileSync(preload,`import fs from "node:fs/promises"; import {syncBuiltinESMExports} from "node:module"; const open=fs.open; fs.open=async (...args)=>{const f=await open(...args); if(args[0]===process.env.IAM_TEST_TARGET){if(process.env.IAM_TEST_MODE==="write-failure")f.writeFile=async()=>{const e=new Error(process.env.IAM_TEST_SECRET);e.code="ENOSPC";throw e}; if(process.env.IAM_TEST_MODE==="close-failure"){const close=f.close.bind(f);f.close=async()=>{await close();const e=new Error(process.env.IAM_TEST_SECRET);e.code="EIO";throw e}}} return f}; syncBuiltinESMExports();`);
+   const extra=mode.endsWith("-failure")?{NODE_OPTIONS:`--import=${pathToFileURL(preload).href}`,IAM_TEST_TARGET:filename,IAM_TEST_MODE:mode,IAM_TEST_SECRET:secret}:{};
+   const r=await run(base,["iam","service-credentials","issue","--org",org.id,"--file","-","--secret-file",filename],"{}",extra);
    assert.equal(r.status,mode==="success"?0:1,r.stderr);
    assert.ok(!r.stdout.includes(secret)&&!r.stderr.includes(secret),mode);
    assert.equal(existsSync(filename),true,mode);
    if(mode==="invalid-secret")assert.match(r.stderr,new RegExp(id));
+   if(mode.endsWith("-failure")){assert.match(r.stderr,new RegExp(id));assert.match(r.stderr,mode==="write-failure"?/ENOSPC/:/EIO/);}
    if(mode==="success"){assert.deepEqual(JSON.parse(r.stdout),{id});assert.equal(readFileSync(filename,"utf8"),`${secret}\n`);}
   }
   assert.equal(redirectHits,0);

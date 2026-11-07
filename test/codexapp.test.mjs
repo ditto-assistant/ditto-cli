@@ -400,7 +400,7 @@ test("Desktop downloads every catalog page, including Claude and open models", a
   const stub = await startStub({ pages: {
     first: { models: [{ slug: "alpha" }, { slug: "openai/gpt-6.1-sol" }], next_cursor: "2" },
     "2": { models: [{ slug: "anthropic/claude-fable-5.1" }], next_cursor: "3" },
-    "3": { models: [{ slug: "z-ai/glm-5.3-flash" }] },
+    "3": { models: [{ slug: "z-ai/glm-5.3-flash" }], next_cursor: null },
   } });
   STUB_BASE = stub.base;
   const codexDir = mkdtempSync(path.join(os.tmpdir(), "heyditto-codexapp-home-"));
@@ -412,6 +412,21 @@ test("Desktop downloads every catalog page, including Claude and open models", a
     assert.deepEqual(JSON.parse(readFileSync(config.model_catalog_json, "utf8")).models.map(m => m.slug), ["alpha", "openai/gpt-6.1-sol", "anthropic/claude-fable-5.1", "z-ai/glm-5.3-flash"]);
     assert.equal(stub.calls.filter(c => c.url.startsWith("/v1/models")).length, 3);
     assert.equal(stub.patches().length, 0);
+  } finally { stub.close(); }
+});
+
+test("skipping the catalog preserves the user's model unless explicitly changed", async () => {
+  const stub = await startStub(); STUB_BASE = stub.base;
+  try {
+    for (const [initial, extra, expected] of [["chosen/model", [], "chosen/model"], ["chosen/model", ["--model", "other/model"], "other/model"], [undefined, [], undefined]]) {
+      const home = mkdtempSync(path.join(os.tmpdir(), "codex-no-models-"));
+      const cfg = mkdtempSync(path.join(os.tmpdir(), "codex-no-models-cfg-"));
+      if (initial) writeFileSync(path.join(home, "config.toml"), `model = "${initial}"\n`);
+      const result = await run(["codex-app", "--endpoint", "alpha", "--no-models", ...extra], home, cfg);
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(parseToml(readFileSync(path.join(home, "config.toml"), "utf8")).model, expected);
+    }
+    assert.equal(stub.calls.filter(c => c.url.startsWith("/v1/models")).length, 0);
   } finally { stub.close(); }
 });
 

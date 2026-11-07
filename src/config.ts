@@ -57,7 +57,7 @@ export function agentSignupURL(): string {
   return `${apiBaseURL()}/api/v5/agents/signup`;
 }
 
-export type ApiKeySource = "env" | "config" | "none";
+export type ApiKeySource = "env" | "service-file" | "config" | "none";
 
 export interface ResolvedKey {
   key?: string;
@@ -72,7 +72,7 @@ export async function resolveApiKey(): Promise<ResolvedKey> {
   if (serviceFile) {
     const key = (await readFile(serviceFile, "utf8")).trim();
     if (!/^ditto_svc_[A-Za-z0-9_-]{43}$/.test(key)) throw new Error("invalid service credential file");
-    return { key, source: "env" };
+    return { key, source: "service-file" };
   }
   const stored = await readStoredKey();
   if (stored) return { key: stored, source: "config" };

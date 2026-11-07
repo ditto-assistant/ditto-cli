@@ -105,7 +105,10 @@ export function registerIAMCommands(program: Command, outputOption: () => Option
         saved = true;
         process.stdout.write(`${JSON.stringify({ id: issuedID }, null, 2)}\n`);
       } catch (error) {
-        if (issuedID && !saved) throw new Error(`credential ${issuedID} was issued but could not be saved; revoke it and check --secret-file`);
+        if (issuedID && !saved) {
+          const code = error && typeof error === "object" && "code" in error && typeof error.code === "string" && ["EACCES", "EPERM", "ENOSPC", "EDQUOT", "EROFS", "EIO"].includes(error.code) ? ` (${error.code})` : "";
+          throw new Error(`credential ${issuedID} was issued but could not be saved${code}; revoke it and check --secret-file`);
+        }
         if (!saved) throw new Error(`${error instanceof Error ? error.message : "credential issuance failed"}; check --secret-file`);
         throw error;
       } finally {

@@ -54,7 +54,7 @@ export const CODEX_APP_MARKER = "# added by `heyditto codex-app`";
 
 interface CodexModelCatalog {
   models: { slug: string; [key: string]: unknown }[];
-  next_cursor?: string;
+  next_cursor?: string | null;
 }
 
 /** Read the gateway's native Codex catalog without changing endpoint policy. */
@@ -77,7 +77,7 @@ async function fetchCodexModels(baseUrl: string, key: string): Promise<CodexMode
       throw new Error("the router did not return a Codex model catalog; update the router before setting up Desktop. Your previous Codex setup is unchanged");
     }
     for (const model of catalog.models) models.set(model.slug, model);
-    cursor = catalog.next_cursor;
+    cursor = catalog.next_cursor ?? undefined;
     if (cursor !== undefined && (typeof cursor !== "string" || !cursor || cursors.has(cursor) || cursors.size >= 1000)) {
       throw new Error("the router returned an invalid model catalog cursor; your previous Codex setup is unchanged");
     }
@@ -428,11 +428,11 @@ async function runCodexAppSetup(options: CodexAppOptions, transaction?: CodexApp
   newConfig = upsertTopLevelString(newConfig, "model_provider", "openai");
   if (options.models !== false) newConfig = upsertTopLevelString(newConfig, "model_catalog_json", catalogPath);
   else if (record?.modelCatalog) newConfig = restoreKey(newConfig, "model_catalog_json", record.modelCatalog, record.previousModelCatalog) ?? newConfig;
-  const defaultModel = options.model ?? endpoint.slug;
-  newConfig = upsertTopLevelString(newConfig, "model", defaultModel);
+  const defaultModel = options.model ?? (options.models === false ? topLevelString(configRaw, "model") : endpoint.slug);
+  if (defaultModel !== undefined) newConfig = upsertTopLevelString(newConfig, "model", defaultModel);
   try {
     const parsed = parseToml(newConfig) as Record<string, unknown>;
-    if (parsed.openai_base_url !== baseUrl || parsed.forced_login_method !== "api" || parsed.model_provider !== "openai" || parsed.model !== defaultModel) {
+    if (parsed.openai_base_url !== baseUrl || parsed.forced_login_method !== "api" || parsed.model_provider !== "openai" || (defaultModel !== undefined && parsed.model !== defaultModel)) {
       throw new Error("the edited file does not carry the new values");
     }
   } catch {
