@@ -163,7 +163,10 @@ export function boundTrace(format: string, prompt: string, steps: string[]): Age
 export async function freezeAgentTrace(trace: AgentTrace, requestId: string): Promise<string> {
   // A persistent per-user state directory, not the OS temp directory, so the
   // printed recovery command still works after a reboot or a /tmp sweep.
-  const root = path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"), "heyditto", "review-traces");
+  // XDG: a relative XDG_STATE_HOME is ignored. Frozen traces are kept, as
+  // all traces are; nothing here deletes them.
+  const xdg = process.env.XDG_STATE_HOME;
+  const root = path.join(xdg && path.isAbsolute(xdg) ? xdg : path.join(os.homedir(), ".local", "state"), "heyditto", "review-traces");
   await mkdir(root, { recursive: true, mode: 0o700 });
   const dir = await mkdtemp(path.join(root, `${requestId.replace(/[^0-9a-f-]/gi, "")}-`));
   const file = path.join(dir, "trace.json");
@@ -176,12 +179,13 @@ export async function readAgentTrace(file: string): Promise<AgentTrace> {
   const info = await stat(file);
   if (!info.isFile()) throw new Error("--trace must name a file");
   if (info.size > MAX_TRACE_FILE_BYTES) throw new Error("--trace file is larger than 256 MiB");
-  // Read only what stat saw, plus one byte: the agent may still be
-  // appending, and an unbounded read could buffer far past the limit.
+  // Read exactly what stat saw (a consistent prefix while the agent keeps
+  // appending), probing one byte more only at the limit, so a growing file
+  // can never buffer past it.
   const handle = await open(file, "r");
   let bytes: Buffer;
   try {
-    const buf = Buffer.alloc(Math.min(info.size, MAX_TRACE_FILE_BYTES) + 1);
+    const buf = Buffer.alloc(info.size + (info.size === MAX_TRACE_FILE_BYTES ? 1 : 0));
     let n = 0;
     for (let r = 1; r > 0 && n < buf.length; n += r) r = (await handle.read(buf, n, buf.length - n, n)).bytesRead;
     bytes = buf.subarray(0, n);

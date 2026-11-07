@@ -225,7 +225,9 @@ function printScope(scope: ScopeResult | undefined): void {
     process.stdout.write(`\nLinked issue ${name}: ${why[scope.status] ?? scope.status}${scope.error ? ` (${scope.error})` : ""}\n`);
     return;
   }
-  const items = scope.items ?? [];
+  const outcome = scopeOutcome({ scope });
+  if (outcome.kind === "unchecked") { process.stdout.write(`\nLinked issue ${name}: ${outcome.reason}\n`); return; }
+  const items = (Array.isArray(scope.items) ? scope.items : []).filter((i): i is ScopeItem => typeof i === "object" && i !== null);
   // The recommendation's rule: required unless explicitly false, met only when true.
   const required = items.filter(i => i.required !== false);
   process.stdout.write(`\nLinked issue ${name}: ${required.filter(i => i.met === true).length} of ${required.length} written requirements met${scope.error ? ` (${scope.error})` : ""}\n`);
@@ -361,9 +363,10 @@ export async function cmdReviewLocal(options: LocalOptions): Promise<void> {
         else if (options.gate) process.exitCode = gateExitCode(recommendation);
         else if (["failed", "cancelled", "partial"].includes(run.status) || (run.status === "completed" && run.result?.complete !== true) || malformedLocalRun(run).length) process.exitCode = 1;
         // Without --gate only completeness and the linked issue's written scope
-        // set the exit status (findings alone keep 0, as before). The scope
-        // rule is the one --gate uses.
+        // set the exit status (findings alone keep 0, as before), by the rule
+        // --gate uses: 2 for an unmet requirement, 1 for a scope not fully checked.
         else if (scopeOutcome(run.result).kind === "changes") process.exitCode = REQUEST_CHANGES_EXIT;
+        else if (scopeOutcome(run.result).kind === "unchecked") process.exitCode = 1;
         return;
       }
       if (!ACTIVE_REVIEW_STATUSES.has(run.status)) throw new Error(`unknown local review status: ${run.status}`);

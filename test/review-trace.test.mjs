@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { boundTrace, freezeAgentTrace, MAX_STEPS, MAX_STEPS_BYTES, readAgentTrace } from "../dist/review-trace.js";
+import { boundTrace, freezeAgentTrace, MAX_STEP_BYTES, MAX_STEPS, MAX_STEPS_BYTES, readAgentTrace } from "../dist/review-trace.js";
 
 const cli = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
 const REPO = { id: "33333333-3333-3333-3333-333333333333", fullName: "acme/project", enabled: true };
@@ -193,6 +193,14 @@ test("an unmet written requirement exits 2 without --gate even when no verdict w
   assert.match(out.stdout, /Recommendation: changes requested/);
   // A checked scope's note (here, the requirement cap) is shown beside the count.
   assert.match(out.stdout, /1 of 2 written requirements met \(more than 25 written requirements; only the first 25 were checked\)/);
+  // A malformed checked scope prints its reason (never a TypeError) and exits 1.
+  const malformed = await stub(t, undefined, { key: "DITTO-2434", status: "checked", items: "bad" });
+  const out3 = await run(root, malformed.base, ["local"]);
+  assert.equal(out3.code, 1, out3.stdout + out3.stderr); assert.match(out3.stdout, /scope result is malformed/); assert.doesNotMatch(out3.stderr, /TypeError/);
+  // A scope that could not be fully checked (here capped, all judged met) exits 1 without --gate.
+  const capped = await stub(t, undefined, { ...MET_SCOPE, status: "incomplete", error: "more than 25 written requirements; the rest were not checked" });
+  const out4 = await run(root, capped.base, ["local"]);
+  assert.equal(out4.code, 1, out4.stdout + out4.stderr); assert.match(out4.stdout, /could not be checked \(incomplete\)/);
   // An item without "required" is required, as the recommendation treats it.
   const unflagged = await stub(t, undefined, { ...MET_SCOPE, items: [...MET_SCOPE.items, { scope_item: "Document the flag", evidence_refs: [] }] });
   const out2 = await run(root, unflagged.base, ["local"]);
@@ -276,10 +284,11 @@ test("a frozen trace re-reads to exactly the trace that was sent", async t => {
 });
 
 test("clipping keeps a genuine U+FFFD and nested reminders are removed whole", async t => {
-  const step = "a".repeat(2042) + "\ufffd" + "tail";
+  // The clip keeps MAX_STEP_BYTES - 3 bytes plus an ellipsis.
+  const step = "a".repeat(MAX_STEP_BYTES - 6) + "\ufffd" + "tail";
   const [cut] = boundTrace("x", "p", [step]).steps;
   assert.ok(cut.endsWith("\ufffd…"), JSON.stringify(cut.slice(-4)));
-  const split = boundTrace("x", "p", ["a".repeat(2044) + "é" + "tail"]).steps[0];
+  const split = boundTrace("x", "p", ["a".repeat(MAX_STEP_BYTES - 4) + "é" + "tail"]).steps[0];
   assert.ok(split.endsWith("a…") && !split.includes("\ufffd"), JSON.stringify(split.slice(-4)));
   const file = path.join(await tmp(t), "nested.jsonl");
   await writeFile(file, jsonl([{ type: "user", message: { role: "user", content: "Do it <system-reminder>x <system-reminder>y</system-reminder> z</system-reminder> now" } }]));
