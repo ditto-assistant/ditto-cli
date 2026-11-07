@@ -163,9 +163,13 @@ export function recommendLocalReview(run: LocalRunLike): Recommendation {
   // changed paths, so any abbreviated or failed entry is unfinished changed
   // work (production run b14c5978 abbreviated its main file yet reported
   // changed coverage complete). A missing coverage report is not complete.
+  // A present null is Go's nil-slice encoding of an empty list.
   const files = isObj(result.files) ? result.files : undefined;
-  if (!files || !Array.isArray(files.abbreviated) || !Array.isArray(files.failed)) return none(["the result has no per-file coverage report"]);
-  if (files.abbreviated.length || files.failed.length) return none([`${files.abbreviated.length + files.failed.length} changed file(s) were reviewed briefly or not reviewed by every lens`]);
+  const list = (v: unknown): unknown[] | undefined => (v === null ? [] : Array.isArray(v) ? v : undefined);
+  const abbreviated = files && "abbreviated" in files ? list(files.abbreviated) : undefined;
+  const failed = files && "failed" in files ? list(files.failed) : undefined;
+  if (!abbreviated || !failed) return none(["the result has no per-file coverage report"]);
+  if (abbreviated.length || failed.length) return none([`${abbreviated.length + failed.length} changed file(s) were reviewed briefly or not reviewed by every lens`]);
   // Local receipts always carry both flags; anything but true is incomplete.
   const local = isObj(result.local) ? result.local : {};
   if (local.changedCoverageComplete !== true) return none(["changed paths were not fully reviewed"]);

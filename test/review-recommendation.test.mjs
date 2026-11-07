@@ -121,6 +121,10 @@ test("round-1 self-review findings stay fixed", () => {
   assert.equal(recommendLocalReview(withResult({ files: { completed: [], abbreviated: [{ path: "app.ts", reason: "lens security: max_rounds" }], failed: [] } })).verdict, "none");
   assert.equal(recommendLocalReview(withResult({ files: { completed: [], abbreviated: [], failed: [{ path: "app.ts", reason: "time limit" }] } })).verdict, "none");
   assert.match(recommendLocalReview(withResult({ files: undefined })).reasons.join(), /no per-file coverage report/);
+  // Present null lists are empty (Go nil slices); absent lists are not.
+  assert.equal(recommendLocalReview(withResult({ files: { completed: ["app.ts"], abbreviated: null, failed: null } })).verdict, "approve");
+  assert.equal(recommendLocalReview(withResult({ files: { completed: ["app.ts"], failed: [] } })).verdict, "none");
+  assert.equal(recommendLocalReview(withResult({ files: { completed: ["app.ts"], abbreviated: "none", failed: [] } })).verdict, "none");
   // Abbreviated work with a blocking finding is still CHANGES (findings are evidence).
   assert.equal(recommendLocalReview(withResult({ findings: [finding("high")], files: { completed: [], abbreviated: [{ path: "app.ts", reason: "x" }], failed: [] } })).verdict, "changes");
   // S7: non-boolean coverage flags are not complete coverage; missing local metadata is not either.
