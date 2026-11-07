@@ -377,10 +377,12 @@ test("DITTO-2434: an unmet written requirement requests changes; an unchecked sc
   // A partial run with an unmet requirement still requests changes (findings-style evidence).
   assert.equal(recommendLocalReview(withResult({ complete: false, scope: { status: "checked", items: [item(false)] } }, { status: "partial" })).verdict, "changes");
   // A malformed checked scope never approves.
-  for (const items of [undefined, "none", [null], ["met"], [item(true), 7]]) {
+  for (const items of [undefined, "none", [], [null], ["met"], [item(true), 7]]) {
     const rec = recommendLocalReview(withResult({ scope: { key: "DITTO-1", status: "checked", items } }));
     assert.equal(rec.verdict, "none", JSON.stringify(items)); assert.match(rec.reasons.join(), /malformed/);
   }
+  // An explicit request for changes still stands beside a malformed scope.
+  assert.equal(recommendLocalReview(withResult({ scope: { status: "checked", items: "bad" }, verdict: { event: "REQUEST_CHANGES" } })).verdict, "changes");
   // Scope that was not fully checked never approves, and is not called a request for changes.
   for (const status of ["incomplete", "unavailable", "not_found", "some_future_status", undefined]) {
     const rec = recommendLocalReview(withResult({ scope: { key: "DITTO-1", status, items: [item(false)] } }));

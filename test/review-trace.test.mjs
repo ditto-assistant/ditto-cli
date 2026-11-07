@@ -99,7 +99,14 @@ function git(cwd, ...args) {
   assert.equal(out.status, 0, out.stderr);
 }
 
-async function stub(t, verdict) {
+const UNMET_SCOPE = { source: "jira", key: "DITTO-2434", status: "checked", items: [
+  { scope_item: "Emit per-item results", evidence_refs: ["app.ts:1"], met: true, required: true },
+  { scope_item: "Exit non-zero on request changes", evidence_refs: [], met: false, required: true, reason: "No exit code change." },
+  { scope_item: "Ship within two weeks", evidence_refs: [], met: false, required: false, reason: "A timeline." },
+] };
+const MET_SCOPE = { source: "jira", key: "DITTO-2434", status: "checked", items: [{ scope_item: "Emit per-item results", evidence_refs: ["app.ts:1"], met: true, required: true }] };
+
+async function stub(t, verdict, scope = UNMET_SCOPE) {
   const calls = [];
   const server = http.createServer((req, res) => {
     let body = ""; req.on("data", c => body += c);
@@ -113,12 +120,8 @@ async function stub(t, verdict) {
       if (req.url === `/api/v5/review/local/runs/${RUN}`) {
         return json(200, { runId: RUN, status: "completed", profile: "quick", snapshotDigest: admitted.snapshot.digest, budgetCents: 25, maxSeconds: 90, result: {
           complete: true, findings: [], local: { contextComplete: true },
-          scope: { source: "jira", key: "DITTO-2434", status: "checked", items: [
-            { scope_item: "Emit per-item results", evidence_refs: ["app.ts:1"], met: true, required: true },
-            { scope_item: "Exit non-zero on request changes", evidence_refs: [], met: false, required: true, reason: "No exit code change." },
-            { scope_item: "Ship within two weeks", evidence_refs: [], met: false, required: false, reason: "A timeline." },
-          ] },
-          verdict,
+          scope,
+          ...(verdict ? { verdict } : {}),
         } });
       }
       json(404, { message: "unexpected route" });
@@ -171,7 +174,7 @@ test("--trace and --issue reach the review, and an unmet written requirement exi
 
 test("an approved local review exits 0; without --trace or --issue nothing new is sent", async t => {
   const root = await checkout(t);
-  const service = await stub(t, { event: "APPROVE", blockingSeverity: "high", blockingFindings: 0 });
+  const service = await stub(t, { event: "APPROVE", blockingSeverity: "high", blockingFindings: 0 }, MET_SCOPE);
   const out = await run(root, service.base, ["local"]);
   assert.equal(out.code, 0, out.stderr);
   assert.match(out.stdout, /Verdict: approved/);
@@ -180,6 +183,16 @@ test("an approved local review exits 0; without --trace or --issue nothing new i
   assert.equal("trace" in admitted, false);
   const bad = await run(root, service.base, ["local", "--issue", "not a key"]);
   assert.equal(bad.code, 1); assert.match(bad.stderr, /--issue must be an issue key/);
+});
+
+test("an unmet written requirement exits 2 without --gate even when no verdict was sent", async t => {
+  const root = await checkout(t);
+  const service = await stub(t, undefined, { ...UNMET_SCOPE, error: "more than 25 written requirements; only the first 25 were checked" });
+  const out = await run(root, service.base, ["local"]);
+  assert.equal(out.code, 2, out.stdout + out.stderr);
+  assert.match(out.stdout, /Recommendation: changes requested/);
+  // A checked scope's note (here, the requirement cap) is shown beside the count.
+  assert.match(out.stdout, /1 of 2 written requirements met \(more than 25 written requirements; only the first 25 were checked\)/);
 });
 
 test("preview reports the trace without uploading it", async t => {
@@ -236,6 +249,10 @@ test("verbose early steps cannot crowd out the session's ending", () => {
 });
 
 test("a frozen trace re-reads to exactly the trace that was sent", async t => {
+  const state = await mkdtemp(path.join(os.tmpdir(), "ditto-state-"));
+  const before = process.env.XDG_STATE_HOME;
+  process.env.XDG_STATE_HOME = state;
+  t.after(async () => { if (before === undefined) delete process.env.XDG_STATE_HOME; else process.env.XDG_STATE_HOME = before; await rm(state, { recursive: true, force: true }); });
   const long = boundTrace("claude-code", "Do DITTO-2434 <x>", Array.from({ length: 900 }, (_, i) => `step ${i} ` + "y".repeat(100)));
   assert.equal(long.truncated, true);
   const id = `test-${process.pid}-${Date.now()}`;
@@ -249,6 +266,19 @@ test("a frozen trace re-reads to exactly the trace that was sent", async t => {
   assert.notEqual(other, file);
   assert.equal((await stat(path.dirname(file))).mode & 0o777, 0o700);
   assert.deepEqual(await readAgentTrace(file), long);
+  // It is kept in the persistent per-user state directory, not /tmp.
+  assert.ok(file.startsWith(path.join(state, "heyditto", "review-traces") + path.sep), file);
+});
+
+test("clipping keeps a genuine U+FFFD and nested reminders are removed whole", async t => {
+  const step = "a".repeat(2042) + "\ufffd" + "tail";
+  const [cut] = boundTrace("x", "p", [step]).steps;
+  assert.ok(cut.endsWith("\ufffd…"), JSON.stringify(cut.slice(-4)));
+  const split = boundTrace("x", "p", ["a".repeat(2044) + "é" + "tail"]).steps[0];
+  assert.ok(split.endsWith("a…") && !split.includes("\ufffd"), JSON.stringify(split.slice(-4)));
+  const file = path.join(await tmp(t), "nested.jsonl");
+  await writeFile(file, jsonl([{ type: "user", message: { role: "user", content: "Do it <system-reminder>x <system-reminder>y</system-reminder> z</system-reminder> now" } }]));
+  assert.equal((await readAgentTrace(file)).initialPrompt, "Do it  now");
 });
 
 test("non-string text blocks are skipped and cleaned steps re-read identically", async t => {

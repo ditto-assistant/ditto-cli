@@ -8,7 +8,7 @@ import { cmdReviewAccess, diagnoseLinkRefusal, guideAccessForAdd } from "./githu
 import { registerReviewFindingCommands } from "./review-findings.js";
 import { readStoredAuth } from "./store.js";
 import { captureReviewSnapshot, reviewGit } from "./review-snapshot.js";
-import { findingsList, formatRecommendation, isVisibleFinding, gateExitCode, malformedLocalRun, recommendLocalReview, type Recommendation } from "./review-recommendation.js";
+import { findingsList, formatRecommendation, isVisibleFinding, gateExitCode, malformedLocalRun, recommendLocalReview, scopeOutcome, type Recommendation } from "./review-recommendation.js";
 import { freezeAgentTrace, readAgentTrace, type AgentTrace } from "./review-trace.js";
 
 /**
@@ -227,7 +227,7 @@ function printScope(scope: ScopeResult | undefined): void {
   }
   const items = scope.items ?? [];
   const required = items.filter(i => i.required);
-  process.stdout.write(`\nLinked issue ${name}: ${required.filter(i => i.met).length} of ${required.length} written requirements met\n`);
+  process.stdout.write(`\nLinked issue ${name}: ${required.filter(i => i.met).length} of ${required.length} written requirements met${scope.error ? ` (${scope.error})` : ""}\n`);
   for (const it of items) {
     const mark = !it.required ? "-" : it.met ? "✓" : "✗";
     const detail = it.met ? (it.evidence_refs ?? []).slice(0, 3).join(", ") : it.reason ?? "";
@@ -359,7 +359,10 @@ export async function cmdReviewLocal(options: LocalOptions): Promise<void> {
         if (interrupted) process.exitCode = interrupted;
         else if (options.gate) process.exitCode = gateExitCode(recommendation);
         else if (["failed", "cancelled", "partial"].includes(run.status) || (run.status === "completed" && run.result?.complete !== true) || malformedLocalRun(run).length) process.exitCode = 1;
-        else if (run.result?.verdict?.event === "REQUEST_CHANGES") process.exitCode = REQUEST_CHANGES_EXIT;
+        // Without --gate only completeness and the linked issue's written scope
+        // set the exit status (findings alone keep 0, as before). The scope
+        // rule is the one --gate uses.
+        else if (scopeOutcome(run.result).kind === "changes") process.exitCode = REQUEST_CHANGES_EXIT;
         return;
       }
       if (!ACTIVE_REVIEW_STATUSES.has(run.status)) throw new Error(`unknown local review status: ${run.status}`);

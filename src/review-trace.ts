@@ -5,7 +5,7 @@
 // and the diff, and can request changes when a written requirement is
 // missing. The file is only read: it is never modified, moved or deleted.
 
-import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -27,15 +27,30 @@ const HEAD_STEPS = 120;
 function clip(text: string, bytes: number): string {
   const buf = Buffer.from(text, "utf8");
   if (buf.length <= bytes) return text;
-  // Cut on a code point boundary: the decoder drops a split trailing sequence.
-  let cut = buf.subarray(0, bytes - 3).toString("utf8");
-  if (cut.endsWith("�")) cut = cut.slice(0, -1);
-  return cut + "…";
+  // Cut on a code point boundary: back up over continuation bytes, so a
+  // genuine U+FFFD in the kept prefix is not mistaken for a split sequence.
+  let end = bytes - 3;
+  while (end > 0 && (buf[end]! & 0xc0) === 0x80) end--;
+  return buf.subarray(0, end).toString("utf8") + "…";
 }
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const oneLine = (text: string) => text.replace(/\s+/g, " ").trim();
-const clean = (text: string) => text.replace(/\0/g, "").replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "").trim();
+// Harness reminders are removed whole, nested ones included; an unclosed
+// one removes the rest of the text.
+const clean = (text: string) => {
+  const source = text.replace(/\0/g, "");
+  const tag = /<\/?system-reminder>/g;
+  let out = "", depth = 0, copied = 0;
+  for (let m = tag.exec(source); m; m = tag.exec(source)) {
+    if (m[0] === "<system-reminder>") {
+      if (depth === 0) out += source.slice(copied, m.index);
+      depth++;
+    } else if (depth > 0 && --depth === 0) copied = tag.lastIndex;
+  }
+  if (depth === 0) out += source.slice(copied);
+  return out.trim();
+};
 
 function toolStep(name: string, input: unknown): string {
   let detail = "";
@@ -146,7 +161,11 @@ export function boundTrace(format: string, prompt: string, steps: string[]): Age
  * never deleted.
  */
 export async function freezeAgentTrace(trace: AgentTrace, requestId: string): Promise<string> {
-  const dir = await mkdtemp(path.join(os.tmpdir(), `ditto-review-trace-${requestId.replace(/[^0-9a-f-]/gi, "")}-`));
+  // A persistent per-user state directory, not the OS temp directory, so the
+  // printed recovery command still works after a reboot or a /tmp sweep.
+  const root = path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"), "heyditto", "review-traces");
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  const dir = await mkdtemp(path.join(root, `${requestId.replace(/[^0-9a-f-]/gi, "")}-`));
   const file = path.join(dir, "trace.json");
   await writeFile(file, JSON.stringify(trace), { mode: 0o600, flag: "wx" });
   return file;
@@ -157,7 +176,18 @@ export async function readAgentTrace(file: string): Promise<AgentTrace> {
   const info = await stat(file);
   if (!info.isFile()) throw new Error("--trace must name a file");
   if (info.size > MAX_TRACE_FILE_BYTES) throw new Error("--trace file is larger than 256 MiB");
-  const text = new TextDecoder("utf-8", { fatal: false }).decode(await readFile(file));
+  // Read only what stat saw, plus one byte: the agent may still be
+  // appending, and an unbounded read could buffer far past the limit.
+  const handle = await open(file, "r");
+  let bytes: Buffer;
+  try {
+    const buf = Buffer.alloc(Math.min(info.size, MAX_TRACE_FILE_BYTES) + 1);
+    let n = 0;
+    for (let r = 1; r > 0 && n < buf.length; n += r) r = (await handle.read(buf, n, buf.length - n, n)).bytesRead;
+    bytes = buf.subarray(0, n);
+  } finally { await handle.close(); }
+  if (bytes.length > MAX_TRACE_FILE_BYTES) throw new Error("--trace file is larger than 256 MiB");
+  const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
   const trimmed = text.trim();
   let whole: unknown;
   if (trimmed.startsWith("{")) { try { whole = JSON.parse(trimmed); } catch { /* JSONL, one object per line */ } }
