@@ -8,7 +8,8 @@ import { cmdReviewAccess, diagnoseLinkRefusal, guideAccessForAdd } from "./githu
 import { registerReviewFindingCommands } from "./review-findings.js";
 import { readStoredAuth } from "./store.js";
 import { captureReviewSnapshot, reviewGit } from "./review-snapshot.js";
-import { findingsList, formatRecommendation, isVisibleFinding, gateExitCode, malformedLocalRun, recommendLocalReview, type Recommendation } from "./review-recommendation.js";
+import { findingsList, formatRecommendation, isVisibleFinding, gateExitCode, malformedLocalRun, recommendLocalReview, scopeOutcome, type Recommendation } from "./review-recommendation.js";
+import { freezeAgentTrace, readAgentTrace, type AgentTrace } from "./review-trace.js";
 
 /**
  * Ditto Review repository settings: the developer console's Review →
@@ -145,7 +146,16 @@ interface LocalOptions extends ScopeOptions {
   timeout?: string;
   requestId?: string;
   gate?: boolean;
+  trace?: string;
+  issue?: string;
 }
+
+interface ScopeItem { scope_item: string; evidence_refs?: string[]; met: boolean; required: boolean; reason?: string }
+interface ScopeResult { source?: string; key?: string; url?: string; status: string; items?: ScopeItem[]; error?: string }
+interface LocalVerdict { event: string; reason?: string; blockingSeverity?: string; blockingFindings?: number; scopeKey?: string; scopeUnmet?: ScopeItem[] }
+
+/** Exit code for a completed local review whose verdict requests changes. */
+export const REQUEST_CHANGES_EXIT = 2;
 
 interface LocalRun {
   runId: string;
@@ -168,6 +178,8 @@ interface LocalRun {
     costUsd?: number;
     findings?: { status?: string; severity?: string; path?: string; line?: number; startLine?: number; title?: string; body?: string; explanation?: string }[];
     local?: { changedCoverageComplete?: boolean; contextComplete?: boolean; [key: string]: unknown };
+    scope?: ScopeResult;
+    verdict?: LocalVerdict;
     [key: string]: unknown;
   };
 }
@@ -192,6 +204,8 @@ function printLocalRun(run: LocalRun, options: LocalOptions): Recommendation {
     process.stdout.write(`${findings.length ? `${findings.length} finding${findings.length === 1 ? "" : "s"} in reviewed scope` : "No findings in reviewed scope"}\n`);
     for (const f of findings) process.stdout.write(`\n${f.severity ?? "finding"} · ${f.path ?? ""}:${f.line ?? f.startLine ?? ""} · ${f.title ?? ""}\n${f.body ?? f.explanation ?? ""}\n`);
   } else process.stdout.write("No review result is available for this run.\n");
+  printScope(result?.scope);
+  if (result?.verdict) printVerdict(result.verdict);
   if (!result?.complete || run.status !== "completed") process.stdout.write("Review incomplete; check coverage and errors before relying on this result.\n");
   if (result?.local?.contextComplete === false) process.stdout.write("Surrounding context was bounded; omitted files were not reviewed.\n");
   if (run.workspaceCurrent === false) process.stdout.write("The working tree changed after capture; these findings describe the saved snapshot.\n");
@@ -201,6 +215,38 @@ function printLocalRun(run: LocalRun, options: LocalOptions): Recommendation {
   if (run.error || result?.error) process.stdout.write(`Error: ${run.error || result?.error}\n`);
   process.stdout.write(formatRecommendation(recommendation));
   return recommendation;
+}
+
+function printScope(scope: ScopeResult | undefined): void {
+  if (!scope) return;
+  const name = scope.key ? `${scope.key}${scope.url ? ` (${scope.url})` : ""}` : "the agent's task prompt";
+  if (scope.status !== "checked") {
+    const why: Record<string, string> = { no_items: "no checkable written requirements", not_found: "issue not found; scope not checked", unavailable: "issue could not be read; scope not checked", incomplete: "scope check incomplete" };
+    process.stdout.write(`\nLinked issue ${name}: ${why[scope.status] ?? scope.status}${scope.error ? ` (${scope.error})` : ""}\n`);
+    return;
+  }
+  const outcome = scopeOutcome({ scope });
+  if (outcome.kind === "unchecked") { process.stdout.write(`\nLinked issue ${name}: ${outcome.reason}\n`); return; }
+  const items = (Array.isArray(scope.items) ? scope.items : []).filter((i): i is ScopeItem => typeof i === "object" && i !== null);
+  // The recommendation's rule: required unless explicitly false, met only when true.
+  const required = items.filter(i => i.required !== false);
+  process.stdout.write(`\nLinked issue ${name}: ${required.filter(i => i.met === true).length} of ${required.length} written requirements met${scope.error ? ` (${scope.error})` : ""}\n`);
+  for (const it of items) {
+    const mark = it.required === false ? "-" : it.met === true ? "✓" : "✗";
+    const detail = it.met === true ? (it.evidence_refs ?? []).slice(0, 3).join(", ") : it.reason ?? "";
+    process.stdout.write(`  ${mark} ${it.scope_item}${detail ? `\n      ${detail}` : ""}\n`);
+  }
+}
+
+function printVerdict(v: LocalVerdict): void {
+  if (v.event === "REQUEST_CHANGES") {
+    const reasons: string[] = [];
+    if (v.blockingFindings) reasons.push(`${v.blockingFindings} blocking finding${v.blockingFindings === 1 ? "" : "s"} (${v.blockingSeverity ?? "high"} or above)`);
+    if (v.scopeUnmet?.length) reasons.push(`${v.scopeUnmet.length} written requirement${v.scopeUnmet.length === 1 ? "" : "s"} of ${v.scopeKey || "the task"} not met`);
+    process.stdout.write(`\nVerdict: changes requested — ${reasons.join("; ")}\n`);
+    for (const it of v.scopeUnmet ?? []) process.stdout.write(`  missing: "${it.scope_item}"\n`);
+  } else if (v.event === "APPROVE") process.stdout.write("\nVerdict: approved\n");
+  else process.stdout.write(`\nVerdict: no verdict (${v.reason === "scope_unverified" ? "the linked issue's requirements could not be checked" : "the review is incomplete"})\n`);
 }
 
 async function pollLocalRun(route: string, signal: AbortSignal): Promise<LocalRun> {
@@ -225,6 +271,11 @@ export async function cmdReviewLocal(options: LocalOptions): Promise<void> {
   const timeout = intFlag("--timeout", options.timeout ?? (profile === "deep" ? "1800" : "1200"), 1, 1800) * 1000;
   const context = options.contextFile ? new TextDecoder("utf-8", { fatal: true }).decode(await readFile(options.contextFile)) : undefined;
   if (context && (Buffer.byteLength(context) > 16000 || context.includes("\0"))) throw new Error("--context-file must contain at most 16000 UTF-8 bytes without NUL characters");
+  const issueKey = options.issue?.trim().toUpperCase();
+  if (issueKey && !/^[A-Z][A-Z0-9_]{1,9}-[1-9][0-9]{0,8}$/.test(issueKey)) throw new Error("--issue must be an issue key such as DITTO-123");
+  // The trace is only read; it stays where the agent wrote it.
+  const trace: AgentTrace | undefined = options.trace ? await readAgentTrace(options.trace) : undefined;
+  const linked = { ...(issueKey ? { issueKey } : {}), ...(trace ? { trace } : {}) };
   // Preview deliberately has no auth or network dependency.
   const company = options.preview ? undefined : await resolveScope(options);
   const repos = options.preview ? [] : await listReviewRepositories(company);
@@ -235,12 +286,19 @@ export async function cmdReviewLocal(options: LocalOptions): Promise<void> {
   process.on("SIGINT", onInt); process.on("SIGTERM", onTerm);
   const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeout);
   const requestId = options.requestId?.toLowerCase() ?? randomUUID();
-  const recovery = (): string => {
+  const recovery = async (): Promise<string> => {
     const args = ["heyditto", "review", "local", "--request-id", requestId, "--profile", profile];
     if (capturedRoot) args.push("--directory", capturedRoot);
     if (options.staged) args.push("--staged");
     if (options.base) args.push("--base", options.base);
     if (options.contextFile) args.push("--context-file", path.resolve(options.contextFile));
+    // The session file keeps growing; recover with the exact trace sent.
+    if (trace) {
+      // Never fall back to the live session file: it may have grown since.
+      try { args.push("--trace", await freezeAgentTrace(trace, requestId)); }
+      catch (error) { return `unavailable: the exact trace could not be saved (${error instanceof Error ? error.message : String(error)})`; }
+    }
+    if (issueKey) args.push("--issue", issueKey);
     if (options.repository) args.push("--repository", options.repository);
     if (company) args.push("--org", company.id);
     return args.map(arg => /^[a-zA-Z0-9_./:=@-]+$/.test(arg) ? arg : "'" + arg.replaceAll("'", "'\\''") + "'").join(" ");
@@ -252,13 +310,17 @@ export async function cmdReviewLocal(options: LocalOptions): Promise<void> {
     const preview = {
       requestId, profile, snapshotDigest: snapshot.digest, mode: snapshot.mode, baseSha: snapshot.baseSha,
       changedPaths: snapshot.changedPaths, baseFileCount: snapshot.baseFiles.length, headFileCount: snapshot.headFiles.length,
-      contentBytes: captured.bytes, payloadBytes: Buffer.byteLength(JSON.stringify({ requestId, snapshot, profile, context })),
+      contentBytes: captured.bytes, payloadBytes: Buffer.byteLength(JSON.stringify({ requestId, snapshot, profile, context, ...linked })),
+      ...(issueKey ? { issueKey } : {}),
+      ...(trace ? { trace: { format: trace.format, promptBytes: Buffer.byteLength(trace.initialPrompt), steps: trace.steps.length, truncated: trace.truncated === true } } : {}),
       contextComplete: snapshot.contextComplete, omittedContext: snapshot.omittedContext, skipped: snapshot.skipped,
     };
     if (options.preview) {
       if (isJSON(options)) return writeJSON(preview);
       process.stdout.write(`Local review preview · ${profile}\nSnapshot: ${snapshot.digest}\nSelected changes: ${snapshot.changedPaths.length}\nContext files: ${snapshot.headFiles.length} (${captured.bytes} decoded bytes; ${preview.payloadBytes} payload bytes)\n`);
       for (const file of snapshot.changedPaths) process.stdout.write(`  ${file}\n`);
+      if (issueKey) process.stdout.write(`Linked issue: ${issueKey}\n`);
+      if (trace) process.stdout.write(`Agent trace: ${trace.format}, ${trace.steps.length} steps${trace.truncated ? " (middle steps omitted)" : ""}\n`);
       process.stdout.write(`Omitted context: ${snapshot.omittedContext.length}; skipped files: ${snapshot.skipped.length}\nNo source uploaded; no review started.\n`);
       return;
     }
@@ -278,7 +340,7 @@ export async function cmdReviewLocal(options: LocalOptions): Promise<void> {
     // Complete the admission response even on Ctrl-C so a returned run can be
     // cancelled. An uncertain POST is never retried automatically.
     let run = await apiFetch<LocalRun>(`/api/v5/review/repositories/${encodeURIComponent(repo.id)}/local${scopeQuery(company)}`, {
-      method: "POST", body: { requestId, snapshot, profile, ...(context ? { context } : {}) }, signal: AbortSignal.timeout(30000),
+      method: "POST", body: { requestId, snapshot, profile, ...(context ? { context } : {}), ...linked }, signal: AbortSignal.timeout(30000),
     });
     try { runPath(run?.runId); } catch { throw new Error("Review API returned no valid run ID"); }
     runId = run.runId;
@@ -300,6 +362,11 @@ export async function cmdReviewLocal(options: LocalOptions): Promise<void> {
         if (interrupted) process.exitCode = interrupted;
         else if (options.gate) process.exitCode = gateExitCode(recommendation);
         else if (["failed", "cancelled", "partial"].includes(run.status) || (run.status === "completed" && run.result?.complete !== true) || malformedLocalRun(run).length) process.exitCode = 1;
+        // Without --gate only completeness and the linked issue's written scope
+        // set the exit status (findings alone keep 0, as before), by the rule
+        // --gate uses: 2 for an unmet requirement, 1 for a scope not fully checked.
+        else if (scopeOutcome(run.result).kind === "changes") process.exitCode = REQUEST_CHANGES_EXIT;
+        else if (scopeOutcome(run.result).kind === "unchecked") process.exitCode = 1;
         return;
       }
       if (!ACTIVE_REVIEW_STATUSES.has(run.status)) throw new Error(`unknown local review status: ${run.status}`);
@@ -315,7 +382,7 @@ export async function cmdReviewLocal(options: LocalOptions): Promise<void> {
     }
     if (interrupted || timedOut) {
       process.stderr.write(`${timedOut ? "Local review timed out" : "Local review interrupted"}${runId ? ` (run ${runId})` : posted ? `; admission outcome is unknown (request ${requestId})` : ""}.\n`);
-      if (posted && !runId) process.stderr.write(`Recover the same admission: ${recovery()}\nChanged source, profile or context is refused; no automatic retry was made.\n`);
+      if (posted && !runId) process.stderr.write(`Recover the same admission: ${await recovery()}\nChanged source, profile or context is refused; no automatic retry was made.\n`);
       if (isJSON(options)) {
         const status = timedOut ? "timed_out" : "interrupted";
         writeJSON({ status, requestId, ...(runId ? { runId } : {}), recommendation: { verdict: "none", approved: false, reasons: [timedOut ? "local review timed out; a timed-out run is never approval" : "local review interrupted; an interrupted run is never approval"], blocking: 0, nits: 0 } satisfies Recommendation });
@@ -327,7 +394,7 @@ export async function cmdReviewLocal(options: LocalOptions): Promise<void> {
       if (error.status === 404) throw new Error("The local review endpoint is unavailable on this Ditto backend; no local review was admitted.");
       throw new Error(`Ditto refused the local review request (HTTP ${error.status}${refusalDetail(error.body)}). No review was admitted and nothing was approved.`);
     }
-    if (posted && !runId) throw new Error(`${error instanceof Error ? error.message : String(error)}\nAdmission outcome is unknown; request ${requestId}.\nRecover the same admission: ${recovery()}\nChanged source, profile or context is refused; no automatic retry was made.`);
+    if (posted && !runId) throw new Error(`${error instanceof Error ? error.message : String(error)}\nAdmission outcome is unknown; request ${requestId}.\nRecover the same admission: ${await recovery()}\nChanged source, profile or context is refused; no automatic retry was made.`);
     throw error;
   } finally {
     clearTimeout(timer); process.removeListener("SIGINT", onInt); process.removeListener("SIGTERM", onTerm);
@@ -780,9 +847,11 @@ export function registerReviewCommands(
     .option("--preview", "inspect selected paths and upload size locally; no auth, upload or inference")
     .option("--timeout <seconds>", "cancel after this many seconds including capture and queue time (1-1800; default 1200, 1800 for deep)")
     .option("--request-id <uuid>", "recover an uncertain admission with exactly the same source, profile and context")
-    .option("--gate", "exit 0 only on an approve recommendation, 2 on changes requested, 1 when there is no recommendation; a timeout (124) or interrupt (130/143) keeps its own code and is never approval"))
+    .option("--gate", "exit 0 only on an approve recommendation, 2 on changes requested, 1 when there is no recommendation; a timeout (124) or interrupt (130/143) keeps its own code and is never approval")
+    .option("--trace <file>", "the coding agent's session (Claude Code or Codex JSONL): its prompt and steps become review input, and its linked issue's written requirements are checked; read only, never deleted")
+    .option("--issue <key>", "the Jira issue this change delivers (default: a [KEY-1] tag or tracker link in the trace prompt or context)"))
     .action(cmdReviewLocal),
-    `  heyditto review local --preview\n  heyditto review local --staged --profile quick --org omniaura\n  heyditto review local --base main --context-file .tmp/task.md --output json`);
+    `  heyditto review local --preview\n  heyditto review local --staged --profile quick --org omniaura\n  heyditto review local --base main --context-file .tmp/task.md --output json\n  heyditto review local --base main --trace ~/.claude/projects/<project>/<session>.jsonl --issue DITTO-2434\n\nExit status: 0 approved or no blocking issue, 1 incomplete or failed, ${REQUEST_CHANGES_EXIT} changes requested.`);
   scoped(review.command("local-status").description("inspect a pre-PR review run without starting or retrying it")
     .argument("<run-id>", "local review run UUID")
     .option("--gate", "exit 0 only on approve (never, since status cannot verify the working tree), 2 on changes, 1 otherwise")).action(cmdReviewLocalStatus);

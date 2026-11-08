@@ -130,6 +130,31 @@ function visibleFindings(result: Obj): Obj[] {
   return (findingsList(result) ?? []).filter(isVisibleFinding);
 }
 
+/**
+ * How the linked issue's written scope bears on a local result
+ * (DITTO-2434): "changes" for an unmet required item or a verdict
+ * requesting changes, "unchecked" for a scope that was not fully checked
+ * or is malformed, "none" when there is no scope result to apply.
+ */
+export function scopeOutcome(result: unknown): { kind: "changes" | "unchecked" | "none"; reason?: string; unmet: number } {
+  if (!isObj(result)) return { kind: "none", unmet: 0 };
+  const scope = isObj(result.scope) ? result.scope : undefined;
+  const verdict = isObj(result.verdict) ? result.verdict : undefined;
+  // An explicit request for changes stands even beside a malformed scope.
+  if (verdict?.event === "REQUEST_CHANGES") {
+    const items = scope?.status === "checked" && Array.isArray(scope.items) ? scope.items.filter(isObj) : [];
+    const unmet = items.filter(i => i.required !== false && i.met !== true).length;
+    return { kind: "changes", reason: unmet ? `${unmet} written requirement(s) of the linked issue are unmet` : "the review verdict requests changes", unmet };
+  }
+  // A checked scope carries a non-empty list of item objects (the engine
+  // reports no_items otherwise); anything else is malformed, never approval.
+  if (scope?.status === "checked" && !(Array.isArray(scope.items) && scope.items.length > 0 && scope.items.every(isObj))) return { kind: "unchecked", reason: "the linked issue's scope result is malformed (checked without a list of items)", unmet: 0 };
+  const unmet = scope?.status === "checked" ? (scope.items as Obj[]).filter(i => i.required !== false && i.met !== true).length : 0;
+  if (unmet) return { kind: "changes", reason: `${unmet} written requirement(s) of the linked issue are unmet`, unmet };
+  if (scope && scope.status !== "checked" && scope.status !== "no_items") return { kind: "unchecked", reason: `the linked issue's written scope could not be checked (${typeof scope.status === "string" ? scope.status : "unknown"})`, unmet: 0 };
+  return { kind: "none", unmet: 0 };
+}
+
 export function recommendLocalReview(run: LocalRunLike): Recommendation {
   const reasons: string[] = [];
   let nitCount = 0;
@@ -151,6 +176,13 @@ export function recommendLocalReview(run: LocalRunLike): Recommendation {
     if (blocking) return { verdict: "changes", approved: false, reasons: [`${blocking} blocking finding(s)`], blocking, nits };
     nitCount = nits;
     reasons.push(...(nits ? [`${nits} non-blocking finding(s)`] : []));
+  }
+  // DITTO-2434: the linked issue's written scope (see scopeOutcome). It
+  // applies to a completed or partial run, as findings do.
+  if (status === "completed" || status === "partial") {
+    const scoped = scopeOutcome(result);
+    if (scoped.kind === "changes") return { verdict: "changes", approved: false, reasons: [scoped.reason!], blocking: scoped.unmet, nits: nitCount };
+    if (scoped.kind === "unchecked") return none([scoped.reason!]);
   }
   if (status !== "completed") return none([`run status is ${status}; only a completed run can approve`]);
   if (!result) return none(["no review result is available"]);
