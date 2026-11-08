@@ -36,19 +36,19 @@ function clip(text: string, bytes: number): string {
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const oneLine = (text: string) => text.replace(/\s+/g, " ").trim();
-// Harness reminders are removed whole, nested ones included; an unclosed
-// one removes the rest of the text.
+// Harness reminders are removed whole, nested ones included. An unclosed
+// one is not a reminder (a prompt may quote the tag), so its text is kept.
 const clean = (text: string) => {
   const source = text.replace(/\0/g, "");
   const tag = /<\/?system-reminder>/g;
-  let out = "", depth = 0, copied = 0;
+  let out = "", depth = 0, copied = 0, open = -1;
   for (let m = tag.exec(source); m; m = tag.exec(source)) {
     if (m[0] === "<system-reminder>") {
-      if (depth === 0) out += source.slice(copied, m.index);
+      if (depth === 0) { out += source.slice(copied, m.index); open = m.index; }
       depth++;
-    } else if (depth > 0 && --depth === 0) copied = tag.lastIndex;
+    } else if (depth > 0 && --depth === 0) { copied = tag.lastIndex; open = -1; }
   }
-  if (depth === 0) out += source.slice(copied);
+  out += depth === 0 ? source.slice(copied) : source.slice(open);
   return out.trim();
 };
 

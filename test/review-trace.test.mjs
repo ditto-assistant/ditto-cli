@@ -293,6 +293,10 @@ test("clipping keeps a genuine U+FFFD and nested reminders are removed whole", a
   const file = path.join(await tmp(t), "nested.jsonl");
   await writeFile(file, jsonl([{ type: "user", message: { role: "user", content: "Do it <system-reminder>x <system-reminder>y</system-reminder> z</system-reminder> now" } }]));
   assert.equal((await readAgentTrace(file)).initialPrompt, "Do it  now");
+  // An unclosed tag is quoted text, not a reminder: the prompt is kept whole.
+  const quoted = path.join(await tmp(t), "quoted.jsonl");
+  await writeFile(quoted, jsonl([{ type: "user", message: { role: "user", content: "Strip every <system-reminder> block from traces, then add a test." } }]));
+  assert.equal((await readAgentTrace(quoted)).initialPrompt, "Strip every <system-reminder> block from traces, then add a test.");
 });
 
 test("non-string text blocks are skipped and cleaned steps re-read identically", async t => {
