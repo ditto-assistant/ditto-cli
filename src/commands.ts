@@ -1771,6 +1771,31 @@ export function printAgentThreads(out: { threads?: { id: string; title?: string;
   );
 }
 
+export interface AgentThreadResult {
+  thread_id: string;
+  url?: string;
+  next_cursor?: string;
+  exchanges?: {
+    timestamp?: string;
+    pair_id: string;
+    message: string;
+    answer: string;
+    note?: string;
+  }[];
+}
+
+/** get_agent_thread. */
+export function printAgentThread(out: AgentThreadResult): void {
+  const exchanges = out.exchanges ?? [];
+  if (exchanges.length === 0) process.stdout.write("No answered exchanges.\n");
+  for (const exchange of exchanges) {
+    const timestamp = exchange.timestamp ? ` (${exchange.timestamp})` : "";
+    process.stdout.write(`## ${exchange.pair_id}${timestamp}\n\n${exchange.message}\n\n${exchange.answer || exchange.note || "No text answer."}\n\n`);
+  }
+  if (out.next_cursor) process.stdout.write(`More exchanges are available with cursor: ${out.next_cursor}\n`);
+  if (out.url) process.stdout.write(`Thread: ${out.url}\n`);
+}
+
 /** send_message_to_agent / get_agent_message result. */
 export interface AgentMessageResult {
   message_id: string;

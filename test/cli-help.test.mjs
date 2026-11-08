@@ -110,6 +110,15 @@ test("new MCP-backed command help is exposed", () => {
   assert.match(result.stdout, /aggregate\|aggregate_memories/);
 });
 
+test("agent thread read help exposes pagination and scope options", () => {
+  const result = run(["agents", "read", "--help"]);
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /read recent exchanges in an agent thread/);
+  assert.match(result.stdout, /--limit <number>/);
+  assert.match(result.stdout, /--cursor <cursor>/);
+  assert.match(result.stdout, /--space <alias>/);
+});
+
 test("graph sharing help exposes enable and disable", () => {
   const result = run(["graph-sharing", "--help"]);
   assert.equal(result.status, 0);
