@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -61,6 +62,18 @@ export function writeCursorPlugin(mcp: McpAttachment, opts: { unattended?: boole
   writeFileSync(path.join(dir, ".cursor-plugin", "plugin.json"), JSON.stringify({ name: CURSOR_PLUGIN_NAME, version: "1.0.0", description: "Ditto endpoint tools" }, null, 2));
   writeFileSync(path.join(dir, ".mcp.json"), cursorMcpConfig(mcp, opts));
   return dir;
+}
+
+/**
+ * A new, empty Cursor chat for this session, so the session can name its own
+ * conversation: `--resume <id>` reopens exactly it, where `--continue` would
+ * pick whichever chat in the directory is newest. Undefined when Cursor does
+ * not answer with an id.
+ */
+export function createCursorChat(cwd: string, run: typeof spawnSync = spawnSync): string | undefined {
+  const res = run("cursor-agent", ["create-chat"], { cwd, encoding: "utf8", timeout: 15_000 });
+  const id = typeof res.stdout === "string" ? res.stdout.trim() : "";
+  return res.status === 0 && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) ? id : undefined;
 }
 
 /**

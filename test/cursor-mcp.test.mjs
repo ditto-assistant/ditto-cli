@@ -93,3 +93,12 @@ test("a later launch sweeps a killed CLI's plugin directory, never a live one's"
   assert.equal(existsSync(live), true);
   assert.equal(existsSync(other), true, "only this prefix is swept");
 });
+
+test("createCursorChat returns the new chat's id, and nothing it cannot trust", async () => {
+  const { createCursorChat } = await import("../dist/agents/cursor.js");
+  const reply = (status, stdout) => () => ({ status, stdout });
+  assert.equal(createCursorChat("/tmp", reply(0, "e4ff66b3-fd7f-4d9e-9601-860faed0d225\n")), "e4ff66b3-fd7f-4d9e-9601-860faed0d225");
+  assert.equal(createCursorChat("/tmp", reply(1, "e4ff66b3-fd7f-4d9e-9601-860faed0d225\n")), undefined, "a failed run");
+  assert.equal(createCursorChat("/tmp", reply(0, "Please log in\n")), undefined, "not an id");
+  assert.equal(createCursorChat("/tmp", reply(null, undefined)), undefined, "timed out");
+});

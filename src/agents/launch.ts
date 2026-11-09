@@ -34,7 +34,7 @@ import { type ClaudeTranscript, findTranscriptById, isUuid, listTranscriptsIn } 
 import { watchClaudeSessionTitle } from "./claude-title-sync.js";
 import { type ClaudeHookAttachment, claudeHookAttachment } from "./claude-hooks.js";
 import { planCodex } from "./codex.js";
-import { planCursor, writeCursorPlugin } from "./cursor.js";
+import { createCursorChat, planCursor, writeCursorPlugin } from "./cursor.js";
 import { cliProxyModel, resolveCliProxy } from "./cliproxy.js";
 import { readHarnessVersion } from "./harness-headers.js";
 import { ensureGrokHome, planGrok } from "./grok.js";
@@ -694,10 +694,16 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     throw new Error("--session must match ^[A-Za-z0-9._:@-]{1,128}$");
   }
   // Claude: the resumed conversation, or the id a fresh one is created under.
+  // Cursor: a fresh session opens a chat of its own, so a later resume names it.
+  if (harness === "cursor" && record && !record.harnessSessionId) {
+    throw new Error(`session ${record.id} has no Cursor chat id to resume; start a new one, or reopen it with cursor-agent --resume`);
+  }
+  const cursorChat = harness === "cursor" && !record && !options.dryRun ? createCursorChat(cwd) : undefined;
+  if (harness === "cursor" && !record && !options.dryRun && !cursorChat) log(c("yellow", "Cursor did not create a chat id; this session cannot be resumed with heyditto cursor --resume"));
   const harnessSessionId = harness === "claude"
     ? (transcript?.id ?? (resumeLast ? undefined : sessionId))
-    : record?.harnessSessionId;
-  const resumeId = harness === "claude" ? transcript?.id : record?.harnessSessionId;
+    : record?.harnessSessionId ?? cursorChat;
+  const resumeId = harness === "claude" ? transcript?.id : harnessSessionId;
   // No model flag means the harness's own model choice passes through and the
   // endpoint routes it (Codex's default gpt-* id normalizes like Claude's
   // claude-* ids). Earlier releases pinned Codex sessions to the endpoint
