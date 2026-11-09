@@ -374,7 +374,7 @@ export async function findProfileEndpoint(profile: RepoProfile, endpoints: Infer
 
 /** `settings.claude_hooks`, validated; a bad value is a ProfileError like any other setting. */
 /** Per-agent default tool surface, one setting per agent with native MCP. */
-const TOOL_SURFACE_SETTINGS = ["claude_tool_surface", "codex_tool_surface"];
+const TOOL_SURFACE_SETTINGS = ["claude_tool_surface", "codex_tool_surface", "grok_tool_surface"];
 
 function hooksOf(decl: EndpointDecl): ClaudeHooksConfig | undefined {
   try {
