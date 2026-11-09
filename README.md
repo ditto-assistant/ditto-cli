@@ -748,6 +748,44 @@ confirmed before it is replaced; `--unset` restores it. The key is long-lived
 rotated on the next run. Both files are shared with the Codex CLI, so a bare
 `codex` run routes through Ditto too; `heyditto codex` is unaffected.
 
+### `profile` — named endpoint profiles
+
+A profile gives an endpoint a local name, so you can keep several (each with
+its own MCP tools) and switch which one new sessions use. The active profile is
+used whenever `--endpoint` is omitted; `--profile <name>` picks another for one
+command and `DITTO_PROFILE=<name>` for one shell. `--endpoint` still wins over
+both.
+
+```
+heyditto profile                           list (* = active)
+heyditto profile create <name> --endpoint <slug> [--inference cliproxy|router] [--use]
+heyditto profile use <name>                make it active (alias: switch)
+heyditto profile set <name> [--endpoint <slug>] [--inference cliproxy|router]
+heyditto profile rename <old> <new>
+heyditto profile delete <name>             not the active one (alias: rm)
+```
+
+`--profile` works on `claude`, `codex`, `grok`, `codex-app`, `status`,
+`t3 setup` and `endpoints list|create|show|use|pick|open`; `endpoints use
+<slug> --profile subnet` re-points only that profile. An install that never
+creates a profile behaves exactly as before: its saved default endpoint is the
+implicit `default` profile. Creating the first profile saves that default as
+profile `default` and keeps it active. The saved `defaultEndpoint` always
+mirrors the active profile, so an older CLI on the same machine launches what
+the active profile names. Profiles are local and hold no keys; they do not
+change an endpoint's routing or policy. (`heyditto profiles`, plural, is an
+older alias of `heyditto endpoints`.)
+
+Two T3 providers, one per profile:
+
+```sh
+heyditto profile create subnet --endpoint <subnet-endpoint-slug>
+heyditto t3 setup --profile subnet --dry-run
+# quit T3, then
+heyditto t3 setup --profile subnet           # adds "Claude Subnet" (claude_ditto_subnet_cliproxy)
+heyditto profile use subnet                  # optional: new terminal sessions use it too
+```
+
 ### `endpoints`
 
 Manage the inference endpoints the launchers route through — a CLI mirror of
@@ -760,7 +798,7 @@ heyditto endpoints list --archived          archived endpoints and when they wer
 heyditto endpoints create [--name <n>] [--slug <s>] [--model <id>] [--org <org>] [--default]
 heyditto endpoints move <endpoint> (--org <org> | --personal)   change who owns and pays for it
 heyditto endpoints show <endpoint>
-heyditto endpoints use <endpoint>          make it the default
+heyditto endpoints use <endpoint>          make it the default (of the active profile, or --profile <name>)
 heyditto endpoints pick                    choose the default interactively
 heyditto endpoints open [endpoint]         open the editor in the Ditto app
 heyditto endpoints set <endpoint> [settings flags — see the table below]
@@ -1200,7 +1238,8 @@ was created but whose push failed reports `has no generations yet`.
 - `DITTO_API_KEY` (optional) — MCP API key override. Agents can instead run `heyditto init --json` for no-human setup.
 - `DITTO_API_BASE` (optional) — API base URL. Defaults to `https://api.heyditto.ai`. Useful for local dev (`http://localhost:3400`).
 - `DITTO_SESSION_ID` (optional) — pin an explicit MCP session id for this shell (see `session`).
-- `DITTO_CONFIG_DIR` (optional) — config directory for the saved key, default endpoint and session records. Defaults to `$XDG_CONFIG_HOME/heyditto/cli` or `~/.config/heyditto/cli`.
+- `DITTO_PROFILE` (optional) — endpoint profile for this shell, overriding the active one (see `profile`).
+- `DITTO_CONFIG_DIR` (optional) — config directory for the saved key, endpoint profiles and session records. Defaults to `$XDG_CONFIG_HOME/heyditto/cli` or `~/.config/heyditto/cli`.
 
 ## Output
 
@@ -1389,7 +1428,9 @@ discover laptop providers. Deploy the matching backend before enabling an endpoi
 For the official T3 Code app, preview a dedicated provider with
 `heyditto t3 setup --inference cliproxy --dry-run`, then quit T3 and rerun
 without `--dry-run`. Without `--endpoint`, setup uses your saved default, your
-only endpoint, or a picker, and offers to create a first endpoint. This keeps inference on local CLIProxy and
+only endpoint, or a picker, and offers to create a first endpoint. With
+`--profile <name>` it uses that profile's endpoint and adds a separate provider
+for it (`subnet` → **Claude Subnet**), next to the existing one. This keeps inference on local CLIProxy and
 auto-connects the endpoint's MCP tools. Use `--inference router` for Ditto
 Router inference. See [the T3 setup guide](docs/t3-code.md) for paths, backups,
 limitations, and manual configuration.

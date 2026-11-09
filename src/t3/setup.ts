@@ -6,8 +6,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Command, Option } from "commander";
 import { chooseEndpoint } from "../agents/launch.js";
+import { LEGACY_PROFILE, profileLabel } from "../profile-state.js";
+import { type SelectedProfile, addProfileOption, selectedProfile, setProfileOverride } from "../profiles.js";
 
 type JsonObject = Record<string, unknown>;
+export const DEFAULT_T3_INSTANCE = "claude_ditto_cliproxy";
 export interface T3SetupOptions {
   endpoint?: string;
   inference?: string;
@@ -18,6 +21,8 @@ export interface T3SetupOptions {
   heydittoBin?: string;
   dryRun?: boolean;
   json?: boolean;
+  /** Set by commander; read through the shared --profile hook. */
+  profile?: string;
 }
 export interface T3SetupPlan {
   settingsPath: string;
@@ -103,7 +108,7 @@ export function planT3Setup(options: T3SetupOptions): T3SetupPlan {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(endpoint)) throw new Error("Use an endpoint CLI slug or UUID with --endpoint");
   const inference = options.inference ?? "cliproxy";
   if (inference !== "router" && inference !== "cliproxy") throw new Error("--inference must be router or cliproxy");
-  const instance = options.instance ?? "claude_ditto_cliproxy";
+  const instance = options.instance ?? DEFAULT_T3_INSTANCE;
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/.test(instance)) throw new Error("--instance must contain letters, digits, '-' or '_' and be at most 80 characters");
   const base = userPath(options.baseDir ?? process.env.T3CODE_HOME ?? path.join(os.homedir(), ".t3"));
   const userdata = path.join(base, "userdata");
@@ -207,25 +212,75 @@ export function applyT3Setup(plan: T3SetupPlan): { changed: boolean; backup?: st
   }
 }
 
+/**
+ * T3 settings a profile implies. The `default` profile keeps the original
+ * instance id and label, so an install that predates profiles reruns setup
+ * onto the same provider; any other profile gets its own instance
+ * (`subnet` → `claude_ditto_subnet_cliproxy`, "Claude Subnet"), so a second
+ * provider is created next to the first instead of replacing it.
+ */
+export function profileT3Defaults(name: string, inference: "router" | "cliproxy"): { instance: string; name?: string } {
+  if (name === LEGACY_PROFILE && inference === "cliproxy") return { instance: DEFAULT_T3_INSTANCE };
+  const id = name.replace(/-/g, "_");
+  return { instance: `claude_ditto_${id}_${inference}`, name: `Claude ${profileLabel(name)}${inference === "router" ? " (Router)" : ""}` };
+}
+
 export interface T3SetupDeps {
   /** Chooses an endpoint when --endpoint is omitted; `readOnly` for --dry-run. */
   chooseEndpoint?: (readOnly: boolean) => Promise<{ slug: string }>;
+  /** Reads the profile selected by --profile, DITTO_PROFILE or the active one. */
+  selectedProfile?: () => Promise<SelectedProfile>;
+}
+
+/**
+ * Fills endpoint, inference, instance and name from the selected profile.
+ * Profiles apply when one was named (--profile / DITTO_PROFILE) or when
+ * profiles are saved and --endpoint was omitted. Explicit flags always win.
+ * With no saved profiles and no profile named, nothing changes.
+ */
+export async function resolveT3Profile(options: T3SetupOptions, read: () => Promise<SelectedProfile> = selectedProfile): Promise<{ options: T3SetupOptions; profileName?: string }> {
+  const selected = await read();
+  const named = selected.source !== "active";
+  if (!named && (selected.implicit || options.endpoint !== undefined)) return { options };
+  if (named && options.endpoint !== undefined) throw new Error("pass either --profile or --endpoint, not both");
+  const endpoint = selected.profile.endpoint?.trim();
+  // The active profile may not have an endpoint yet: let the picker choose
+  // one (it saves the choice into that profile) but keep its own instance.
+  if (!endpoint && named) throw new Error(`profile "${selected.name}" has no endpoint. Set one with \`heyditto profile set ${selected.name} --endpoint <slug>\`.`);
+  const inference = (options.inference ?? selected.profile.inference ?? "cliproxy") as "router" | "cliproxy";
+  const derived = profileT3Defaults(selected.name, inference);
+  return {
+    options: { ...options, ...(endpoint ? { endpoint } : {}), inference, instance: options.instance ?? derived.instance, name: options.name ?? derived.name },
+    profileName: selected.name,
+  };
 }
 
 export function registerT3Commands(program: Command, deps: T3SetupDeps = {}): void {
   const choose = deps.chooseEndpoint ?? ((readOnly: boolean) => chooseEndpoint("claude", readOnly));
-  program.command("t3").description("configure a local T3 Code provider for Ditto").command("setup")
+  const readProfile = deps.selectedProfile ?? selectedProfile;
+  const setup = program.command("t3").description("configure a local T3 Code provider for Ditto").command("setup")
     .description("install a Claude launcher and configure a T3 provider while T3 is stopped")
-    .option("--endpoint <slug>", "Ditto endpoint supplying tools (and inference in Router mode); default: your saved default, or pick or create one")
-    .addOption(new Option("--inference <mode>", "inference route").choices(["cliproxy", "router"]).default("cliproxy"))
-    .option("--instance <id>", "T3 provider instance id", "claude_ditto_cliproxy")
-    .option("--name <name>", "provider display name")
+    .option("--endpoint <slug>", "Ditto endpoint supplying tools (and inference in Router mode); default: the selected profile's, or pick or create one")
+    .addOption(new Option("--inference <mode>", "inference route (default: the profile's, else cliproxy)").choices(["cliproxy", "router"]))
+    .option("--instance <id>", `T3 provider instance id (default: ${DEFAULT_T3_INSTANCE}, or claude_ditto_<profile>_<inference> for a named profile)`)
+    .option("--name <name>", "provider display name (default from the profile, e.g. \"Claude Subnet\")")
     .option("--base-dir <dir>", "T3 base directory (default: T3CODE_HOME or ~/.t3; userdata is appended)")
     .option("--claude-bin <path>", "installed Claude executable named claude")
     .option("--heyditto-bin <path>", "installed heyditto executable")
     .option("--dry-run", "show the setup plan; write nothing and allow T3 to remain open")
     .option("--json", "print a credential-free setup summary")
-    .action(async (options: T3SetupOptions) => {
+    .action(async (raw: T3SetupOptions) => {
+      // Also honour --profile when this command is registered without the
+      // program-wide hook (tests, embedders).
+      if (raw.profile !== undefined) setProfileOverride(raw.profile);
+      const { profile: flagProfile, ...rest } = raw;
+      if (flagProfile !== undefined && rest.endpoint !== undefined) throw new Error("pass either --profile or --endpoint, not both");
+      // An explicit --endpoint keeps the original behaviour (and stays
+      // synchronous): no profile is read, even with DITTO_PROFILE set.
+      const resolved = rest.endpoint !== undefined ? { options: rest } : await resolveT3Profile(rest, readProfile);
+      let options = resolved.options;
+      const profileName = (resolved as { profileName?: string }).profileName;
+      if (profileName !== undefined) process.stderr.write(`Using profile ${profileName} → ${options.endpoint} as T3 provider ${options.instance ?? DEFAULT_T3_INSTANCE}\n`);
       if (options.endpoint === undefined) {
         // Fail on local problems (T3 settings, binaries) before a browser
         // login, picker or endpoint creation. The throwaway plan needs any
@@ -238,7 +293,7 @@ export function registerT3Commands(program: Command, deps: T3SetupDeps = {}): vo
       }
       const plan = planT3Setup(options);
       const applied = options.dryRun ? undefined : applyT3Setup(plan);
-      const summary = { action: plan.action, dryRun: Boolean(options.dryRun), instance: plan.instance, displayName: plan.displayName, endpoint: plan.endpoint, inference: plan.inference, settingsPath: plan.settingsPath, binaryPath: plan.launcherPath, homePath: plan.homePath, runningPid: plan.runningPid ?? null, ...applied };
+      const summary = { action: plan.action, dryRun: Boolean(options.dryRun), profile: profileName ?? null, instance: plan.instance, displayName: plan.displayName, endpoint: plan.endpoint, inference: plan.inference, settingsPath: plan.settingsPath, binaryPath: plan.launcherPath, homePath: plan.homePath, runningPid: plan.runningPid ?? null, ...applied };
       if (options.json) process.stdout.write(JSON.stringify(summary, null, 2) + "\n");
       else {
         process.stdout.write(`${options.dryRun ? "Plan" : "Configured"}: ${plan.displayName} → ${plan.endpoint} (${plan.inference})\nSettings: ${plan.settingsPath}\nBinary: ${plan.launcherPath}\nClaude config: ${plan.homePath}\n`);
@@ -247,4 +302,5 @@ export function registerT3Commands(program: Command, deps: T3SetupDeps = {}): vo
         else if (!options.dryRun) process.stdout.write("Open T3 and select this provider in a new chat. Setup did not mint any keys or send inference requests.\n");
       }
     });
+  addProfileOption(setup);
 }
