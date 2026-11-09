@@ -79,6 +79,22 @@ deleting a profile leaves the provider it created in place. Profiles, launchers
 and T3 settings hold no credentials: each chat still mints its own session key
 and revokes it on exit.
 
+## Repositories choose their own endpoint
+
+A provider's endpoint is a fallback, not a pin. When a T3 chat starts in a
+checkout whose `.ditto/config.toml` sets `repository.default_endpoint`, the
+launcher uses that repository's endpoint (and its MCP tools) instead; anywhere
+else it uses the provider's endpoint. So one provider gives `heyditto-stack`
+chats the `ditto-dev` tools and `ditto-subnet` chats the SN118 Backroom tools
+without a second provider. A resumed chat stays on the endpoint it started on,
+and `--profile` / `DITTO_PROFILE` still beat the repository default.
+
+Launchers installed before this behaviour pass their endpoint as `--endpoint`.
+`heyditto claude` recognises that value (it equals the launcher's exported
+`DITTO_T3_ENDPOINT`) and treats it as the fallback too, so updating
+`@heyditto/cli` is enough; rerunning `heyditto t3 setup` is not required. Any
+other `--endpoint` is still an explicit choice and wins.
+
 ## Options
 
 Use `--inference router` for Router inference instead. `--instance` and `--name`

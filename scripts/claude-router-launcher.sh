@@ -118,8 +118,14 @@ fi
 if [ "$resuming" = false ] && [ -n "$session_id" ]; then
   set -- --session "$session_id" "$@"
 fi
+# The provider's endpoint is a fallback: a checkout whose .ditto/config.toml
+# sets repository.default_endpoint launches with that endpoint instead.
 if [ -n "${DITTO_T3_ENDPOINT:-}" ]; then
-  set -- --endpoint "$DITTO_T3_ENDPOINT" "$@"
+  if printf '%s\n' "$help_output" | grep -Eq -- "(^|[[:space:],])--fallback-endpoint([[:space:],]|$)"; then
+    set -- --fallback-endpoint "$DITTO_T3_ENDPOINT" "$@"
+  else
+    set -- --endpoint "$DITTO_T3_ENDPOINT" "$@"
+  fi
 fi
 
 # Preserve the SDK's pipes and signals. heyditto owns temporary-key cleanup.

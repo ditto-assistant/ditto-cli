@@ -68,6 +68,7 @@ function run(args, base, cwd, extraEnv = {}) {
   return new Promise((resolve, reject) => {
     const env = { ...process.env, DITTO_API_BASE: base, DITTO_API_KEY: "ditto_mcp_test", DITTO_CONFIG_DIR: path.join(cwd, ".heyditto-config"), ...extraEnv };
     delete env.DITTO_ENDPOINT;
+    for (const k of ["DITTO_T3_ENDPOINT", "DITTO_T3_INFERENCE", "DITTO_T3_HEYDITTO_BIN", "DITTO_T3_CLAUDE_BIN"]) if (!(k in extraEnv)) delete env[k];
     const child = spawn(process.execPath, [cliPath, ...args], { env, cwd, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
@@ -341,6 +342,34 @@ test("a launch with no --endpoint uses the repository's profile; --endpoint stil
     assert.equal(JSON.parse(fromRepo.stdout).endpoint.slug, "ditto-dev");
     assert.match(fromRepo.stderr, /using @omniaura\/ditto-dev from /);
     const explicit = await run(["claude", "--dry-run", "--endpoint", "alpha"], stub.base, nested);
+    assert.equal(explicit.status, 0, explicit.stderr);
+    assert.equal(JSON.parse(explicit.stdout).endpoint.slug, "alpha");
+  } finally {
+    stub.close();
+  }
+});
+
+test("a T3 fallback endpoint yields to the repository's profile and applies outside one", async () => {
+  const stub = await startStub([
+    { id: "ep-personal", slug: "alpha", model: "m", status: "active", providerOptions: {} },
+    { id: "ep-org", slug: "ditto-dev", companyId: ORG.id, model: "m", status: "active", providerOptions: {} },
+  ]);
+  const dir = await repo({ ".ditto/config.toml": CONFIG, ".ditto/endpoints/dev.toml": ORG_PROFILE, ".ditto/prompts/claude.md": PROMPT });
+  const outside = await mkdtemp(path.join(os.tmpdir(), "heyditto-no-profile-"));
+  try {
+    const inRepo = await run(["claude", "--dry-run", "--fallback-endpoint", "alpha"], stub.base, dir);
+    assert.equal(inRepo.status, 0, inRepo.stderr);
+    assert.equal(JSON.parse(inRepo.stdout).endpoint.slug, "ditto-dev");
+    const elsewhere = await run(["claude", "--dry-run", "--fallback-endpoint", "alpha"], stub.base, outside);
+    assert.equal(elsewhere.status, 0, elsewhere.stderr);
+    assert.equal(JSON.parse(elsewhere.stdout).endpoint.slug, "alpha");
+    assert.match(elsewhere.stderr, /using alpha \(no repository \.ditto default here\)/);
+    // A launcher from before --fallback-endpoint passes its DITTO_T3_ENDPOINT as --endpoint.
+    const legacy = await run(["claude", "--dry-run", "--endpoint", "alpha"], stub.base, dir, { DITTO_T3_ENDPOINT: "alpha" });
+    assert.equal(legacy.status, 0, legacy.stderr);
+    assert.equal(JSON.parse(legacy.stdout).endpoint.slug, "ditto-dev");
+    // Any other --endpoint is still a person's explicit choice.
+    const explicit = await run(["claude", "--dry-run", "--endpoint", "alpha"], stub.base, dir, { DITTO_T3_ENDPOINT: "ditto-dev" });
     assert.equal(explicit.status, 0, explicit.stderr);
     assert.equal(JSON.parse(explicit.stdout).endpoint.slug, "alpha");
   } finally {
