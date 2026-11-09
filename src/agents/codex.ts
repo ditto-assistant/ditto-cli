@@ -1,3 +1,4 @@
+import { MCP_KEY_ENV, type McpAttachment, TOOL_SURFACE_HEADER, TOOL_SURFACE_MCP } from "./claude-mcp.js";
 import { harnessHeaders } from "./harness-headers.js";
 import { CODEX_KEY_ENV, type HarnessPlan, type PlanInput, SESSION_HEADER } from "./types.js";
 
@@ -9,6 +10,39 @@ export function tomlString(value: string): string {
 /** A TOML inline table of string pairs: `{"A"="1","B"="2"}`. */
 export function tomlInlineTable(entries: Array<[string, string]>): string {
   return `{${entries.map(([k, v]) => `${tomlString(k)}=${tomlString(v)}`).join(",")}}`;
+}
+
+/**
+ * Native MCP for Codex: each attached server as one `-c mcp_servers.<name>=…`
+ * override, the way cmux attaches its computer-use server, so nothing is
+ * written to ~/.codex/config.toml. Codex merges an override into a server of
+ * the same name in the user's config (a disabled "ditto" entry is common), so
+ * every override turns its server on. The key stays out of argv: Codex reads
+ * it from MCP_KEY_ENV (bearer_token_env_var).
+ *
+ * Approvals follow the attachment: tools Ditto holds itself, or that bypass
+ * runs unasked, are "approve"; the rest are "prompt", so Codex asks about
+ * exactly the calls Ditto would have held.
+ */
+export function codexMcpArgs(mcp: McpAttachment): string[] {
+  const args: string[] = [];
+  // Names are bare keys (claudeMcpAttachment drops any other), so they can
+  // sit in the dotted -c path as they are.
+  for (const server of mcp.attached) {
+    const fields: Array<[string, string]> = [
+      ["enabled", "true"],
+      ["url", tomlString(server.url)],
+      ["bearer_token_env_var", tomlString(MCP_KEY_ENV)],
+      ["http_headers", tomlInlineTable(Object.entries(server.headers))],
+      ["default_tools_approval_mode", tomlString("approve")],
+    ];
+    if (server.askTools.length) {
+      const prompt = `{${tomlString("approval_mode")}=${tomlString("prompt")}}`;
+      fields.push(["tools", `{${server.askTools.map((t) => `${tomlString(t)}=${prompt}`).join(",")}}`]);
+    }
+    args.push("-c", `mcp_servers.${server.name}={${fields.map(([k, v]) => `${k}=${v}`).join(",")}}`);
+  }
+  return args;
 }
 
 /**
@@ -47,8 +81,14 @@ export function planCodex(input: PlanInput): HarnessPlan {
     "-c",
     `model_providers.ditto.wire_api=${tomlString("responses")}`,
     "-c",
-    `model_providers.ditto.http_headers=${tomlInlineTable(input.localInference ? [] : [[SESSION_HEADER, input.sessionId], ...harnessHeaders("codex", input.harnessVersion)])}`,
+    `model_providers.ditto.http_headers=${tomlInlineTable(input.localInference ? [] : [
+      [SESSION_HEADER, input.sessionId],
+      ...harnessHeaders("codex", input.harnessVersion),
+      // The tools are attached below; the router must not inject them again.
+      ...(input.mcp ? [[TOOL_SURFACE_HEADER, TOOL_SURFACE_MCP] as [string, string]] : []),
+    ])}`,
   );
+  if (input.mcp) args.push(...codexMcpArgs(input.mcp));
   if (input.model) args.push("-m", input.model);
 
   if (input.yolo) args.push("--dangerously-bypass-approvals-and-sandbox");
@@ -72,7 +112,7 @@ export function planCodex(input: PlanInput): HarnessPlan {
   return {
     command: "codex",
     args,
-    envSet: { [CODEX_KEY_ENV]: input.apiKey },
+    envSet: { [CODEX_KEY_ENV]: input.apiKey, ...(input.mcp ? { [MCP_KEY_ENV]: input.mcpApiKey ?? input.apiKey } : {}) },
     envUnset: [],
     installHint: "install Codex: npm i -g @openai/codex (or brew install codex)",
   };

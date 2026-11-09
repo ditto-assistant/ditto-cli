@@ -77,7 +77,7 @@ export interface PlanInput {
   passthrough: string[];
   /** Router tool deny rules to forward (claude-deny.ts); Claude only. */
   toolDeny?: string[];
-  /** The endpoint's tools attached as Claude Code MCP servers (claude-mcp.ts); Claude only. */
+  /** The endpoint's tools attached as the agent's own MCP servers (claude-mcp.ts); Claude and Codex. */
   mcp?: ClaudeMcpAttachment;
   /** Ditto's own Claude Code hooks from the repository profile (claude-hooks.ts); Claude only. */
   hooks?: ClaudeHookAttachment;
