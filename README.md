@@ -664,7 +664,7 @@ Options shared by both commands:
 | `--session <id>` | reuse a Ditto session id so traces land in an existing thread |
 | `--resume [id]` / `-c, --continue` | resume a local session (`heyditto sessions`) / the agent's most recent conversation. Claude also takes a Claude session id or title here, including sessions started in Claude Desktop or plain `claude`, and runs in the directory that session ran in; with no value, a terminal gets a searchable picker. Claude's own `-r` / `--resume` / `-c` after `--` do the same. |
 | `--yolo` / `--yellow` / `--plan` | bypass permissions / auto-accept edits / plan mode (Claude only) |
-| `--mcp` / `--no-mcp` | attach the endpoint's tools to Claude Code or Codex as its own MCP servers, or keep them on the router (default: the endpoint's `claude_tool_surface` / `codex_tool_surface`, else MCP) |
+| `--mcp` / `--no-mcp` | attach the endpoint's tools to the agent as its own MCP servers, or keep them on the router (default: the endpoint's `<agent>_tool_surface`, e.g. `codex_tool_surface`, else MCP) |
 | `--no-hooks` | leave out the Claude Code hooks the repository's `.ditto` profile declares (`claude_hooks`); Claude only |
 | `-p, --prompt <text>` | headless run: `claude -p` or `codex exec` |
 | `-m, --model <id>` | model to request (default: the agent's own model id passes through and the endpoint routes it) |
@@ -727,6 +727,13 @@ How the wiring works:
   `prompt` (`--yolo` runs them unasked). Claude's `permissions.deny` rules are
   not applied to Codex. `--no-mcp` or `codex_tool_surface = "router"` keeps
   the tools on the router.
+- **Grok** gets them as `[mcp_servers."<name>"]` tables in its launch
+  `GROK_HOME/config.toml` (`bearer_token_env_var = "DITTO_ROUTER_MCP_KEY"`),
+  plus `[permission]` rules: `allow` each Ditto server (`MCPTool(ditto__*)`)
+  and, under `client_approvals`, `ask` for each gated tool. Grok defers MCP
+  schemas behind its own `search_tool` / `use_tool`. The Ditto model entry
+  sends `X-Ditto-Tool-Surface: mcp`. `--no-mcp` or `grok_tool_surface =
+  "router"` keeps the router surface.
 
 ### `codex-app`
 
