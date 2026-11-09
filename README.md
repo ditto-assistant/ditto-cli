@@ -1297,8 +1297,8 @@ model, routing, tools, and the Claude Code or Codex system prompt, which is read
 from a file next to it. `repository.default_endpoint` in `.ditto/config.toml`
 names the profile that `heyditto claude` / `codex` use when no `--endpoint` is
 given, from anywhere inside the repository. `--endpoint` always wins;
-`--fallback-endpoint` (what T3 providers pass) applies only outside such a
-repository.
+`--fallback-endpoint` (what the default T3 provider passes) applies only
+outside such a repository; profile T3 providers pin their endpoint.
 
 ```toml
 # .ditto/endpoints/dev.toml

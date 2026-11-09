@@ -68,7 +68,7 @@ function run(args, base, cwd, extraEnv = {}) {
   return new Promise((resolve, reject) => {
     const env = { ...process.env, DITTO_API_BASE: base, DITTO_API_KEY: "ditto_mcp_test", DITTO_CONFIG_DIR: path.join(cwd, ".heyditto-config"), ...extraEnv };
     delete env.DITTO_ENDPOINT;
-    for (const k of ["DITTO_T3_ENDPOINT", "DITTO_T3_INFERENCE", "DITTO_T3_HEYDITTO_BIN", "DITTO_T3_CLAUDE_BIN"]) if (!(k in extraEnv)) delete env[k];
+    for (const k of ["DITTO_T3_ENDPOINT", "DITTO_T3_ENDPOINT_MODE", "CLAUDE_CONFIG_DIR", "DITTO_T3_INFERENCE", "DITTO_T3_HEYDITTO_BIN", "DITTO_T3_CLAUDE_BIN"]) if (!(k in extraEnv)) delete env[k];
     const child = spawn(process.execPath, [cliPath, ...args], { env, cwd, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
@@ -364,10 +364,19 @@ test("a T3 fallback endpoint yields to the repository's profile and applies outs
     assert.equal(elsewhere.status, 0, elsewhere.stderr);
     assert.equal(JSON.parse(elsewhere.stdout).endpoint.slug, "alpha");
     assert.match(elsewhere.stderr, /using alpha \(no repository \.ditto default here\)/);
-    // A launcher from before --fallback-endpoint passes its DITTO_T3_ENDPOINT as --endpoint.
-    const legacy = await run(["claude", "--dry-run", "--endpoint", "alpha"], stub.base, dir, { DITTO_T3_ENDPOINT: "alpha" });
+    // The default provider's launcher from before --fallback-endpoint passes its DITTO_T3_ENDPOINT as --endpoint.
+    const legacyHome = (instance) => path.join(outside, ".t3", "ditto-providers", instance, "claude");
+    const legacy = await run(["claude", "--dry-run", "--endpoint", "alpha"], stub.base, dir, { DITTO_T3_ENDPOINT: "alpha", CLAUDE_CONFIG_DIR: legacyHome("claude_ditto_cliproxy") });
     assert.equal(legacy.status, 0, legacy.stderr);
     assert.equal(JSON.parse(legacy.stdout).endpoint.slug, "ditto-dev");
+    // An old profile provider (another instance) was a deliberate choice and stays pinned.
+    const legacyProfile = await run(["claude", "--dry-run", "--endpoint", "alpha"], stub.base, dir, { DITTO_T3_ENDPOINT: "alpha", CLAUDE_CONFIG_DIR: legacyHome("claude_ditto_subnet_cliproxy") });
+    assert.equal(legacyProfile.status, 0, legacyProfile.stderr);
+    assert.equal(JSON.parse(legacyProfile.stdout).endpoint.slug, "alpha");
+    // A new pinned launcher passes --endpoint with its mode set: pinned too.
+    const pinned = await run(["claude", "--dry-run", "--endpoint", "alpha"], stub.base, dir, { DITTO_T3_ENDPOINT: "alpha", DITTO_T3_ENDPOINT_MODE: "pin", CLAUDE_CONFIG_DIR: legacyHome("claude_ditto_cliproxy") });
+    assert.equal(pinned.status, 0, pinned.stderr);
+    assert.equal(JSON.parse(pinned.stdout).endpoint.slug, "alpha");
     // Any other --endpoint is still a person's explicit choice.
     const explicit = await run(["claude", "--dry-run", "--endpoint", "alpha"], stub.base, dir, { DITTO_T3_ENDPOINT: "ditto-dev" });
     assert.equal(explicit.status, 0, explicit.stderr);

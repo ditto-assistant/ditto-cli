@@ -231,3 +231,10 @@ test("a heyditto with --fallback-endpoint gets the provider endpoint as a fallba
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(f.capture().args, ["claude", "--fallback-endpoint", "ditto-dev", "--session", "s1", "--no-mcp-only", "--cliproxy", "--mcp", "--no-remote-control", "--", "--session-id", "s1"]);
 });
+
+test("a pinned provider passes its endpoint as --endpoint even when heyditto supports a fallback", (t) => {
+  const f = fixture(t);
+  const result = f.run(["--session-id", "s1"], { DITTO_T3_ENDPOINT: "subnet", DITTO_T3_ENDPOINT_MODE: "pin", DITTO_T3_INFERENCE: "cliproxy", T3_TEST_FALLBACK: "1" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(f.capture().args, ["claude", "--endpoint", "subnet", "--session", "s1", "--no-mcp-only", "--cliproxy", "--mcp", "--no-remote-control", "--", "--session-id", "s1"]);
+});

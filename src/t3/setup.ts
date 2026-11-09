@@ -10,7 +10,9 @@ import { LEGACY_PROFILE, profileLabel } from "../profile-state.js";
 import { type SelectedProfile, addProfileOption, selectedProfile, setProfileOverride } from "../profiles.js";
 
 type JsonObject = Record<string, unknown>;
-export const DEFAULT_T3_INSTANCE = "claude_ditto_cliproxy";
+import { DEFAULT_T3_INSTANCE } from "./instance.js";
+
+export { DEFAULT_T3_INSTANCE };
 export interface T3SetupOptions {
   endpoint?: string;
   inference?: string;
@@ -21,6 +23,13 @@ export interface T3SetupOptions {
   heydittoBin?: string;
   dryRun?: boolean;
   json?: boolean;
+  /**
+   * Pin the endpoint for every chat (`--endpoint`) instead of using it only
+   * where the checkout has no `.ditto/` default (`--fallback-endpoint`).
+   * Default: the default provider follows the repository; a profile's or a
+   * custom `--instance` provider is a deliberate choice and pins.
+   */
+  pin?: boolean;
   /** Set by commander; read through the shared --profile hook. */
   profile?: string;
 }
@@ -31,6 +40,7 @@ export interface T3SetupPlan {
   instance: string;
   endpoint: string;
   inference: "router" | "cliproxy";
+  pin: boolean;
   displayName: string;
   managedRoot: string;
   homePath: string;
@@ -131,6 +141,7 @@ export function planT3Setup(options: T3SetupOptions): T3SetupPlan {
   if (existing !== undefined && (!object(existing) || existing.driver !== "claudeAgent" || !object(existing.config) || existing.config.homePath !== homePath || typeof existing.config.binaryPath !== "string" || !existing.config.binaryPath.startsWith(path.join(managedRoot, instance) + path.sep))) {
     throw new Error(`T3 provider '${instance}' already exists outside this setup; choose another --instance (no overwrite)`);
   }
+  const pin = options.pin ?? instance !== DEFAULT_T3_INSTANCE;
   const heydittoBin = executable(options.heydittoBin, "heyditto");
   const claudeBin = executable(options.claudeBin, "claude");
   if (path.basename(claudeBin) !== "claude") throw new Error("--claude-bin must point to an executable named claude (a symlink is supported)");
@@ -140,11 +151,11 @@ export function planT3Setup(options: T3SetupOptions): T3SetupPlan {
     throw new Error(`The selected heyditto does not support ${inference} T3 launches; update it before setup`);
   }
   const launcher = readFileSync(fileURLToPath(new URL("../../scripts/claude-router-launcher.sh", import.meta.url)), "utf8");
-  const digest = createHash("sha256").update(JSON.stringify({ inference, endpoint, heydittoBin, claudeBin, launcher })).digest("hex").slice(0, 20);
+  const digest = createHash("sha256").update(JSON.stringify({ inference, endpoint, pin, heydittoBin, claudeBin, launcher })).digest("hex").slice(0, 20);
   const versionDir = path.join(managedRoot, instance, digest);
   const supportPath = path.join(versionDir, "claude-router-launcher.sh");
   const launcherPath = path.join(versionDir, "launch");
-  const wrapper = `#!/bin/sh\n# Managed by heyditto t3 setup. No credentials are stored here.\nexport DITTO_T3_INFERENCE=${shellQuote(inference)}\nexport DITTO_T3_ENDPOINT=${shellQuote(endpoint)}\nexport DITTO_T3_HEYDITTO_BIN=${shellQuote(heydittoBin)}\nexport DITTO_T3_CLAUDE_BIN=${shellQuote(claudeBin)}\nexec ${shellQuote(supportPath)} "$@"\n`;
+  const wrapper = `#!/bin/sh\n# Managed by heyditto t3 setup. No credentials are stored here.\nexport DITTO_T3_INFERENCE=${shellQuote(inference)}\nexport DITTO_T3_ENDPOINT=${shellQuote(endpoint)}\nexport DITTO_T3_ENDPOINT_MODE=${pin ? "pin" : "fallback"}\nexport DITTO_T3_HEYDITTO_BIN=${shellQuote(heydittoBin)}\nexport DITTO_T3_CLAUDE_BIN=${shellQuote(claudeBin)}\nexec ${shellQuote(supportPath)} "$@"\n`;
   const displayName = options.name?.trim() || (inference === "cliproxy" ? "Claude CLIProxy + Ditto" : "Ditto Router");
   const previous = object(existing) ? existing : {};
   const provider = { ...previous, driver: "claudeAgent", displayName, enabled: true, config: { ...(object(previous.config) ? previous.config : {}), binaryPath: launcherPath, homePath } };
@@ -152,7 +163,7 @@ export function planT3Setup(options: T3SetupOptions): T3SetupPlan {
   const same = JSON.stringify(settings) === JSON.stringify(updatedObject);
   return {
     settingsPath, original, updated: same ? original : JSON.stringify(updatedObject, null, 2) + "\n",
-    instance, endpoint, inference, displayName, managedRoot, homePath, launcherPath,
+    instance, endpoint, inference, pin, displayName, managedRoot, homePath, launcherPath,
     files: [{ path: supportPath, content: launcher }, { path: launcherPath, content: wrapper }],
     action: existing === undefined ? "add" : same ? "unchanged" : "update",
     runningPid: runningServer(userdata),
@@ -264,6 +275,8 @@ export function registerT3Commands(program: Command, deps: T3SetupDeps = {}): vo
     .addOption(new Option("--inference <mode>", "inference route (default: the profile's, else cliproxy)").choices(["cliproxy", "router"]))
     .option("--instance <id>", `T3 provider instance id (default: ${DEFAULT_T3_INSTANCE}, or claude_ditto_<profile>_<inference> for a named profile)`)
     .option("--name <name>", "provider display name (default from the profile, e.g. \"Claude Subnet\")")
+    .option("--pin", "use this provider's endpoint in every chat, even in a checkout whose .ditto/ names another (default for --profile / --instance providers)")
+    .option("--no-pin", "use this provider's endpoint only where the checkout has no .ditto/ default (default for the default provider)")
     .option("--base-dir <dir>", "T3 base directory (default: T3CODE_HOME or ~/.t3; userdata is appended)")
     .option("--claude-bin <path>", "installed Claude executable named claude")
     .option("--heyditto-bin <path>", "installed heyditto executable")
@@ -293,10 +306,10 @@ export function registerT3Commands(program: Command, deps: T3SetupDeps = {}): vo
       }
       const plan = planT3Setup(options);
       const applied = options.dryRun ? undefined : applyT3Setup(plan);
-      const summary = { action: plan.action, dryRun: Boolean(options.dryRun), profile: profileName ?? null, instance: plan.instance, displayName: plan.displayName, endpoint: plan.endpoint, inference: plan.inference, settingsPath: plan.settingsPath, binaryPath: plan.launcherPath, homePath: plan.homePath, runningPid: plan.runningPid ?? null, ...applied };
+      const summary = { action: plan.action, dryRun: Boolean(options.dryRun), profile: profileName ?? null, instance: plan.instance, displayName: plan.displayName, endpoint: plan.endpoint, endpointMode: plan.pin ? "pin" : "fallback", inference: plan.inference, settingsPath: plan.settingsPath, binaryPath: plan.launcherPath, homePath: plan.homePath, runningPid: plan.runningPid ?? null, ...applied };
       if (options.json) process.stdout.write(JSON.stringify(summary, null, 2) + "\n");
       else {
-        process.stdout.write(`${options.dryRun ? "Plan" : "Configured"}: ${plan.displayName} → ${plan.endpoint} (${plan.inference})\nSettings: ${plan.settingsPath}\nBinary: ${plan.launcherPath}\nClaude config: ${plan.homePath}\n`);
+        process.stdout.write(`${options.dryRun ? "Plan" : "Configured"}: ${plan.displayName} → ${plan.endpoint} (${plan.inference}, ${plan.pin ? "pinned" : "unless the checkout's .ditto/ names another"})\nSettings: ${plan.settingsPath}\nBinary: ${plan.launcherPath}\nClaude config: ${plan.homePath}\n`);
         if (applied?.backup) process.stdout.write(`Private settings backup: ${applied.backup}\n`);
         if (options.dryRun && plan.runningPid !== undefined) process.stdout.write("T3 is running. Quit it before applying; this command will not stop chats.\n");
         else if (!options.dryRun) process.stdout.write("Open T3 and select this provider in a new chat. Setup did not mint any keys or send inference requests.\n");

@@ -51,6 +51,7 @@ import {
   stripSeparator,
 } from "./types.js";
 import { defaultWorktreeName, ensureWorktree } from "./worktree.js";
+import { DEFAULT_T3_INSTANCE } from "../t3/instance.js";
 import { RemoteSession } from "../remote/controller.js";
 import { startHeadlessTurn } from "../remote/headless.js";
 import { type HookServer, claudeHookSettings, codexNotifyOverride, hookScriptPath, startHookServer, withHookArgs } from "../remote/hooks.js";
@@ -116,21 +117,24 @@ export interface LaunchOptions {
 }
 
 /**
- * T3 launchers installed before --fallback-endpoint export their endpoint as
- * DITTO_T3_ENDPOINT and pass the same value as --endpoint. That value is the
- * provider's default, not a choice for this checkout, so it is demoted to the
- * fallback and a repository's `.ditto/` default still applies. The launcher's
- * variables are removed here, so a `heyditto` run inside the session (whose
- * shells inherit this process's environment) keeps its own --endpoint.
+ * The default T3 provider's launcher from before --fallback-endpoint (no
+ * DITTO_T3_ENDPOINT_MODE) passes its DITTO_T3_ENDPOINT as --endpoint. That is
+ * the provider's default, so it is demoted to the fallback and a checkout's
+ * `.ditto/` default applies without rerunning setup. Old launchers of any
+ * other instance (profile providers) were a deliberate choice and stay
+ * pinned. The launcher's variables are then dropped, so a `heyditto` run
+ * inside the chat keeps its own --endpoint.
  */
 export function t3FallbackEndpoint(options: LaunchOptions, env: NodeJS.ProcessEnv = process.env): LaunchOptions {
   const fromLauncher = env.DITTO_T3_ENDPOINT?.trim();
+  const legacyDefault = env.DITTO_T3_ENDPOINT_MODE === undefined
+    && path.basename(path.dirname(path.resolve(env.CLAUDE_CONFIG_DIR ?? "/"))) === DEFAULT_T3_INSTANCE;
   for (const k of T3_LAUNCHER_ENV) delete env[k];
-  if (!fromLauncher || options.fallbackEndpoint !== undefined || options.endpoint?.trim() !== fromLauncher) return options;
+  if (!fromLauncher || !legacyDefault || options.fallbackEndpoint !== undefined || options.endpoint?.trim() !== fromLauncher) return options;
   return { ...options, endpoint: undefined, fallbackEndpoint: fromLauncher };
 }
 
-const T3_LAUNCHER_ENV = ["DITTO_T3_ENDPOINT", "DITTO_T3_INFERENCE", "DITTO_T3_HEYDITTO_BIN", "DITTO_T3_CLAUDE_BIN"];
+const T3_LAUNCHER_ENV = ["DITTO_T3_ENDPOINT", "DITTO_T3_ENDPOINT_MODE", "DITTO_T3_INFERENCE", "DITTO_T3_HEYDITTO_BIN", "DITTO_T3_CLAUDE_BIN"];
 
 /** Explicit flags (or resumed choices) win over repo/cloud launch defaults. */
 export function resolveClaudeLaunchDefaults(options: LaunchOptions, defaults: Record<string, unknown> = {}): LaunchOptions {
