@@ -1495,6 +1495,7 @@ const HARNESS_LABELS: Record<Harness, string> = {
   claude: "Claude Code",
   codex: "Codex",
   grok: "Grok",
+  cursor: "Cursor CLI",
 };
 
 export function registerHarnessCommands(program: Command, addExamples: (c: Command, ex: string) => Command): void {
@@ -1524,15 +1525,15 @@ export function registerHarnessCommands(program: Command, addExamples: (c: Comma
           : "resume a local session (default: the most recent one); mints a fresh key",
       )
       .option("-c, --continue", `continue the most recent ${harness} conversation in this directory`)
-      .option("--yolo", `bypass all permission prompts (${harness === "claude" ? "--dangerously-skip-permissions" : harness === "grok" ? "--always-approve" : "--dangerously-bypass-approvals-and-sandbox"})`)
-      .option("--yellow", `auto-accept edits (${harness === "claude" ? "--permission-mode acceptEdits" : harness === "grok" ? "--permission-mode auto" : "-a on-request -s workspace-write"})`)
+      .option("--yolo", `bypass all permission prompts (${harness === "claude" ? "--dangerously-skip-permissions" : harness === "grok" ? "--always-approve" : harness === "cursor" ? "--force" : "--dangerously-bypass-approvals-and-sandbox"})`)
+      .option("--yellow", `auto-accept edits (${harness === "claude" ? "--permission-mode acceptEdits" : harness === "grok" ? "--permission-mode auto" : harness === "cursor" ? "not supported" : "-a on-request -s workspace-write"})`)
       // The machine-readable flag differs per harness: Claude Code takes
       // --output-format, Codex takes --json. Naming the wrong one sends people
       // to "error: unexpected argument", which is what this used to do for
       // Codex.
       .option(
         "-p, --prompt <text>",
-        `headless run (${harness === "claude" ? "claude -p" : `${label.toLowerCase().replace(/ /g, "")} -p`}); pair with ${harness === "claude" ? "--output-format json" : "--json"} for machine-readable output`,
+        `headless run (${harness === "claude" ? "claude -p" : harness === "cursor" ? "cursor-agent -p" : `${label.toLowerCase().replace(/ /g, "")} -p`}); pair with ${harness === "claude" || harness === "cursor" ? "--output-format json" : "--json"} for machine-readable output`,
       )
       .option("-m, --model <id>", `model id (default: let the endpoint route ${label}'s own model ids)`)
       .option("-w, --worktree [name]", "run inside <repo>/.worktrees/<name> (created on a branch of the same name)")
@@ -1550,7 +1551,7 @@ export function registerHarnessCommands(program: Command, addExamples: (c: Comma
       cmd.option("--cliproxy [url]", "use a local CLIProxy for inference (detect EasyCLIProxyAPI, or CLIPROXY_BASE_URL/CLIPROXY_API_KEY); Ditto supplies tools and remote control");
       cmd.option("--no-cliproxy", "use the normal inference mode, overriding a resumed CLIProxy session");
     }
-    if (harness === "claude" || harness === "grok") cmd.option("--plan", "start in plan mode (--permission-mode plan)");
+    if (harness === "claude" || harness === "grok" || harness === "cursor") cmd.option("--plan", harness === "cursor" ? "start in plan mode (--plan)" : "start in plan mode (--permission-mode plan)");
     // --mcp first, then --no-mcp: neither flag leaves the endpoint's
     // <harness>_tool_surface default in charge (commander keeps it undefined).
     cmd.option("--mcp", `attach the endpoint's tools as ${label} MCP servers, one per app (default unless the endpoint sets ${harness}_tool_surface = "router")`);
@@ -1570,7 +1571,7 @@ export function registerHarnessCommands(program: Command, addExamples: (c: Comma
       `  heyditto ${harness}                       first run: sign in + pick an endpoint in the browser, then launch
   heyditto ${harness} --endpoint my-endpoint --budget 500000
   heyditto ${harness} --yellow --worktree feature-x
-  heyditto ${harness} -p "summarize this repo" ${harness === "claude" ? "--output-format json" : "--json"}
+  heyditto ${harness} -p "summarize this repo" ${harness === "claude" || harness === "cursor" ? "--output-format json" : "--json"}
   heyditto ${harness} --resume              ${harness === "claude" ? "pick a session to reopen (type words to search)" : "reopen the last session in its thread"}${harness === "claude" ? `
   heyditto claude --resume "Ditto Review quality and UX"   resume by title, as claude --resume prints it` : ""}
   heyditto ${harness} --headless               keep the session reachable from the app without a terminal UI

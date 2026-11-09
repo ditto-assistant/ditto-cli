@@ -34,6 +34,7 @@ import { type ClaudeTranscript, findTranscriptById, isUuid, listTranscriptsIn } 
 import { watchClaudeSessionTitle } from "./claude-title-sync.js";
 import { type ClaudeHookAttachment, claudeHookAttachment } from "./claude-hooks.js";
 import { planCodex } from "./codex.js";
+import { planCursor, writeCursorPlugin } from "./cursor.js";
 import { cliProxyModel, resolveCliProxy } from "./cliproxy.js";
 import { readHarnessVersion } from "./harness-headers.js";
 import { ensureGrokHome, planGrok } from "./grok.js";
@@ -147,7 +148,13 @@ export function resolveClaudeLaunchDefaults(options: LaunchOptions, defaults: Re
 const DRY_RUN_KEY = "ditto_inf_<minted-at-launch>";
 
 /** Harnesses that can attach an endpoint's tools as their own MCP servers. */
-export const MCP_HARNESSES: readonly Harness[] = ["claude", "codex", "grok"];
+export const MCP_HARNESSES: readonly Harness[] = ["claude", "codex", "grok", "cursor"];
+
+/**
+ * Harnesses whose own service runs inference: Ditto supplies only the
+ * endpoint's tools as MCP servers, so a launch without them is pointless.
+ */
+const MCP_ONLY_HARNESSES: readonly Harness[] = ["cursor"];
 
 /**
  * `--mcp` / `--no-mcp`, else the endpoint's `<harness>_tool_surface`, else
@@ -216,7 +223,7 @@ function mcpBanner(mcp: ClaudeMcpAttachment | undefined, opts: { dryRun?: boolea
   return `mcp ${c("dim", `(${mcp.servers} servers, ${mcp.tools} tools; ${mcpApprovalNote(mcp, opts.agent)})`)}`;
 }
 
-const AGENT_LABELS: Record<Harness, string> = { claude: "Claude Code", codex: "Codex", grok: "Grok" };
+const AGENT_LABELS: Record<Harness, string> = { claude: "Claude Code", codex: "Codex", grok: "Grok", cursor: "Cursor CLI" };
 
 function log(line: string, options?: NoteOptions): void {
   writeNote(`${c("dim", "ditto:")} ${line}\n`, options);
@@ -231,9 +238,10 @@ function logResumeHint(harness: Harness, sessionId: string): void {
   writeNote(`${c("dim", "ditto:")} resume this session with:\n\n  ${c(["bold", "green"], `heyditto ${harness} --resume ${sessionId}`)}\n\n`);
 }
 
-function planFor(harness: Harness, input: PlanInput, grokHome?: string): HarnessPlan {
+function planFor(harness: Harness, input: PlanInput, grokHome?: string, cursorPlugin?: string): HarnessPlan {
   if (harness === "claude") return planClaude(input);
   if (harness === "grok") return planGrok(input, grokHome ?? "");
+  if (harness === "cursor") return planCursor(input, cursorPlugin);
   return planCodex(input);
 }
 
@@ -440,7 +448,7 @@ async function ensureLoggedIn(harness: Harness, endpoint: string | undefined): P
     await listEndpoints(); // throws the shared "no Ditto API key configured" error
     return undefined;
   }
-  log(`no Ditto login yet — opening your browser to sign in and pick an endpoint for ${harness === "claude" ? "Claude Code" : "Codex"}.`);
+  log(`no Ditto login yet — opening your browser to sign in and pick an endpoint for ${AGENT_LABELS[harness]}.`);
   return browserLogin(harness, endpoint);
 }
 
@@ -450,7 +458,8 @@ async function ensureLoggedIn(harness: Harness, endpoint: string | undefined): P
  */
 async function browserLogin(harness: Harness, endpoint: string | undefined): Promise<SelectedEndpoint | undefined> {
   const result = await deviceLogin({
-    intent: harness,
+    // The sign-in page knows the agents it routes; an MCP-only one just signs in.
+    intent: harness === "cursor" ? "login" : harness,
     endpoint,
     onCode: (userCode, url) => {
       process.stderr.write(`\n  ${url}\n\n  Code: ${userCode}\n\n`);
@@ -515,22 +524,20 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   }
   const budget = parseBudget(options.budget);
   const expiresIn = parseExpiry(options.expires);
-  if (options.plan && harness !== "claude") throw new Error("--plan is only supported for claude");
+  if (options.plan && harness === "codex") throw new Error("--plan is not supported for codex");
+  if (MCP_ONLY_HARNESSES.includes(harness)) {
+    if (options.mcp === false) throw new Error(`${AGENT_LABELS[harness]} gets Ditto only as MCP tools; --no-mcp would attach nothing`);
+    if (options.headless) throw new Error(`--headless is not supported for ${AGENT_LABELS[harness]} yet`);
+  }
   if ([options.yolo, options.yellow, options.plan].filter(Boolean).length > 1) {
     throw new Error("choose only one of --yolo, --yellow, --plan");
   }
   if (options.resume !== undefined && options.continue) throw new Error("use either --resume or --continue");
   if (options.resume !== undefined && options.session) throw new Error("--session cannot be combined with --resume");
 
-  if (!options.dryRun && !binaryAvailable(harness)) {
-    const hint = planFor(harness, {
-      baseUrl: "",
-      apiKey: "",
-      sessionId: "",
-      passthrough: [],
-      env: {},
-    }).installHint;
-    throw new Error(`"${harness}" is not on your PATH; ${hint}`);
+  const probe = planFor(harness, { baseUrl: "", apiKey: "", sessionId: "", passthrough: [], env: {} });
+  if (!options.dryRun && !binaryAvailable(probe.command)) {
+    throw new Error(`"${probe.command}" is not on your PATH; ${probe.installHint}`);
   }
 
   // Resume: reuse the local record's Ditto session id so the traces stay in
@@ -611,7 +618,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   // probe overlaps the key and MCP setup below instead of delaying the
   // launch. It never rejects: unreadable means the header is left out,
   // never guessed. grok has no version-specific prompts.
-  const harnessVersionProbe = harness === "grok" ? Promise.resolve(undefined) : readHarnessVersion(harness);
+  const harnessVersionProbe = harness === "grok" || MCP_ONLY_HARNESSES.includes(harness) ? Promise.resolve(undefined) : readHarnessVersion(harness);
 
   let cwd = process.cwd();
   let worktreePath: string | undefined;
@@ -672,7 +679,8 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   // beat the endpoint's saved options for this launch.
   endpoint = { ...endpoint, providerOptions: { ...endpoint.providerOptions, ...repoLaunchDefaults } };
   if (harness === "claude") options = resolveClaudeLaunchDefaults(options, endpoint.providerOptions);
-  if (!options.mcpOnly && !proxy) await assertEndpointActive(endpoint);
+  const mcpOnlyHarness = MCP_ONLY_HARNESSES.includes(harness);
+  if (!options.mcpOnly && !proxy && !mcpOnlyHarness) await assertEndpointActive(endpoint);
   if (options.mcpOnly && (harness !== "claude" || options.mcp === false)) throw new Error("--mcp-only requires Claude Code with MCP tools enabled");
   if (options.remoteTransport === "channels" && (!options.mcpOnly || options.headless || remoteMode(options) === "off" || options.prompt !== undefined)) throw new Error("MCP Channels requires an interactive `heyditto claude --mcp-only` session with remote control enabled");
 
@@ -726,12 +734,12 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
       for (const line of mcpUnavailableLines(mcpCatalog)) log(c("yellow", line));
       for (const name of attachment.skipped) log(c("yellow", `MCP server ${JSON.stringify(name)} left out: its name cannot be used in an agent's config`));
     } catch (err) {
-      if (options.mcpOnly || proxy) {
+      if (options.mcpOnly || proxy || mcpOnlyHarness) {
         if (!options.keepKey) {
           try { await revokeKey(endpoint.id, key.id); }
           catch { log(`could not revoke session key …${key.keyHint}; it expires in ${expiresIn}`); }
         }
-        throw new Error(`${proxy ? "CLIProxy MCP" : "MCP-only"} setup failed; no inference Router fallback: ${(err as Error).message}`);
+        throw new Error(`${proxy ? "CLIProxy MCP" : mcpOnlyHarness ? `${AGENT_LABELS[harness]} MCP` : "MCP-only"} setup failed; no inference Router fallback: ${(err as Error).message}`);
       }
       const note = c(chosen ? "yellow" : "dim", "native MCP unavailable");
       log(`${note} (${(err as Error).message}); the router keeps this endpoint's tools`);
@@ -763,6 +771,11 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   // Read once per launch and reused by every turn.
   const harnessVersion = await harnessVersionProbe;
 
+  // Cursor CLI loads the attachment as a per-launch plugin (cursor.ts).
+  const cursorPlugin = harness === "cursor" && mcp && !options.dryRun
+    ? writeCursorPlugin(mcp, { unattended: options.prompt !== undefined })
+    : undefined;
+
   const plan = planFor(harness, {
     baseUrl: proxy?.baseUrl ?? catalog.baseUrl,
     apiKey: proxy?.apiKey ?? key?.key ?? DRY_RUN_KEY,
@@ -785,13 +798,13 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     remoteTransport: options.remoteTransport,
     cwd,
     env: process.env,
-  }, grokHome);
+  }, grokHome, cursorPlugin);
 
   const field = (name: string, value: string): string => `${c("dim", `${name}=`)}${value}`;
   const banner = [
     field("endpoint", c(["bold", "cyan"], endpoint.slug)),
-    field("inference", proxy ? `CLIProxy (${proxy.baseUrl})` : options.mcpOnly ? "native Claude Code account (MCP only)" : "Ditto Router"),
-    field("model", model ?? c("dim", options.mcpOnly ? "(native Claude Code default)" : "(harness default → endpoint routes)")),
+    field("inference", proxy ? `CLIProxy (${proxy.baseUrl})` : options.mcpOnly || mcpOnlyHarness ? `native ${AGENT_LABELS[harness]} account (MCP only)` : "Ditto Router"),
+    field("model", model ?? c("dim", options.mcpOnly || mcpOnlyHarness ? `(native ${AGENT_LABELS[harness]} default)` : "(harness default → endpoint routes)")),
     field("key", key ? `…${key.keyHint || maskKey(key.key ?? "")}` : "(dry run)"),
     field("expires", `${expiresIn}${options.keepKey ? "" : c("dim", " (revoked on exit)")}`),
     budget !== undefined ? field("budget", `${budget.toLocaleString()} tokens`) : undefined,
@@ -803,6 +816,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     .join("  ");
   log(banner);
   if (proxy) log("inference stays on CLIProxy; Ditto provides MCP tools/remote control, without Router inference optimizations or inference traces");
+  else if (mcpOnlyHarness) log(`inference stays on your ${AGENT_LABELS[harness]} account; Ditto provides the endpoint's tools, whose calls are traced at ${c(["underline", "cyan"], endpointURL(endpoint.id))}`);
   else log(`traces: ${c(["underline", "cyan"], endpointURL(endpoint.id))}`);
 
   if (options.dryRun) {
@@ -824,7 +838,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
           // which surface a real launch would ask for, separately.
           toolSurface: mcp ? "mcp" : proxy ? "none" : "router",
           toolSurfaceRequested: wantMcp ? "mcp" : proxy ? "none" : "router",
-          inference: proxy ? "cliproxy" : options.mcpOnly ? "native" : "router",
+          inference: proxy ? "cliproxy" : options.mcpOnly || mcpOnlyHarness ? "native" : "router",
           remoteTransport: options.remoteTransport ?? "cli",
           hooks: hooks?.attachment?.summary ?? [],
           key: { name: keyName, expiresIn, spendLimitTokens: budget ?? null },
@@ -859,10 +873,12 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   };
   await writeSession(nextRecord);
 
-  const remote: RemoteMode = remoteMode(options);
+  // Remote Control needs the harness's turn-boundary hooks, which only the
+  // agents with a hook bridge (remote/hooks.ts) report.
+  const remote: RemoteMode = mcpOnlyHarness ? "off" : remoteMode(options);
   const launchRegistration = {
     sessionId, endpointId: endpoint.id, harness: harness === "claude" ? "claude-code" : harness,
-    inference: proxy || options.mcpOnly ? "native" : "router", transport: options.remoteTransport ?? "cli",
+    inference: proxy || options.mcpOnly || mcpOnlyHarness ? "native" : "router", transport: options.remoteTransport ?? "cli",
     title: explicitLaunchTitle || `${path.basename(cwd)} · ${sessionId.slice(0, 8)}`,
     ...(harness === "claude" && harnessSessionId && isUuid(harnessSessionId) ? { nativeSessionId: harnessSessionId } : {}),
   };

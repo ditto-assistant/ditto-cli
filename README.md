@@ -734,6 +734,17 @@ How the wiring works:
   schemas behind its own `search_tool` / `use_tool`. The Ditto model entry
   sends `X-Ditto-Tool-Surface: mcp`. `--no-mcp` or `grok_tool_surface =
   "router"` keeps the router surface.
+- **Cursor CLI** (`heyditto cursor`, runs `cursor-agent`) keeps inference on
+  your own Cursor account; Ditto supplies only the endpoint's tools. Cursor
+  has no per-launch MCP flag, so they go in a private per-launch plugin
+  (`--plugin-dir`, a `.cursor-plugin/plugin.json` plus `.mcp.json`) and
+  nothing is written to `~/.cursor`. The servers show up as
+  `plugin-ditto-<server>`, and the key is read from
+  `${env:DITTO_ROUTER_MCP_KEY}`. Cursor asks before each MCP call unless
+  `--yolo` (`--force`). A `-p` run cannot answer prompts, so it uses
+  `--force --trust`, and under `client_approvals` Ditto refuses the gated
+  tools for that run (`X-Ditto-Tool-Deny: class:gated`). Remote control and
+  `--headless` are not available for Cursor yet.
 
 ### `codex-app`
 
