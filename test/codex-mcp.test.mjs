@@ -73,11 +73,10 @@ test("planCodex: native MCP attaches the servers, passes the key by env and tell
   assert.equal(router.envSet[MCP_KEY_ENV], undefined);
 });
 
-test("wantsMcp: Codex follows --mcp, then codex_tool_surface, then native MCP; grok has no MCP surface yet", () => {
+test("wantsMcp: Codex follows --mcp, then codex_tool_surface, then native MCP", () => {
   assert.equal(wantsMcp({}, {}, "codex"), true);
   assert.equal(wantsMcp({}, { providerOptions: { codex_tool_surface: "router" } }, "codex"), false);
   assert.equal(wantsMcp({}, { providerOptions: { claude_tool_surface: "router" } }, "codex"), true, "Claude's option does not decide for Codex");
   assert.equal(wantsMcp({ mcp: false }, {}, "codex"), false);
   assert.equal(wantsMcp({ mcp: true }, { providerOptions: { codex_tool_surface: "router" } }, "codex"), true);
-  assert.equal(wantsMcp({ mcp: true }, {}, "grok"), false);
 });

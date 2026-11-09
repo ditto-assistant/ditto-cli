@@ -73,6 +73,8 @@ export interface PlanInput {
   yolo?: boolean;
   yellow?: boolean;
   plan?: boolean;
+  /** Turns run with nobody to answer a permission prompt (-p or --headless). */
+  unattended?: boolean;
   /** Extra argv forwarded verbatim to the harness. */
   passthrough: string[];
   /** Router tool deny rules to forward (claude-deny.ts); Claude only. */

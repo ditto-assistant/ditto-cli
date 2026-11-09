@@ -1,6 +1,7 @@
 import { mkdir, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { MCP_KEY_ENV, type McpAttachment, TOOL_SURFACE_HEADER, TOOL_SURFACE_MCP } from "./claude-mcp.js";
 import { type HarnessPlan, type PlanInput, SESSION_HEADER } from "./types.js";
 
 /** Env var the grok provider reads the endpoint key from. */
@@ -43,15 +44,17 @@ const GROK_SHARED_DIRS = [
 
 /**
  * Creates (if missing) the launch GROK_HOME: the Ditto model config, hooks
- * placeholder, and symlinks to the user's skills/plugins. config.toml and
- * hooks/ditto.json are rewritten on every call — they carry no secrets (the
- * key rides env_key) but do carry launch-scoped settings like the hook
- * socket. Returns the home path.
+ * placeholder, and symlinks to the user's skills/plugins. config.toml is
+ * rewritten whenever `input` is given (the launch), hooks/ditto.json whenever
+ * a hook server is — they carry no secrets (keys ride env vars) but do carry
+ * launch-scoped settings like the attached MCP servers and the hook socket.
+ * A hook refresh passes no input, so it keeps the launch's model and servers.
+ * Returns the home path.
  */
 export async function ensureGrokHome(
   configDir: string,
   sessionId: string,
-  input: PlanInput,
+  input: PlanInput | undefined,
   hookServer?: { socketPath: string; scriptPath: string; nodePath: string },
 ): Promise<string> {
   const home = grokHomeDir(configDir, sessionId);
@@ -66,7 +69,7 @@ export async function ensureGrokHome(
       if (code !== "EEXIST") continue; // missing source or other failure: skip, best effort
     }
   }
-  await writeFile(path.join(home, "config.toml"), `${grokModelConfig(input)}\n`);
+  if (input) await writeFile(path.join(home, "config.toml"), `${[grokModelConfig(input), input.mcp ? grokMcpConfig(input.mcp, Boolean(input.unattended || input.prompt !== undefined)) : ""].filter(Boolean).join("\n\n")}\n`);
   if (hookServer) await writeFile(path.join(home, "hooks", "ditto.json"), grokHookConfig(hookServer));
   return home;
 }
@@ -84,10 +87,43 @@ export function grokModelConfig(input: PlanInput): string {
     `env_key = ${JSON.stringify(GROK_KEY_ENV)}`,
     `context_window = 200000`,
     `env_http_headers = { ${JSON.stringify(SESSION_HEADER)} = ${JSON.stringify(GROK_SESSION_ENV)} }`,
+    // The tools are attached as MCP servers; the router must not inject them again.
+    ...(input.mcp ? [`extra_headers = { ${JSON.stringify(TOOL_SURFACE_HEADER)} = ${JSON.stringify(TOOL_SURFACE_MCP)} }`] : []),
     "",
     "[models]",
     `default = ${JSON.stringify(GROK_MODEL_ID)}`,
   ].join("\n");
+}
+
+/**
+ * Native MCP for grok: each attached server as a `[mcp_servers.<name>]` table
+ * in the launch GROK_HOME, with the key read from MCP_KEY_ENV
+ * (bearer_token_env_var), and `[permission]` rules that put the endpoint's
+ * approval policy into grok's own prompts. Grok names a tool `server__tool`;
+ * ask beats allow, so a server-wide allow plus one ask per gated tool asks
+ * about exactly the calls Ditto would have held. An unattended launch runs
+ * grok with --always-approve, which skips ask rules but never deny rules, so
+ * there the gated tools are denied instead: nobody is there to approve them.
+ */
+export function grokMcpConfig(mcp: McpAttachment, unattended = false): string {
+  const lines: string[] = [];
+  const allow: string[] = [];
+  const ask: string[] = [];
+  for (const server of mcp.attached) {
+    lines.push(
+      `[mcp_servers.${JSON.stringify(server.name)}]`,
+      `url = ${JSON.stringify(server.url)}`,
+      `bearer_token_env_var = ${JSON.stringify(MCP_KEY_ENV)}`,
+      "enabled = true",
+      `headers = { ${Object.entries(server.headers).map(([k, v]) => `${JSON.stringify(k)} = ${JSON.stringify(v)}`).join(", ")} }`,
+      "",
+    );
+    allow.push(`MCPTool(${server.name}__*)`);
+    for (const tool of server.askTools) ask.push(`MCPTool(${server.name}__${tool})`);
+  }
+  lines.push("[permission]", `allow = ${JSON.stringify(allow)}`);
+  if (ask.length) lines.push(`${unattended ? "deny" : "ask"} = ${JSON.stringify(ask)}`);
+  return lines.join("\n");
 }
 
 const GROK_HOOK_EVENTS = ["UserPromptSubmit", "Stop", "PreToolUse"] as const;
@@ -150,7 +186,11 @@ export function planGrok(input: PlanInput, grokHome: string, grokResume = false)
       GROK_MODELS_BASE_URL: input.baseUrl,
       GROK_XAI_API_BASE_URL: input.baseUrl.replace(/\/v1\/?$/, ""),
       XAI_API_KEY: input.apiKey,
+      // The `[model.ditto]` env_key. Unset, grok 1.0.77 sent the gateway no
+      // endpoint key and every turn failed with a 401.
+      [GROK_KEY_ENV]: input.apiKey,
       [GROK_SESSION_ENV]: input.sessionId,
+      ...(input.mcp ? { [MCP_KEY_ENV]: input.mcpApiKey ?? input.apiKey } : {}),
     },
     envUnset: [],
     installHint: "install Grok: curl -fsSL https://grok.com/install | sh (or see https://grok.com)",

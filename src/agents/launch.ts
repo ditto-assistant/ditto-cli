@@ -147,7 +147,7 @@ export function resolveClaudeLaunchDefaults(options: LaunchOptions, defaults: Re
 const DRY_RUN_KEY = "ditto_inf_<minted-at-launch>";
 
 /** Harnesses that can attach an endpoint's tools as their own MCP servers. */
-export const MCP_HARNESSES: readonly Harness[] = ["claude", "codex"];
+export const MCP_HARNESSES: readonly Harness[] = ["claude", "codex", "grok"];
 
 /**
  * `--mcp` / `--no-mcp`, else the endpoint's `<harness>_tool_surface`, else
@@ -707,26 +707,6 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     });
   }
 
-  // grok routes through a launch-scoped GROK_HOME (a real directory on disk,
-  // not argv overrides like codex -c), so it is prepared before the plan and
-  // reused by every later launch of the same session.
-  const grokHome = harness === "grok" && !options.dryRun
-    ? await ensureGrokHome(configDir(), sessionId, {
-        baseUrl: catalog.baseUrl,
-        apiKey: key?.key ?? DRY_RUN_KEY,
-        sessionId,
-        model,
-        resumeId,
-        resumeLast,
-        prompt: options.prompt,
-        yolo: options.yolo,
-        yellow: options.yellow,
-        plan: options.plan,
-        passthrough,
-        env: process.env,
-      })
-    : undefined;
-
   // Native MCP mode reads the endpoint's tool catalog with the key just
   // minted, so what Claude Code attaches is exactly what this key may reach.
   // A catalog that cannot be read falls back to the router's own tools rather
@@ -757,6 +737,28 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
       log(`${note} (${(err as Error).message}); the router keeps this endpoint's tools`);
     }
   }
+
+  // grok routes through a launch-scoped GROK_HOME (a real directory on disk,
+  // not argv overrides like codex -c), so it is prepared before the plan, after the
+  // MCP catalog it attaches, and reused by every later launch of the session.
+  const grokHome = harness === "grok" && !options.dryRun
+    ? await ensureGrokHome(configDir(), sessionId, {
+        baseUrl: catalog.baseUrl,
+        apiKey: key?.key ?? DRY_RUN_KEY,
+        sessionId,
+        model,
+        resumeId,
+        resumeLast,
+        prompt: options.prompt,
+        yolo: options.yolo,
+        yellow: options.yellow,
+        plan: options.plan,
+        passthrough,
+        mcp,
+        unattended: options.prompt !== undefined || options.headless,
+        env: process.env,
+      })
+    : undefined;
 
   // Read once per launch and reused by every turn.
   const harnessVersion = await harnessVersionProbe;
@@ -1021,15 +1023,8 @@ async function runInTerminalWithRemote(harness: Harness, plan: HarnessPlan, ctx:
   }
 
   const hooks = await startHookServer();
-  if (harness === "grok") {
-    await ensureGrokHome(configDir(), ctx.sessionId, {
-      baseUrl: apiBaseURL() + "/v1",
-      apiKey: apiKey,
-      sessionId: ctx.sessionId,
-      passthrough: [],
-      env: process.env,
-    }, { socketPath: hooks.socketPath, scriptPath: hookScriptPath(), nodePath: process.execPath });
-  }
+  // Only the hooks change: the launch wrote this session's model and MCP servers.
+  if (harness === "grok") await ensureGrokHome(configDir(), ctx.sessionId, undefined, { socketPath: hooks.socketPath, scriptPath: hookScriptPath(), nodePath: process.execPath });
   const session = new RemoteSession(
     {
       harness,
@@ -1109,16 +1104,7 @@ async function runHeadless(harness: Harness, ctx: HeadlessRunContext): Promise<n
   const hooks = await startHookServer();
   // grok's hooks come from its launch GROK_HOME; refresh the socket path —
   // it changes every process, and the home persists across launches.
-  if (harness === "grok") {
-    await ensureGrokHome(configDir(), ctx.sessionId, {
-      baseUrl: ctx.baseUrl,
-      apiKey: ctx.apiKey,
-      sessionId: ctx.sessionId,
-      model: ctx.model,
-      passthrough: [],
-      env: process.env,
-    }, { socketPath: hooks.socketPath, scriptPath: hookScriptPath(), nodePath: process.execPath });
-  }
+  if (harness === "grok") await ensureGrokHome(configDir(), ctx.sessionId, undefined, { socketPath: hooks.socketPath, scriptPath: hookScriptPath(), nodePath: process.execPath });
   // Claude's first turn creates the session under our id; later turns resume it.
   let claudeStarted = ctx.claudeStarted ?? ctx.record.launches > 1;
   let codexStarted = ctx.record.launches > 1;
