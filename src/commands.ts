@@ -1551,12 +1551,14 @@ export function registerHarnessCommands(program: Command, addExamples: (c: Comma
       cmd.option("--no-cliproxy", "use the normal inference mode, overriding a resumed CLIProxy session");
     }
     if (harness === "claude" || harness === "grok") cmd.option("--plan", "start in plan mode (--permission-mode plan)");
+    if (harness === "claude" || harness === "codex") {
+      // --mcp first, then --no-mcp: neither flag leaves the endpoint's
+      // <harness>_tool_surface default in charge (commander keeps it undefined).
+      cmd.option("--mcp", `attach the endpoint's tools as ${label} MCP servers, one per app (default unless the endpoint sets ${harness}_tool_surface = "router")`);
+      cmd.option("--no-mcp", "keep the endpoint's tools on the router for this session (Code Mode / injected tools)");
+    }
     if (harness === "claude") {
       cmd.option("--no-hooks", "leave out the Claude Code hooks this repository's .ditto profile declares (claude_hooks)");
-      // --mcp first, then --no-mcp: neither flag leaves the endpoint's
-      // claude_tool_surface default in charge (commander keeps it undefined).
-      cmd.option("--mcp", "attach the endpoint's tools as Claude Code MCP servers, one per app (default unless the endpoint sets claude_tool_surface = \"router\")");
-      cmd.option("--no-mcp", "keep the endpoint's tools on the router for this session (Code Mode / injected tools)");
       cmd.option("--mcp-only", "use your native Claude Code account for inference; Ditto supplies only selected MCP tools and remote control");
       cmd.option("--no-mcp-only", "use Ditto Router inference for this launch, overriding the saved native-account default");
       cmd.addOption(new Option("--remote-transport <transport>", "remote prompt delivery: CLI terminal bridge (default) or MCP Channels (native account only, research preview)").choices(["cli", "channels"]));

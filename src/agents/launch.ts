@@ -99,9 +99,9 @@ export interface LaunchOptions {
    */
   headless?: boolean;
   /**
-   * Claude only: attach the endpoint's tools as Claude Code MCP servers
-   * (`--mcp`) or keep them on the router (`--no-mcp`). Unset follows the
-   * endpoint's `claude_tool_surface` option, else native MCP.
+   * Claude and Codex: attach the endpoint's tools as the agent's own MCP
+   * servers (`--mcp`) or keep them on the router (`--no-mcp`). Unset follows
+   * the endpoint's `<harness>_tool_surface` option, else native MCP.
    */
   mcp?: boolean;
   mcpOnly?: boolean;
@@ -146,14 +146,18 @@ export function resolveClaudeLaunchDefaults(options: LaunchOptions, defaults: Re
 
 const DRY_RUN_KEY = "ditto_inf_<minted-at-launch>";
 
+/** Harnesses that can attach an endpoint's tools as their own MCP servers. */
+export const MCP_HARNESSES: readonly Harness[] = ["claude", "codex"];
+
 /**
- * `--mcp` / `--no-mcp`, else the endpoint's `claude_tool_surface`, else native
- * MCP: Claude Code gets an endpoint's tools as its own servers unless the
+ * `--mcp` / `--no-mcp`, else the endpoint's `<harness>_tool_surface`, else
+ * native MCP: the agent gets an endpoint's tools as its own servers unless the
  * endpoint keeps them on the router (`claude_tool_surface = "router"`).
  */
-export function wantsMcp(options: Pick<LaunchOptions, "mcp">, endpoint: Pick<InferenceEndpoint, "providerOptions">): boolean {
+export function wantsMcp(options: Pick<LaunchOptions, "mcp">, endpoint: Pick<InferenceEndpoint, "providerOptions">, harness: Harness = "claude"): boolean {
+  if (!MCP_HARNESSES.includes(harness)) return false;
   if (options.mcp !== undefined) return options.mcp;
-  return endpoint.providerOptions?.claude_tool_surface !== "router";
+  return endpoint.providerOptions?.[`${harness}_tool_surface`] !== "router";
 }
 
 /**
@@ -198,19 +202,21 @@ async function repoHooks(
 }
 
 /** Someone chose native MCP for this launch, rather than getting it by default. */
-function mcpChosen(options: Pick<LaunchOptions, "mcp">, endpoint: Pick<InferenceEndpoint, "providerOptions">): boolean {
-  return options.mcp === true || endpoint.providerOptions?.claude_tool_surface === "mcp";
+function mcpChosen(options: Pick<LaunchOptions, "mcp">, endpoint: Pick<InferenceEndpoint, "providerOptions">, harness: Harness): boolean {
+  return options.mcp === true || endpoint.providerOptions?.[`${harness}_tool_surface`] === "mcp";
 }
 
 /**
  * The banner's tools field. A fallback to the router is yellow only when MCP
  * was asked for; by default it is as quiet as the log line that explains it.
  */
-function mcpBanner(mcp: ClaudeMcpAttachment | undefined, opts: { dryRun?: boolean; noTools?: boolean; chosen?: boolean }): string {
+function mcpBanner(mcp: ClaudeMcpAttachment | undefined, opts: { dryRun?: boolean; noTools?: boolean; chosen?: boolean; agent: string }): string {
   if (opts.noTools) return c("dim", "none (the endpoint has no tools)");
   if (!mcp) return opts.dryRun ? "mcp (catalog read at launch)" : c(opts.chosen ? "yellow" : "dim", "router (MCP not attached)");
-  return `mcp ${c("dim", `(${mcp.servers} servers, ${mcp.tools} tools; ${mcpApprovalNote(mcp)})`)}`;
+  return `mcp ${c("dim", `(${mcp.servers} servers, ${mcp.tools} tools; ${mcpApprovalNote(mcp, opts.agent)})`)}`;
 }
+
+const AGENT_LABELS: Record<Harness, string> = { claude: "Claude Code", codex: "Codex", grok: "Grok" };
 
 function log(line: string, options?: NoteOptions): void {
   writeNote(`${c("dim", "ditto:")} ${line}\n`, options);
@@ -727,14 +733,14 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   // than launching an agent with none. Native MCP is the default, so the
   // fallback is only flagged when someone asked for MCP; an endpoint the
   // surface refuses (an app's) would otherwise warn on every launch.
-  const wantMcp = harness === "claude" && (options.mcpOnly || wantsMcp(options, endpoint));
-  const chosen = mcpChosen(options, endpoint);
+  const wantMcp = options.mcpOnly || wantsMcp(options, endpoint, harness);
+  const chosen = mcpChosen(options, endpoint, harness);
   let mcp: ClaudeMcpAttachment | undefined;
   let noTools = false;
   if (wantMcp && key?.key) {
     try {
       const mcpCatalog = await fetchMcpCatalog(catalog.baseUrl, key.key, sessionId);
-      const attachment = claudeMcpAttachment(mcpCatalog, sessionId, { yolo: options.yolo, toolDeny: claudeDittoDenyRules(cwd, process.env) });
+      const attachment = claudeMcpAttachment(mcpCatalog, sessionId, { yolo: options.yolo, toolDeny: harness === "claude" ? claudeDittoDenyRules(cwd, process.env) : undefined });
       if (attachment.tools > 0) mcp = attachment;
       else noTools = true;
       for (const line of mcpUnavailableLines(mcpCatalog)) log(c("yellow", line));
@@ -787,7 +793,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     field("expires", `${expiresIn}${options.keepKey ? "" : c("dim", " (revoked on exit)")}`),
     budget !== undefined ? field("budget", `${budget.toLocaleString()} tokens`) : undefined,
     field("session", c("bold", sessionId)),
-    wantMcp ? field("tools", mcpBanner(mcp, { dryRun: options.dryRun, noTools, chosen })) : undefined,
+    wantMcp ? field("tools", mcpBanner(mcp, { dryRun: options.dryRun, noTools, chosen, agent: AGENT_LABELS[harness] })) : undefined,
     hooks?.banner ? field("hooks", hooks.banner) : undefined,
   ]
     .filter(Boolean)
@@ -1083,7 +1089,7 @@ interface HeadlessRunContext extends RemoteRunContext {
   options: LaunchOptions;
   /** grok: the launch GROK_HOME reused by every headless turn. */
   grokHome?: string;
-  /** claude: the endpoint's tools as MCP servers, attached to every turn. */
+  /** claude, codex: the endpoint's tools as MCP servers, attached to every turn. */
   mcp?: ClaudeMcpAttachment;
   /** claude: Ditto's hooks from the repository profile, attached to every turn. */
   hooks?: ClaudeHookAttachment;
