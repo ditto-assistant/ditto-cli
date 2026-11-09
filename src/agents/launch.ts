@@ -217,11 +217,14 @@ function mcpChosen(options: Pick<LaunchOptions, "mcp">, endpoint: Pick<Inference
  * The banner's tools field. A fallback to the router is yellow only when MCP
  * was asked for; by default it is as quiet as the log line that explains it.
  */
-function mcpBanner(mcp: ClaudeMcpAttachment | undefined, opts: { dryRun?: boolean; noTools?: boolean; chosen?: boolean; agent: string; refusesAsked?: boolean }): string {
+function mcpBanner(mcp: ClaudeMcpAttachment | undefined, opts: { dryRun?: boolean; noTools?: boolean; chosen?: boolean; agent: string; refusesAsked?: boolean; rejectsAll?: boolean }): string {
   if (opts.noTools) return c("dim", "none (the endpoint has no tools)");
   if (!mcp) return opts.dryRun ? "mcp (catalog read at launch)" : c(opts.chosen ? "yellow" : "dim", "router (MCP not attached)");
-  // An unattended Grok run refuses what it would have asked about (grok.ts).
-  const note = opts.refusesAsked && mcp.ask.length ? `${mcp.ask.length} gated refused: nobody to approve them` : mcpApprovalNote(mcp, opts.agent);
+  // An unattended Grok run refuses what it would have asked about (grok.ts);
+  // Cursor's -p without --yolo rejects every MCP call, gated or not (cursor.ts).
+  const note = opts.rejectsAll ? "every call rejected: Cursor's -p needs --yolo"
+    : opts.refusesAsked && mcp.ask.length ? `${mcp.ask.length} gated refused: nobody to approve them`
+    : mcpApprovalNote(mcp, opts.agent);
   return `mcp ${c("dim", `(${mcp.servers} servers, ${mcp.tools} tools; ${note})`)}`;
 }
 
@@ -826,6 +829,8 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     env: process.env,
   }, grokHome, cursorPlugin);
 
+  // Cursor's -p rejects every MCP call it cannot ask about unless --force (planCursor).
+  const cursorPRejectsMcp = harness === "cursor" && Boolean(mcp) && options.prompt !== undefined && !options.yolo;
   const field = (name: string, value: string): string => `${c("dim", `${name}=`)}${value}`;
   const banner = [
     field("endpoint", c(["bold", "cyan"], endpoint.slug)),
@@ -835,18 +840,16 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     field("expires", `${expiresIn}${options.keepKey ? "" : c("dim", " (revoked on exit)")}`),
     budget !== undefined ? field("budget", `${budget.toLocaleString()} tokens`) : undefined,
     field("session", c("bold", sessionId)),
-    wantMcp ? field("tools", mcpBanner(mcp, { dryRun: options.dryRun, noTools, chosen, agent: AGENT_LABELS[harness], refusesAsked: harness === "grok" && (options.prompt !== undefined || options.headless) })) : undefined,
+    wantMcp ? field("tools", mcpBanner(mcp, { dryRun: options.dryRun, noTools, chosen, agent: AGENT_LABELS[harness], refusesAsked: harness === "grok" && (options.prompt !== undefined || options.headless), rejectsAll: cursorPRejectsMcp })) : undefined,
     hooks?.banner ? field("hooks", hooks.banner) : undefined,
   ]
     .filter(Boolean)
     .join("  ");
   log(banner);
   if (proxy) log("inference stays on CLIProxy; Ditto provides MCP tools/remote control, without Router inference optimizations or inference traces");
-  if (harness === "cursor" && mcp && options.prompt !== undefined && !options.yolo) {
-    log(c("yellow", "Cursor's -p rejects every MCP call it cannot ask about; pass --yolo (Cursor's --force, which also allows any command) to let it use Ditto's tools"));
-  }
   else if (mcpOnlyHarness) log(`inference stays on your ${AGENT_LABELS[harness]} account; Ditto provides the endpoint's tools, whose calls are traced at ${c(["underline", "cyan"], endpointURL(endpoint.id))}`);
   else log(`traces: ${c(["underline", "cyan"], endpointURL(endpoint.id))}`);
+  if (cursorPRejectsMcp) log(c("yellow", "Cursor's -p rejects every MCP call it cannot ask about; pass --yolo (Cursor's --force, which also allows any command) to let it use Ditto's tools"));
 
   if (options.dryRun) {
     const env = Object.fromEntries(
