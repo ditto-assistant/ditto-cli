@@ -1574,9 +1574,9 @@ export function registerHarnessCommands(program: Command, addExamples: (c: Comma
   heyditto ${harness} -p "summarize this repo" ${harness === "claude" || harness === "cursor" ? "--output-format json" : "--json"}
   heyditto ${harness} --resume              ${harness === "claude" ? "pick a session to reopen (type words to search)" : "reopen the last session in its thread"}${harness === "claude" ? `
   heyditto claude --resume "Ditto Review quality and UX"   resume by title, as claude --resume prints it` : ""}
-  heyditto ${harness} --headless               keep the session reachable from the app without a terminal UI
+${harness === "cursor" ? "" : `  heyditto ${harness} --headless               keep the session reachable from the app without a terminal UI
   heyditto ${harness} --no-remote-control      keep this session local only
-  heyditto ${harness} -- --verbose             forward flags to ${harness}
+`}  heyditto ${harness} -- --verbose             forward flags to ${harness}
   (see also: heyditto ${other})`,
     );
   }
