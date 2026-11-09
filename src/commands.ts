@@ -1570,7 +1570,7 @@ export function registerHarnessCommands(program: Command, addExamples: (c: Comma
       cmd,
       `  heyditto ${harness}                       first run: sign in + pick an endpoint in the browser, then launch
   heyditto ${harness} --endpoint my-endpoint --budget 500000
-  heyditto ${harness} --yellow --worktree feature-x
+  heyditto ${harness} ${harness === "cursor" ? "--yolo" : "--yellow"} --worktree feature-x
   heyditto ${harness} -p "summarize this repo" ${harness === "claude" || harness === "cursor" ? "--output-format json" : "--json"}
   heyditto ${harness} --resume              ${harness === "claude" ? "pick a session to reopen (type words to search)" : "reopen the last session in its thread"}${harness === "claude" ? `
   heyditto claude --resume "Ditto Review quality and UX"   resume by title, as claude --resume prints it` : ""}

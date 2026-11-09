@@ -217,10 +217,12 @@ function mcpChosen(options: Pick<LaunchOptions, "mcp">, endpoint: Pick<Inference
  * The banner's tools field. A fallback to the router is yellow only when MCP
  * was asked for; by default it is as quiet as the log line that explains it.
  */
-function mcpBanner(mcp: ClaudeMcpAttachment | undefined, opts: { dryRun?: boolean; noTools?: boolean; chosen?: boolean; agent: string }): string {
+function mcpBanner(mcp: ClaudeMcpAttachment | undefined, opts: { dryRun?: boolean; noTools?: boolean; chosen?: boolean; agent: string; refusesAsked?: boolean }): string {
   if (opts.noTools) return c("dim", "none (the endpoint has no tools)");
   if (!mcp) return opts.dryRun ? "mcp (catalog read at launch)" : c(opts.chosen ? "yellow" : "dim", "router (MCP not attached)");
-  return `mcp ${c("dim", `(${mcp.servers} servers, ${mcp.tools} tools; ${mcpApprovalNote(mcp, opts.agent)})`)}`;
+  // An unattended Grok or Cursor run refuses what it would have asked about (grok.ts, cursor.ts).
+  const note = opts.refusesAsked && mcp.ask.length ? `${mcp.ask.length} gated refused: nobody to approve them` : mcpApprovalNote(mcp, opts.agent);
+  return `mcp ${c("dim", `(${mcp.servers} servers, ${mcp.tools} tools; ${note})`)}`;
 }
 
 const AGENT_LABELS: Record<Harness, string> = { claude: "Claude Code", codex: "Codex", grok: "Grok", cursor: "Cursor CLI" };
@@ -779,9 +781,15 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     throw new Error(`${endpoint.slug} has no tools to attach, and ${AGENT_LABELS[harness]} gets nothing else from Ditto`);
   }
   // Cursor CLI loads the attachment as a per-launch plugin (cursor.ts).
-  const cursorPlugin = harness === "cursor" && mcp && !options.dryRun
-    ? writeCursorPlugin(mcp, { unattended: options.prompt !== undefined })
-    : undefined;
+  let cursorPlugin: string | undefined;
+  if (harness === "cursor" && mcp && key) {
+    try {
+      cursorPlugin = writeCursorPlugin(mcp, { unattended: options.prompt !== undefined });
+    } catch (err) {
+      if (!options.keepKey) await revokeKey(endpoint.id, key.id).catch(() => log(`could not revoke session key …${key.keyHint}; it expires in ${expiresIn}`));
+      throw err;
+    }
+  }
 
   const plan = planFor(harness, {
     baseUrl: proxy?.baseUrl ?? catalog.baseUrl,
@@ -816,7 +824,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     field("expires", `${expiresIn}${options.keepKey ? "" : c("dim", " (revoked on exit)")}`),
     budget !== undefined ? field("budget", `${budget.toLocaleString()} tokens`) : undefined,
     field("session", c("bold", sessionId)),
-    wantMcp ? field("tools", mcpBanner(mcp, { dryRun: options.dryRun, noTools, chosen, agent: AGENT_LABELS[harness] })) : undefined,
+    wantMcp ? field("tools", mcpBanner(mcp, { dryRun: options.dryRun, noTools, chosen, agent: AGENT_LABELS[harness], refusesAsked: (harness === "grok" || harness === "cursor") && (options.prompt !== undefined || options.headless) })) : undefined,
     hooks?.banner ? field("hooks", hooks.banner) : undefined,
   ]
     .filter(Boolean)
