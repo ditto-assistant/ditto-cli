@@ -122,6 +122,13 @@ export interface ClaudeMcpAttachment {
   attached: McpAttachedServer[];
   /** Catalog servers left out because their name is unsafe in an agent's config. */
   skipped: string[];
+  /**
+   * The agent, not Ditto, stops gated calls (client approvals without
+   * --yolo). A server can advertise a tool after launch, so agent rules must
+   * then name every tool they allow: a server-wide allow would run a gated
+   * tool nobody listed, and Ditto holds nothing on this surface.
+   */
+  clientAsks: boolean;
   servers: number;
   tools: number;
   /** Tools Ditto's policy would hold for a person. */
@@ -232,6 +239,7 @@ export function claudeMcpAttachment(catalog: McpCatalog, sessionId: string, opts
     ask,
     attached,
     skipped,
+    clientAsks: catalog.clientApprovals && !opts.yolo,
     servers: Object.keys(mcpServers).length,
     tools,
     gated,

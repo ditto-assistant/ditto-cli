@@ -1,6 +1,7 @@
 import { mkdir, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { TOOL_DENY_HEADER } from "./claude-deny.js";
 import { MCP_KEY_ENV, type McpAttachment, TOOL_SURFACE_HEADER, TOOL_SURFACE_MCP } from "./claude-mcp.js";
 import { type HarnessPlan, type PlanInput, SESSION_HEADER } from "./types.js";
 
@@ -109,16 +110,26 @@ export function grokMcpConfig(mcp: McpAttachment, unattended = false): string {
   const lines: string[] = [];
   const allow: string[] = [];
   const ask: string[] = [];
+  // An unattended run's --always-approve would also run a gated tool the
+  // server advertises after launch, which no rule here names: Ditto refuses
+  // those (tighten-only deny header, toolgate class:gated).
+  const denyUnlisted = unattended && mcp.clientAsks;
   for (const server of mcp.attached) {
+    const headers = denyUnlisted
+      ? { ...server.headers, [TOOL_DENY_HEADER]: [server.headers[TOOL_DENY_HEADER], "class:gated"].filter(Boolean).join(",") }
+      : server.headers;
     lines.push(
       `[mcp_servers.${JSON.stringify(server.name)}]`,
       `url = ${JSON.stringify(server.url)}`,
       `bearer_token_env_var = ${JSON.stringify(MCP_KEY_ENV)}`,
       "enabled = true",
-      `headers = { ${Object.entries(server.headers).map(([k, v]) => `${JSON.stringify(k)} = ${JSON.stringify(v)}`).join(", ")} }`,
+      `headers = { ${Object.entries(headers).map(([k, v]) => `${JSON.stringify(k)} = ${JSON.stringify(v)}`).join(", ")} }`,
       "",
     );
-    allow.push(`MCPTool(${server.name}__*)`);
+    // When grok decides gated calls, a tool it was not told about falls to
+    // its default (ask) instead of a server-wide allow (see clientAsks).
+    if (mcp.clientAsks) for (const tool of server.allowTools) allow.push(`MCPTool(${server.name}__${tool})`);
+    else allow.push(`MCPTool(${server.name}__*)`);
     for (const tool of server.askTools) ask.push(`MCPTool(${server.name}__${tool})`);
   }
   lines.push("[permission]", `allow = ${JSON.stringify(allow)}`);

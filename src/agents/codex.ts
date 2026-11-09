@@ -20,9 +20,11 @@ export function tomlInlineTable(entries: Array<[string, string]>): string {
  * every override turns its server on. The key stays out of argv: Codex reads
  * it from MCP_KEY_ENV (bearer_token_env_var).
  *
- * Approvals follow the attachment: tools Ditto holds itself, or that bypass
- * runs unasked, are "approve"; the rest are "prompt", so Codex asks about
- * exactly the calls Ditto would have held.
+ * Approvals follow the attachment: when Ditto holds gated calls itself, or
+ * bypass runs them, everything is "approve". Under client approvals the
+ * default is "prompt" and only the listed ungated tools are "approve", so
+ * Codex asks about the calls Ditto would have held, including any tool the
+ * server advertises after launch.
  */
 export function codexMcpArgs(mcp: McpAttachment): string[] {
   const args: string[] = [];
@@ -34,11 +36,14 @@ export function codexMcpArgs(mcp: McpAttachment): string[] {
       ["url", tomlString(server.url)],
       ["bearer_token_env_var", tomlString(MCP_KEY_ENV)],
       ["http_headers", tomlInlineTable(Object.entries(server.headers))],
-      ["default_tools_approval_mode", tomlString("approve")],
+      // When Codex decides gated calls, a tool the server advertises after
+      // launch prompts by default; only the listed ungated ones are approved.
+      ["default_tools_approval_mode", tomlString(mcp.clientAsks ? "prompt" : "approve")],
     ];
-    if (server.askTools.length) {
-      const prompt = `{${tomlString("approval_mode")}=${tomlString("prompt")}}`;
-      fields.push(["tools", `{${server.askTools.map((t) => `${tomlString(t)}=${prompt}`).join(",")}}`]);
+    const [mode, listed] = mcp.clientAsks ? ["approve", server.allowTools] : ["prompt", server.askTools];
+    if (listed.length) {
+      const rule = `{${tomlString("approval_mode")}=${tomlString(mode)}}`;
+      fields.push(["tools", `{${listed.map((t) => `${tomlString(t)}=${rule}`).join(",")}}`]);
     }
     args.push("-c", `mcp_servers.${server.name}={${fields.map(([k, v]) => `${k}=${v}`).join(",")}}`);
   }
