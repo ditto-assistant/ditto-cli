@@ -528,6 +528,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   if (MCP_ONLY_HARNESSES.includes(harness)) {
     if (options.mcp === false) throw new Error(`${AGENT_LABELS[harness]} gets Ditto only as MCP tools; --no-mcp would attach nothing`);
     if (options.headless) throw new Error(`--headless is not supported for ${AGENT_LABELS[harness]} yet`);
+    if (options.yellow) throw new Error(`--yellow is not supported for ${AGENT_LABELS[harness]}; use --yolo or its own prompts`);
   }
   if ([options.yolo, options.yellow, options.plan].filter(Boolean).length > 1) {
     throw new Error("choose only one of --yolo, --yellow, --plan");
@@ -721,7 +722,9 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   // than launching an agent with none. Native MCP is the default, so the
   // fallback is only flagged when someone asked for MCP; an endpoint the
   // surface refuses (an app's) would otherwise warn on every launch.
-  const wantMcp = options.mcpOnly || wantsMcp(options, endpoint, harness);
+  // An MCP-only harness has nothing else from Ditto, whatever the endpoint's
+  // <harness>_tool_surface says (--no-mcp was refused above).
+  const wantMcp = options.mcpOnly || mcpOnlyHarness || wantsMcp(options, endpoint, harness);
   const chosen = mcpChosen(options, endpoint, harness);
   let mcp: ClaudeMcpAttachment | undefined;
   let noTools = false;
@@ -771,6 +774,10 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   // Read once per launch and reused by every turn.
   const harnessVersion = await harnessVersionProbe;
 
+  if (mcpOnlyHarness && !mcp && key) {
+    if (!options.keepKey) await revokeKey(endpoint.id, key.id).catch(() => log(`could not revoke session key …${key.keyHint}; it expires in ${expiresIn}`));
+    throw new Error(`${endpoint.slug} has no tools to attach, and ${AGENT_LABELS[harness]} gets nothing else from Ditto`);
+  }
   // Cursor CLI loads the attachment as a per-launch plugin (cursor.ts).
   const cursorPlugin = harness === "cursor" && mcp && !options.dryRun
     ? writeCursorPlugin(mcp, { unattended: options.prompt !== undefined })

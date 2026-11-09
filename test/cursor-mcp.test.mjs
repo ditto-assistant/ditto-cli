@@ -76,3 +76,20 @@ test("wantsMcp: Cursor CLI follows --mcp, then cursor_tool_surface, then native 
   assert.equal(wantsMcp({}, {}, "cursor"), true);
   assert.equal(wantsMcp({ mcp: false }, {}, "cursor"), false);
 });
+
+test("a later launch sweeps a killed CLI's plugin directory, never a live one's", async () => {
+  const { mkdtempSync, mkdirSync, utimesSync } = await import("node:fs");
+  const { sweepStaleSettings } = await import("../dist/agents/claude-mcp.js");
+  const tmp = mkdtempSync(path.join(os.tmpdir(), "cursor-sweep-"));
+  const dead = path.join(tmp, "ditto-cursor-999991-abc");
+  const live = path.join(tmp, "ditto-cursor-999992-abc");
+  const other = path.join(tmp, "ditto-claude-settings-999991-abc");
+  for (const d of [dead, live, other]) {
+    mkdirSync(d);
+    utimesSync(d, new Date(0), new Date(0));
+  }
+  sweepStaleSettings(tmp, (pid) => pid === 999992, Date.now(), "ditto-cursor-");
+  assert.equal(existsSync(dead), false);
+  assert.equal(existsSync(live), true);
+  assert.equal(existsSync(other), true, "only this prefix is swept");
+});

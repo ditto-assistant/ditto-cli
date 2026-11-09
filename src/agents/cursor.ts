@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:f
 import os from "node:os";
 import path from "node:path";
 import { TOOL_DENY_HEADER } from "./claude-deny.js";
-import { MCP_KEY_ENV, type McpAttachment } from "./claude-mcp.js";
+import { MCP_KEY_ENV, type McpAttachment, sweepStaleSettings } from "./claude-mcp.js";
 import type { HarnessPlan, PlanInput } from "./types.js";
 
 /**
@@ -43,14 +43,17 @@ export function cursorMcpConfig(mcp: McpAttachment, opts: { unattended?: boolean
 
 /** Plugin directories made by this process, removed when it exits. */
 const pluginRoots: string[] = [];
+const PLUGIN_PREFIX = "ditto-cursor-";
 
 /**
  * Writes the launch's plugin into a private temporary directory and returns
  * its path. It holds no secret, but it is the session's tool wiring, so it is
- * 0700 and removed when the CLI exits.
+ * 0700 and removed when the CLI exits; one a killed CLI left behind is swept
+ * by a later launch once its process is gone, like Claude's settings copies.
  */
 export function writeCursorPlugin(mcp: McpAttachment, opts: { unattended?: boolean } = {}, tmp: string = os.tmpdir()): string {
-  const root = mkdtempSync(path.join(tmp, `ditto-cursor-${process.pid}-`));
+  if (pluginRoots.length === 0) sweepStaleSettings(tmp, undefined, undefined, PLUGIN_PREFIX);
+  const root = mkdtempSync(path.join(tmp, `${PLUGIN_PREFIX}${process.pid}-`));
   chmodSync(root, 0o700);
   if (pluginRoots.push(root) === 1) process.once("exit", () => { for (const dir of pluginRoots) rmSync(dir, { recursive: true, force: true }); });
   const dir = path.join(root, CURSOR_PLUGIN_NAME);
