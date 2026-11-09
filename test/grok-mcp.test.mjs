@@ -39,6 +39,21 @@ test("grokMcpConfig: client approvals ask for exactly the gated tools, and --yol
   assert.ok(!grokMcpConfig(claudeMcpAttachment(catalog(true), "s", { yolo: true })).includes("ask ="));
 });
 
+test("grokMcpConfig: an unattended run (always-approve) denies the gated tools instead of asking", () => {
+  const mcp = claudeMcpAttachment(catalog(true), "s");
+  const toml = grokMcpConfig(mcp, true);
+  assert.match(toml, /\ndeny = \["MCPTool\(ditto-github__delete_repo\)"\]$/);
+  assert.ok(!toml.includes("ask ="));
+  assert.ok(!grokMcpConfig(claudeMcpAttachment(catalog(true), "s", { yolo: true }), true).includes("deny ="), "--yolo chose to run them");
+});
+
+test("ensureGrokHome denies gated tools for a -p launch", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "grok-mcp-"));
+  const home = await ensureGrokHome(dir, "s", { ...base, prompt: "hi", mcp: claudeMcpAttachment(catalog(true), "s") });
+  assert.match(readFileSync(path.join(home, "config.toml"), "utf8"), /\ndeny = \["MCPTool\(ditto-github__delete_repo\)"\]/);
+  assert.ok(planGrok({ ...base, prompt: "hi" }, home).args.includes("--always-approve"), "the reason: -p runs always-approve");
+});
+
 test("grokModelConfig tells the router the tools are attached only when they are", () => {
   const mcp = claudeMcpAttachment(catalog(false), "s");
   assert.ok(grokModelConfig({ ...base, mcp }).includes(`extra_headers = { "${TOOL_SURFACE_HEADER}" = "mcp" }`));

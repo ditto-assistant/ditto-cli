@@ -69,7 +69,7 @@ export async function ensureGrokHome(
       if (code !== "EEXIST") continue; // missing source or other failure: skip, best effort
     }
   }
-  if (input) await writeFile(path.join(home, "config.toml"), `${[grokModelConfig(input), input.mcp ? grokMcpConfig(input.mcp) : ""].filter(Boolean).join("\n\n")}\n`);
+  if (input) await writeFile(path.join(home, "config.toml"), `${[grokModelConfig(input), input.mcp ? grokMcpConfig(input.mcp, Boolean(input.unattended || input.prompt !== undefined)) : ""].filter(Boolean).join("\n\n")}\n`);
   if (hookServer) await writeFile(path.join(home, "hooks", "ditto.json"), grokHookConfig(hookServer));
   return home;
 }
@@ -101,9 +101,11 @@ export function grokModelConfig(input: PlanInput): string {
  * (bearer_token_env_var), and `[permission]` rules that put the endpoint's
  * approval policy into grok's own prompts. Grok names a tool `server__tool`;
  * ask beats allow, so a server-wide allow plus one ask per gated tool asks
- * about exactly the calls Ditto would have held.
+ * about exactly the calls Ditto would have held. An unattended launch runs
+ * grok with --always-approve, which skips ask rules but never deny rules, so
+ * there the gated tools are denied instead: nobody is there to approve them.
  */
-export function grokMcpConfig(mcp: McpAttachment): string {
+export function grokMcpConfig(mcp: McpAttachment, unattended = false): string {
   const lines: string[] = [];
   const allow: string[] = [];
   const ask: string[] = [];
@@ -120,7 +122,7 @@ export function grokMcpConfig(mcp: McpAttachment): string {
     for (const tool of server.askTools) ask.push(`MCPTool(${server.name}__${tool})`);
   }
   lines.push("[permission]", `allow = ${JSON.stringify(allow)}`);
-  if (ask.length) lines.push(`ask = ${JSON.stringify(ask)}`);
+  if (ask.length) lines.push(`${unattended ? "deny" : "ask"} = ${JSON.stringify(ask)}`);
   return lines.join("\n");
 }
 

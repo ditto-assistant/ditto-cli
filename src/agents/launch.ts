@@ -755,6 +755,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
         plan: options.plan,
         passthrough,
         mcp,
+        unattended: options.prompt !== undefined || options.headless,
         env: process.env,
       })
     : undefined;
