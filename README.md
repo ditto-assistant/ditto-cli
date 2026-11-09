@@ -741,9 +741,11 @@ How the wiring works:
   nothing is written to `~/.cursor`. The servers show up as
   `plugin-ditto-<server>`, and the key is read from
   `${env:DITTO_ROUTER_MCP_KEY}`. Cursor asks before each MCP call unless
-  `--yolo` (`--force`). A `-p` run cannot answer prompts, so it uses
-  `--force --trust`, and under `client_approvals` Ditto refuses the gated
-  tools for that run (`X-Ditto-Tool-Deny: class:gated`). Remote control and
+  `--yolo` (`--force`). A `-p` run adds no Cursor-wide flag of its
+  own: Cursor's `-p` edits and runs commands, but rejects every MCP call it
+  cannot ask about, so Ditto's tools need `--yolo` there (an explicit choice,
+  since `--force` also allows any command). An untrusted workspace needs
+  Cursor's own `--trust`. Remote control and
   `--headless` are not available for Cursor yet.
 
 ### `codex-app`

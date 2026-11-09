@@ -220,7 +220,7 @@ function mcpChosen(options: Pick<LaunchOptions, "mcp">, endpoint: Pick<Inference
 function mcpBanner(mcp: ClaudeMcpAttachment | undefined, opts: { dryRun?: boolean; noTools?: boolean; chosen?: boolean; agent: string; refusesAsked?: boolean }): string {
   if (opts.noTools) return c("dim", "none (the endpoint has no tools)");
   if (!mcp) return opts.dryRun ? "mcp (catalog read at launch)" : c(opts.chosen ? "yellow" : "dim", "router (MCP not attached)");
-  // An unattended Grok or Cursor run refuses what it would have asked about (grok.ts, cursor.ts).
+  // An unattended Grok run refuses what it would have asked about (grok.ts).
   const note = opts.refusesAsked && mcp.ask.length ? `${mcp.ask.length} gated refused: nobody to approve them` : mcpApprovalNote(mcp, opts.agent);
   return `mcp ${c("dim", `(${mcp.servers} servers, ${mcp.tools} tools; ${note})`)}`;
 }
@@ -788,7 +788,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   let cursorPlugin: string | undefined;
   if (harness === "cursor" && mcp && key) {
     try {
-      cursorPlugin = writeCursorPlugin(mcp, { unattended: options.prompt !== undefined });
+      cursorPlugin = writeCursorPlugin(mcp);
     } catch (err) {
       if (!options.keepKey) await revokeKey(endpoint.id, key.id).catch(() => log(`could not revoke session key …${key.keyHint}; it expires in ${expiresIn}`));
       throw err;
@@ -835,13 +835,16 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     field("expires", `${expiresIn}${options.keepKey ? "" : c("dim", " (revoked on exit)")}`),
     budget !== undefined ? field("budget", `${budget.toLocaleString()} tokens`) : undefined,
     field("session", c("bold", sessionId)),
-    wantMcp ? field("tools", mcpBanner(mcp, { dryRun: options.dryRun, noTools, chosen, agent: AGENT_LABELS[harness], refusesAsked: (harness === "grok" || harness === "cursor") && (options.prompt !== undefined || options.headless) })) : undefined,
+    wantMcp ? field("tools", mcpBanner(mcp, { dryRun: options.dryRun, noTools, chosen, agent: AGENT_LABELS[harness], refusesAsked: harness === "grok" && (options.prompt !== undefined || options.headless) })) : undefined,
     hooks?.banner ? field("hooks", hooks.banner) : undefined,
   ]
     .filter(Boolean)
     .join("  ");
   log(banner);
   if (proxy) log("inference stays on CLIProxy; Ditto provides MCP tools/remote control, without Router inference optimizations or inference traces");
+  if (harness === "cursor" && mcp && options.prompt !== undefined && !options.yolo) {
+    log(c("yellow", "Cursor's -p rejects every MCP call it cannot ask about; pass --yolo (Cursor's --force, which also allows any command) to let it use Ditto's tools"));
+  }
   else if (mcpOnlyHarness) log(`inference stays on your ${AGENT_LABELS[harness]} account; Ditto provides the endpoint's tools, whose calls are traced at ${c(["underline", "cyan"], endpointURL(endpoint.id))}`);
   else log(`traces: ${c(["underline", "cyan"], endpointURL(endpoint.id))}`);
 
@@ -984,7 +987,9 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
       const empty = harness === "claude" && harnessSessionId !== undefined && plan.args.includes(harnessSessionId) &&
         !(await findTranscriptById(harnessSessionId, cwd));
       if (empty) log(`nothing was sent, so there is no conversation to resume ${c("dim", "(heyditto claude --resume lists the ones there are)")}`);
-      else logResumeHint(harness, sessionId);
+      // A Cursor session without its own chat id cannot be resumed by name
+      // (the launch refuses it), so it gets no hint that would fail.
+      else if (harness !== "cursor" || harnessSessionId) logResumeHint(harness, sessionId);
     }
     await writeSession({ ...nextRecord, endedAt: new Date().toISOString(), exitCode });
   }

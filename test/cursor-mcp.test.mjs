@@ -36,15 +36,9 @@ test("cursorMcpConfig: one url server per source, the key only as ${env:…}", (
   });
 });
 
-test("cursorMcpConfig: an unattended run refuses gated tools on Ditto's side only when Cursor would have been asked", () => {
-  const asked = JSON.parse(cursorMcpConfig(claudeMcpAttachment(catalog(true), "s"), { unattended: true }));
-  assert.equal(asked.mcpServers.ditto.headers["X-Ditto-Tool-Deny"], "class:gated");
-  const interactive = JSON.parse(cursorMcpConfig(claudeMcpAttachment(catalog(true), "s")));
-  assert.equal(interactive.mcpServers.ditto.headers["X-Ditto-Tool-Deny"], undefined, "a person is there to answer Cursor's prompt");
-  const held = JSON.parse(cursorMcpConfig(claudeMcpAttachment(catalog(false), "s"), { unattended: true }));
-  assert.equal(held.mcpServers.ditto.headers["X-Ditto-Tool-Deny"], undefined, "Ditto holds gated calls itself");
-  const yolo = JSON.parse(cursorMcpConfig(claudeMcpAttachment(catalog(true), "s", { yolo: true }), { unattended: true }));
-  assert.equal(yolo.mcpServers.ditto.headers["X-Ditto-Tool-Deny"], undefined, "--yolo chose to run them");
+test("cursorMcpConfig never adds a deny header of its own: Cursor asks, or --yolo runs", () => {
+  const config = JSON.parse(cursorMcpConfig(claudeMcpAttachment(catalog(true), "s")));
+  assert.equal(config.mcpServers.ditto.headers["X-Ditto-Tool-Deny"], undefined);
 });
 
 test("writeCursorPlugin: a private plugin directory named for the server prefix, no key on disk", () => {
@@ -67,8 +61,9 @@ test("planCursor: plugin, resume and permission forms; the key only in env", () 
 
   assert.deepEqual(planCursor({ ...base, resumeLast: true, model: "sonnet-5", plan: true }).args, ["--continue", "--model", "sonnet-5", "--plan"]);
   assert.deepEqual(planCursor({ ...base, resumeId: "chat-1", yolo: true }).args, ["--resume", "chat-1", "--force"]);
-  assert.deepEqual(planCursor({ ...base, prompt: "hi" }).args, ["--force", "--trust", "-p", "hi"], "a -p run cannot answer a prompt");
-  assert.deepEqual(planCursor({ ...base, prompt: "hi", passthrough: ["--output-format", "json"] }).args.slice(-4), ["-p", "hi", "--output-format", "json"], "the prompt follows -p");
+  assert.deepEqual(planCursor({ ...base, prompt: "hi" }).args, ["-p", "hi"], "-p adds no Cursor-wide --force or --trust of its own");
+  assert.deepEqual(planCursor({ ...base, prompt: "hi", yolo: true }).args, ["--force", "-p", "hi"], "only an explicit --yolo forces");
+  assert.deepEqual(planCursor({ ...base, prompt: "hi", passthrough: ["--output-format", "json"] }).args, ["-p", "hi", "--output-format", "json"], "the prompt follows -p");
   assert.throws(() => planCursor({ ...base, yellow: true }), /--yellow is not supported/);
   assert.deepEqual(planCursor(base).envSet, {}, "no tools, no MCP key");
 });
