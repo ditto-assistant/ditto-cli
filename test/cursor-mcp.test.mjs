@@ -68,6 +68,7 @@ test("planCursor: plugin, resume and permission forms; the key only in env", () 
   assert.deepEqual(planCursor({ ...base, resumeLast: true, model: "sonnet-5", plan: true }).args, ["--continue", "--model", "sonnet-5", "--plan"]);
   assert.deepEqual(planCursor({ ...base, resumeId: "chat-1", yolo: true }).args, ["--resume", "chat-1", "--force"]);
   assert.deepEqual(planCursor({ ...base, prompt: "hi" }).args, ["--force", "--trust", "-p", "hi"], "a -p run cannot answer a prompt");
+  assert.deepEqual(planCursor({ ...base, prompt: "hi", passthrough: ["--output-format", "json"] }).args.slice(-4), ["-p", "hi", "--output-format", "json"], "the prompt follows -p");
   assert.throws(() => planCursor({ ...base, yellow: true }), /--yellow is not supported/);
   assert.deepEqual(planCursor(base).envSet, {}, "no tools, no MCP key");
 });

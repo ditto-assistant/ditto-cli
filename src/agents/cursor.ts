@@ -93,7 +93,7 @@ export function planCursor(input: PlanInput, pluginDir?: string): HarnessPlan {
     // A -p run cannot answer a prompt: Cursor rejects every MCP call without
     // --force, and an untrusted workspace would wait for a trust answer.
     if (!input.yolo) args.push("--force");
-    args.push("--trust", "-p", ...input.passthrough, input.prompt);
+    args.push("--trust", "-p", input.prompt, ...input.passthrough);
   } else {
     args.push(...input.passthrough);
   }
