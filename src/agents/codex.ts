@@ -40,7 +40,8 @@ export function codexMcpArgs(mcp: McpAttachment): string[] {
       // launch prompts by default; only the listed ungated ones are approved.
       ["default_tools_approval_mode", tomlString(mcp.clientAsks ? "prompt" : "approve")],
     ];
-    const [mode, listed] = mcp.clientAsks ? ["approve", server.allowTools] : ["prompt", server.askTools];
+    const mode = mcp.clientAsks ? "approve" : "prompt";
+    const listed = mcp.clientAsks ? server.allowTools : server.askTools;
     if (listed.length) {
       const rule = `{${tomlString("approval_mode")}=${tomlString(mode)}}`;
       fields.push(["tools", `{${listed.map((t) => `${tomlString(t)}=${rule}`).join(",")}}`]);
