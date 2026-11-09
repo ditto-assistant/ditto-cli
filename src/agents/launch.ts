@@ -744,6 +744,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
       if (attachment.tools > 0) mcp = attachment;
       else noTools = true;
       for (const line of mcpUnavailableLines(mcpCatalog)) log(c("yellow", line));
+      for (const name of attachment.skipped) log(c("yellow", `MCP server ${JSON.stringify(name)} left out: its name cannot be used in an agent's config`));
     } catch (err) {
       if (options.mcpOnly || proxy) {
         if (!options.keepKey) {

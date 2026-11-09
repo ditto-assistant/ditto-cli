@@ -44,10 +44,17 @@ test("codexMcpArgs: client approvals prompt for exactly what Ditto would hold, a
   assert.ok(yolo.every((a) => !a.includes("prompt")));
 });
 
-test("codexMcpArgs: a server name that is not a bare TOML key is never spliced into the -c path", () => {
-  const mcp = claudeMcpAttachment(catalog(false), "s");
-  mcp.attached.push({ name: "evil.model_provider", url: "https://x", headers: {}, allowTools: ["t"], askTools: [] });
-  assert.ok(codexMcpArgs(mcp).every((a) => !a.includes("evil")));
+test("an unsafe server name is left out of the attachment for every harness, and reported", () => {
+  const cat = catalog(false);
+  cat.servers.push({ name: "evil.model_provider", url: "https://router.test/v1/mcp/x", tools: [{ name: "t", tier: "read", approval: false }] });
+  const mcp = claudeMcpAttachment(cat, "s");
+  assert.deepEqual(mcp.skipped, ["evil.model_provider"]);
+  assert.equal(mcp.servers, 2, "counts describe only what is attached");
+  assert.equal(mcp.tools, 3);
+  assert.ok(!mcp.config.includes("evil") && !mcp.allow.some((r) => r.includes("evil")));
+  const args = codexMcpArgs(mcp);
+  assert.equal(args.length, mcp.attached.length * 2, "Codex renders every attached server");
+  assert.ok(args.every((a) => !a.includes("evil")));
 });
 
 test("planCodex: native MCP attaches the servers, passes the key by env and tells the router", () => {

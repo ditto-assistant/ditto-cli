@@ -120,6 +120,8 @@ export interface ClaudeMcpAttachment {
   ask: string[];
   /** The same servers and policy, for every other harness. */
   attached: McpAttachedServer[];
+  /** Catalog servers left out because their name is unsafe in an agent's config. */
+  skipped: string[];
   servers: number;
   tools: number;
   /** Tools Ditto's policy would hold for a person. */
@@ -129,6 +131,14 @@ export interface ClaudeMcpAttachment {
 
 /** The catalog attached to a launch, whichever harness renders it. */
 export type McpAttachment = ClaudeMcpAttachment;
+
+/**
+ * A server name every agent's config can carry as a bare key: Codex splits
+ * `-c` paths on dots, and tool rules join the name with "__". The backend only
+ * serves names like this (mcpServerName); anything else is left out, the same
+ * way for every harness, rather than spliced into a config path.
+ */
+const SAFE_SERVER_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/;
 
 /** Claude Code server name for a catalog server: the built-ins keep "ditto", the rest are "ditto-<source>". */
 export function claudeServerName(server: string): string {
@@ -176,10 +186,15 @@ export function claudeMcpAttachment(catalog: McpCatalog, sessionId: string, opts
   const attached: McpAttachedServer[] = [];
   const allow: string[] = [];
   const ask: string[] = [];
+  const skipped: string[] = [];
   let tools = 0;
   let gated = 0;
   for (const server of catalog.servers) {
     if (server.tools.length === 0) continue;
+    if (!SAFE_SERVER_NAME.test(server.name)) {
+      skipped.push(server.name);
+      continue;
+    }
     const name = claudeServerName(server.name);
     const headers: Record<string, string> = { "X-Ditto-Session-Id": sessionId, ...(opts.toolDeny?.length ? { [TOOL_DENY_HEADER]: opts.toolDeny.join(",") } : {}) };
     mcpServers[name] = {
@@ -216,6 +231,7 @@ export function claudeMcpAttachment(catalog: McpCatalog, sessionId: string, opts
     allow,
     ask,
     attached,
+    skipped,
     servers: Object.keys(mcpServers).length,
     tools,
     gated,

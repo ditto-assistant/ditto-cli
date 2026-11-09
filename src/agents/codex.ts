@@ -26,9 +26,9 @@ export function tomlInlineTable(entries: Array<[string, string]>): string {
  */
 export function codexMcpArgs(mcp: McpAttachment): string[] {
   const args: string[] = [];
+  // Names are bare keys (claudeMcpAttachment drops any other), so they can
+  // sit in the dotted -c path as they are.
   for (const server of mcp.attached) {
-    // Codex splits the -c key on dots, so the name must be a bare TOML key.
-    if (!/^[A-Za-z0-9_-]+$/.test(server.name)) continue;
     const fields: Array<[string, string]> = [
       ["enabled", "true"],
       ["url", tomlString(server.url)],
