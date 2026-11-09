@@ -794,8 +794,9 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
       throw err;
     }
     // Last, once nothing above can abort the launch: a fresh session opens a
-    // chat of its own in the user's Cursor account.
-    if (!record) {
+    // chat of its own in the user's Cursor account. --continue means Cursor's
+    // newest chat in this directory, so it opens none.
+    if (!record && !resumeLast) {
       harnessSessionId = resumeId = createCursorChat(cwd);
       if (!harnessSessionId) log(c("yellow", "Cursor did not create a chat id; this session cannot be resumed with heyditto cursor --resume"));
     }
@@ -861,7 +862,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
           sessionId,
           // A dry run reads no catalog, so the plan above is the router's; say
           // which surface a real launch would ask for, separately.
-          toolSurface: mcp ? "mcp" : proxy ? "none" : "router",
+          toolSurface: mcp ? "mcp" : proxy || mcpOnlyHarness ? "none" : "router",
           toolSurfaceRequested: wantMcp ? "mcp" : proxy ? "none" : "router",
           inference: proxy ? "cliproxy" : options.mcpOnly || mcpOnlyHarness ? "native" : "router",
           remoteTransport: options.remoteTransport ?? "cli",
