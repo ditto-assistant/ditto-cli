@@ -35,6 +35,7 @@ import { watchClaudeSessionTitle } from "./claude-title-sync.js";
 import { type ClaudeHookAttachment, claudeHookAttachment } from "./claude-hooks.js";
 import { planCodex } from "./codex.js";
 import { createCursorChat, planCursor, writeCursorPlugin } from "./cursor.js";
+import { planOpencode } from "./opencode.js";
 import { cliProxyModel, resolveCliProxy } from "./cliproxy.js";
 import { readHarnessVersion } from "./harness-headers.js";
 import { ensureGrokHome, planGrok } from "./grok.js";
@@ -148,13 +149,19 @@ export function resolveClaudeLaunchDefaults(options: LaunchOptions, defaults: Re
 const DRY_RUN_KEY = "ditto_inf_<minted-at-launch>";
 
 /** Harnesses that can attach an endpoint's tools as their own MCP servers. */
-export const MCP_HARNESSES: readonly Harness[] = ["claude", "codex", "grok", "cursor"];
+export const MCP_HARNESSES: readonly Harness[] = ["claude", "codex", "grok", "cursor", "opencode"];
 
 /**
  * Harnesses whose own service runs inference: Ditto supplies only the
  * endpoint's tools as MCP servers, so a launch without them is pointless.
  */
 const MCP_ONLY_HARNESSES: readonly Harness[] = ["cursor"];
+
+/**
+ * Harnesses without a hook bridge (remote/hooks.ts): Remote Control needs
+ * their turn boundaries, and --headless and --yellow have no equivalent.
+ */
+const LOCAL_ONLY_HARNESSES: readonly Harness[] = ["cursor", "opencode"];
 
 /**
  * `--mcp` / `--no-mcp`, else the endpoint's `<harness>_tool_surface`, else
@@ -226,7 +233,7 @@ function mcpBanner(mcp: ClaudeMcpAttachment | undefined, opts: { dryRun?: boolea
   return `mcp ${c("dim", `(${mcp.servers} servers, ${mcp.tools} tools; ${note})`)}`;
 }
 
-const AGENT_LABELS: Record<Harness, string> = { claude: "Claude Code", codex: "Codex", grok: "Grok", cursor: "Cursor CLI" };
+const AGENT_LABELS: Record<Harness, string> = { claude: "Claude Code", codex: "Codex", grok: "Grok", cursor: "Cursor CLI", opencode: "OpenCode" };
 
 function log(line: string, options?: NoteOptions): void {
   writeNote(`${c("dim", "ditto:")} ${line}\n`, options);
@@ -245,6 +252,7 @@ function planFor(harness: Harness, input: PlanInput, grokHome?: string, cursorPl
   if (harness === "claude") return planClaude(input);
   if (harness === "grok") return planGrok(input, grokHome ?? "");
   if (harness === "cursor") return planCursor(input, cursorPlugin);
+  if (harness === "opencode") return planOpencode(input);
   return planCodex(input);
 }
 
@@ -462,7 +470,7 @@ async function ensureLoggedIn(harness: Harness, endpoint: string | undefined): P
 async function browserLogin(harness: Harness, endpoint: string | undefined): Promise<SelectedEndpoint | undefined> {
   const result = await deviceLogin({
     // The sign-in page knows the agents it routes; an MCP-only one just signs in.
-    intent: harness === "cursor" ? "login" : harness,
+    intent: harness === "claude" || harness === "codex" || harness === "grok" ? harness : "login",
     endpoint,
     onCode: (userCode, url) => {
       process.stderr.write(`\n  ${url}\n\n  Code: ${userCode}\n\n`);
@@ -528,8 +536,8 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   const budget = parseBudget(options.budget);
   const expiresIn = parseExpiry(options.expires);
   if (options.plan && harness === "codex") throw new Error("--plan is not supported for codex");
-  if (MCP_ONLY_HARNESSES.includes(harness)) {
-    if (options.mcp === false) throw new Error(`${AGENT_LABELS[harness]} gets Ditto only as MCP tools; --no-mcp would attach nothing`);
+  if (MCP_ONLY_HARNESSES.includes(harness) && options.mcp === false) throw new Error(`${AGENT_LABELS[harness]} gets Ditto only as MCP tools; --no-mcp would attach nothing`);
+  if (LOCAL_ONLY_HARNESSES.includes(harness)) {
     if (options.headless) throw new Error(`--headless is not supported for ${AGENT_LABELS[harness]} yet`);
     if (options.yellow) throw new Error(`--yellow is not supported for ${AGENT_LABELS[harness]}; use --yolo or its own prompts`);
   }
@@ -810,7 +818,8 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     localInference: Boolean(proxy),
     sessionId,
     harnessVersion,
-    model,
+    // OpenCode needs a model id to address; the endpoint slug routes to its default.
+    model: model ?? (harness === "opencode" ? endpoint.slug : undefined),
     resumeId,
     resumeLast,
     prompt: options.prompt,
@@ -905,7 +914,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
 
   // Remote Control needs the harness's turn-boundary hooks, which only the
   // agents with a hook bridge (remote/hooks.ts) report.
-  const remote: RemoteMode = mcpOnlyHarness ? "off" : remoteMode(options);
+  const remote: RemoteMode = LOCAL_ONLY_HARNESSES.includes(harness) ? "off" : remoteMode(options);
   const launchRegistration = {
     sessionId, endpointId: endpoint.id, harness: harness === "claude" ? "claude-code" : harness,
     inference: proxy || options.mcpOnly || mcpOnlyHarness ? "native" : "router", transport: options.remoteTransport ?? "cli",

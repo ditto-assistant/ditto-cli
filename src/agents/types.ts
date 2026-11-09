@@ -3,9 +3,9 @@
 import type { ClaudeHookAttachment } from "./claude-hooks.js";
 import type { ClaudeMcpAttachment } from "./claude-mcp.js";
 
-export type Harness = "claude" | "codex" | "grok" | "cursor";
+export type Harness = "claude" | "codex" | "grok" | "cursor" | "opencode";
 
-export const HARNESSES: readonly Harness[] = ["claude", "codex", "grok", "cursor"];
+export const HARNESSES: readonly Harness[] = ["claude", "codex", "grok", "cursor", "opencode"];
 
 export const KEY_EXPIRIES = [
   "1h",
