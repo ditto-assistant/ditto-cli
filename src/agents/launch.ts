@@ -668,10 +668,10 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   if (!endpoint && !requestedEndpoint?.trim() && fallbackEndpoint) log(`using ${fallbackEndpoint} (no repository .ditto default here)`);
   endpoint ??= await resolveEndpoint(requestedEndpoint?.trim() ? requestedEndpoint : fallbackEndpoint, catalog.endpoints, selected);
   const hooks = harness === "claude" ? await repoHooks(endpoint, repoProfile, cwd, Boolean(requestedEndpoint?.trim()), options.hooks !== false) : undefined;
-  if (harness === "claude") {
-    endpoint = { ...endpoint, providerOptions: { ...endpoint.providerOptions, ...repoLaunchDefaults } };
-    options = resolveClaudeLaunchDefaults(options, endpoint.providerOptions);
-  }
+  // The repository's launch defaults (its <agent>_tool_surface among them)
+  // beat the endpoint's saved options for this launch.
+  endpoint = { ...endpoint, providerOptions: { ...endpoint.providerOptions, ...repoLaunchDefaults } };
+  if (harness === "claude") options = resolveClaudeLaunchDefaults(options, endpoint.providerOptions);
   if (!options.mcpOnly && !proxy) await assertEndpointActive(endpoint);
   if (options.mcpOnly && (harness !== "claude" || options.mcp === false)) throw new Error("--mcp-only requires Claude Code with MCP tools enabled");
   if (options.remoteTransport === "channels" && (!options.mcpOnly || options.headless || remoteMode(options) === "off" || options.prompt !== undefined)) throw new Error("MCP Channels requires an interactive `heyditto claude --mcp-only` session with remote control enabled");

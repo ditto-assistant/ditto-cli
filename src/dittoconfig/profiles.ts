@@ -158,14 +158,15 @@ export async function profileBody(decl: EndpointDecl, profileDir: string): Promi
     if (typeof v !== "boolean") throw new ProfileError(`endpoints.${decl.name}.settings.claude_native_tool_blocks must be true or false`);
     options.claude_native_tool_blocks = v;
   }
-  // Which surface `heyditto claude` gives the endpoint's tools by default:
-  // "mcp" attaches them as Claude Code MCP servers, "router" keeps them on
-  // the router (DITTO-1497). --mcp / --no-mcp override it per launch.
-  if (settings.claude_tool_surface !== undefined) {
-    const v = settings.claude_tool_surface;
-    delete settings.claude_tool_surface;
-    if (v !== "mcp" && v !== "router") throw new ProfileError(`endpoints.${decl.name}.settings.claude_tool_surface must be "mcp" or "router"`);
-    options.claude_tool_surface = v;
+  // Which surface `heyditto <agent>` gives the endpoint's tools by default:
+  // "mcp" attaches them as the agent's own MCP servers, "router" keeps them
+  // on the router (DITTO-1497). --mcp / --no-mcp override it per launch.
+  for (const key of TOOL_SURFACE_SETTINGS) {
+    if (settings[key] === undefined) continue;
+    const v = settings[key];
+    delete settings[key];
+    if (v !== "mcp" && v !== "router") throw new ProfileError(`endpoints.${decl.name}.settings.${key} must be "mcp" or "router"`);
+    options[key] = v;
   }
   // Ditto's Claude Code hooks are repository policy, read from this file at
   // launch (repoDefaultProfile). Their paths mean nothing outside the
@@ -185,7 +186,7 @@ export async function profileBody(decl: EndpointDecl, profileDir: string): Promi
     const field = SETTING_FIELDS[key];
     if (!field) {
       throw new ProfileError(
-        `endpoints.${decl.name}.settings.${key}: unknown setting. Known: owner, claude_prompt, codex_prompt, claude_native_tool_blocks, claude_tool_surface, claude_inference, claude_remote_transport, claude_hooks, ${Object.keys(SETTING_FIELDS).join(", ")}`,
+        `endpoints.${decl.name}.settings.${key}: unknown setting. Known: owner, claude_prompt, codex_prompt, claude_native_tool_blocks, ${TOOL_SURFACE_SETTINGS.join(", ")}, claude_inference, claude_remote_transport, claude_hooks, ${Object.keys(SETTING_FIELDS).join(", ")}`,
       );
     }
     body[field] = field === "toolDeny" ? denyRules(decl.name, value) : value;
@@ -372,6 +373,9 @@ export async function findProfileEndpoint(profile: RepoProfile, endpoints: Infer
 }
 
 /** `settings.claude_hooks`, validated; a bad value is a ProfileError like any other setting. */
+/** Per-agent default tool surface, one setting per agent with native MCP. */
+const TOOL_SURFACE_SETTINGS = ["claude_tool_surface", "codex_tool_surface"];
+
 function hooksOf(decl: EndpointDecl): ClaudeHooksConfig | undefined {
   try {
     return parseClaudeHooks((decl.settings as Record<string, unknown> | undefined)?.claude_hooks, `endpoints.${decl.name}.settings`);
@@ -384,7 +388,7 @@ function hooksOf(decl: EndpointDecl): ClaudeHooksConfig | undefined {
 /** Read only launch settings; launching must not require reading prompt files or applying the profile. */
 function claudeLaunchDefaults(decl: EndpointDecl): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  for (const [key, choices] of Object.entries({ claude_inference: ["router", "native"], claude_remote_transport: ["cli", "channels"], claude_tool_surface: ["router", "mcp"] })) {
+  for (const [key, choices] of Object.entries({ claude_inference: ["router", "native"], claude_remote_transport: ["cli", "channels"], ...Object.fromEntries(TOOL_SURFACE_SETTINGS.map((k) => [k, ["router", "mcp"]])) })) {
     const value = (decl.settings as Record<string, unknown> | undefined)?.[key];
     if (value === undefined) continue;
     if (typeof value !== "string" || !choices.includes(value)) throw new ProfileError(`endpoints.${decl.name}.settings.${key} must be ${choices.join(" or ")}`);

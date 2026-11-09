@@ -269,6 +269,25 @@ test("claude_tool_surface and client_approvals: surface in providerOptions, appr
   }
 });
 
+test("codex_tool_surface is a known setting: it lands in providerOptions and must be mcp or router", async () => {
+  const stub = await startStub([
+    { id: "ep-org", slug: "ditto-dev", companyId: ORG.id, model: "openai/gpt-6.1-sol", modelMode: "passthrough", codeMode: true,
+      kindRoutes: { aside: "z-ai/glm-5.3-flash" }, providerOptions: { claude_system_prompt: PROMPT, claude_prompt_mode: "replace" } },
+  ]);
+  const dir = await repo({ ".ditto/config.toml": CONFIG, ".ditto/endpoints/dev.toml": ORG_PROFILE + 'codex_tool_surface = "router"\n', ".ditto/prompts/claude.md": PROMPT });
+  try {
+    const out = await run(["repo", "apply"], stub.base, dir);
+    assert.equal(out.status, 0, out.stderr);
+    assert.equal(stub.writes[0].body.providerOptions.codex_tool_surface, "router");
+    const bad = await repo({ ".ditto/config.toml": CONFIG, ".ditto/endpoints/dev.toml": ORG_PROFILE + 'codex_tool_surface = "native"\n', ".ditto/prompts/claude.md": PROMPT });
+    const refused = await run(["repo", "apply"], stub.base, bad);
+    assert.notEqual(refused.status, 0);
+    assert.match(refused.stderr, /codex_tool_surface must be "mcp" or "router"/);
+  } finally {
+    stub.close();
+  }
+});
+
 test("claude_native_tool_blocks lands in providerOptions and must be a boolean", async () => {
   const stub = await startStub([
     { id: "ep-org", slug: "ditto-dev", companyId: ORG.id, model: "openai/gpt-6.1-sol", modelMode: "passthrough", codeMode: true,
