@@ -24,7 +24,7 @@ const args = process.argv.slice(2);
 appendFileSync(process.env.T3_TEST_CALLS, JSON.stringify(args) + "\\n");
 if (args[0] === "claude" && args[1] === "--help") {
   if (process.env.T3_TEST_HELP_ERROR === "1") process.exit(9);
-  process.stdout.write(process.env.T3_TEST_OLD === "1" ? "--mcp-only\\n" : process.env.T3_TEST_NO_CLIPROXY === "1" ? "--no-mcp-only --no-mcp --no-remote-control\\n" : "--no-mcp-only --no-mcp --mcp --cliproxy [url] --no-remote-control\\n");
+  process.stdout.write(process.env.T3_TEST_FALLBACK === "1" ? "--no-mcp-only --no-mcp --mcp --cliproxy [url] --no-remote-control --fallback-endpoint <slug>\\n" : process.env.T3_TEST_OLD === "1" ? "--mcp-only\\n" : process.env.T3_TEST_NO_CLIPROXY === "1" ? "--no-mcp-only --no-mcp --no-remote-control\\n" : "--no-mcp-only --no-mcp --mcp --cliproxy [url] --no-remote-control\\n");
   process.exit(0);
 }
 const names = ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_CUSTOM_HEADERS", "ANTHROPIC_MODEL", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CONFIG_DIR", "PATH"];
@@ -44,6 +44,7 @@ process.stdin.on("end", () => { process.exitCode = Number(process.env.T3_TEST_EX
     T3_TEST_CLAUDE_CAPTURE: claudeCapture,
     T3_TEST_CALLS: calls,
     T3_TEST_OLD: "0",
+    T3_TEST_FALLBACK: "0",
     T3_TEST_NO_CLIPROXY: "0",
     T3_TEST_HELP_ERROR: "0",
     T3_TEST_EXIT: "0",
@@ -222,4 +223,18 @@ test("unknown inference mode cannot silently choose Router or native inference",
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /DITTO_T3_INFERENCE must be router or cliproxy/);
   assert.deepEqual(f.calls(), []);
+});
+
+test("a heyditto with --fallback-endpoint gets the provider endpoint as a fallback, so a repository .ditto default wins", (t) => {
+  const f = fixture(t);
+  const result = f.run(["--session-id", "s1"], { DITTO_T3_ENDPOINT: "ditto-dev", DITTO_T3_INFERENCE: "cliproxy", T3_TEST_FALLBACK: "1" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(f.capture().args, ["claude", "--fallback-endpoint", "ditto-dev", "--session", "s1", "--no-mcp-only", "--cliproxy", "--mcp", "--no-remote-control", "--", "--session-id", "s1"]);
+});
+
+test("a pinned provider passes its endpoint as --endpoint even when heyditto supports a fallback", (t) => {
+  const f = fixture(t);
+  const result = f.run(["--session-id", "s1"], { DITTO_T3_ENDPOINT: "subnet", DITTO_T3_ENDPOINT_MODE: "pin", DITTO_T3_INFERENCE: "cliproxy", T3_TEST_FALLBACK: "1" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(f.capture().args, ["claude", "--endpoint", "subnet", "--session", "s1", "--no-mcp-only", "--cliproxy", "--mcp", "--no-remote-control", "--", "--session-id", "s1"]);
 });

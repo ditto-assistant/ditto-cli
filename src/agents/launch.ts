@@ -51,6 +51,7 @@ import {
   stripSeparator,
 } from "./types.js";
 import { defaultWorktreeName, ensureWorktree } from "./worktree.js";
+import { DEFAULT_T3_INSTANCE } from "../t3/instance.js";
 import { RemoteSession } from "../remote/controller.js";
 import { startHeadlessTurn } from "../remote/headless.js";
 import { type HookServer, claudeHookSettings, codexNotifyOverride, hookScriptPath, startHookServer, withHookArgs } from "../remote/hooks.js";
@@ -60,6 +61,12 @@ import { checkpointPush } from "../teleport/commands.js";
 
 export interface LaunchOptions {
   endpoint?: string;
+  /**
+   * The endpoint to use only when nothing else names one: no --endpoint,
+   * --profile, resumed session or repository `.ditto/` default. T3 providers
+   * pass theirs here so a checkout's own profile still picks its endpoint.
+   */
+  fallbackEndpoint?: string;
   budget?: string;
   expires?: string;
   keepKey?: boolean;
@@ -108,6 +115,26 @@ export interface LaunchOptions {
   cliproxy?: string | boolean;
   remoteTransport?: "cli" | "channels";
 }
+
+/**
+ * The default T3 provider's launcher from before --fallback-endpoint (no
+ * DITTO_T3_ENDPOINT_MODE) passes its DITTO_T3_ENDPOINT as --endpoint. That is
+ * the provider's default, so it is demoted to the fallback and a checkout's
+ * `.ditto/` default applies without rerunning setup. Old launchers of any
+ * other instance (profile providers) were a deliberate choice and stay
+ * pinned. The launcher's variables are then dropped, so a `heyditto` run
+ * inside the chat keeps its own --endpoint.
+ */
+export function t3FallbackEndpoint(options: LaunchOptions, env: NodeJS.ProcessEnv = process.env): LaunchOptions {
+  const fromLauncher = env.DITTO_T3_ENDPOINT?.trim();
+  const legacyDefault = env.DITTO_T3_ENDPOINT_MODE === undefined
+    && path.basename(path.dirname(path.resolve(env.CLAUDE_CONFIG_DIR ?? "/"))) === DEFAULT_T3_INSTANCE;
+  for (const k of T3_LAUNCHER_ENV) delete env[k];
+  if (!fromLauncher || !legacyDefault || options.fallbackEndpoint !== undefined || options.endpoint?.trim() !== fromLauncher) return options;
+  return { ...options, endpoint: undefined, fallbackEndpoint: fromLauncher };
+}
+
+const T3_LAUNCHER_ENV = ["DITTO_T3_ENDPOINT", "DITTO_T3_ENDPOINT_MODE", "DITTO_T3_INFERENCE", "DITTO_T3_HEYDITTO_BIN", "DITTO_T3_CLAUDE_BIN"];
 
 /** Explicit flags (or resumed choices) win over repo/cloud launch defaults. */
 export function resolveClaudeLaunchDefaults(options: LaunchOptions, defaults: Record<string, unknown> = {}): LaunchOptions {
@@ -564,11 +591,13 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   // its endpoint, so it also beats a repository's .ditto default. Only the
   // flag moves a resumed session off the endpoint it was recorded on; a
   // shell-wide DITTO_PROFILE does not.
+  options = t3FallbackEndpoint(options);
   const named = options.endpoint?.trim() ? undefined : await explicitProfileEndpoint();
   const fromFlag = named?.source === "flag" ? named.endpoint : undefined;
   const requestedEndpoint = options.endpoint ?? (fromFlag ?? record?.endpointSlug ?? named?.endpoint);
   if (named) log(`using profile ${named.name} → ${named.endpoint}`);
-  const { selected, catalog } = await signInAndListEndpoints(harness, requestedEndpoint, Boolean(options.dryRun));
+  const fallbackEndpoint = options.fallbackEndpoint?.trim() || undefined;
+  const { selected, catalog } = await signInAndListEndpoints(harness, requestedEndpoint ?? fallbackEndpoint, Boolean(options.dryRun));
 
   // Sent as X-Ditto-Harness-Version so the router serves this release's own
   // prompts. Started only now that sign-in has succeeded (a failed login
@@ -630,7 +659,8 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
       log(`using ${profile.owner.kind === "org" ? `@${profile.owner.org}/` : ""}${endpoint.slug} from ${path.join(profile.repoDir, ".ditto")}`);
     }
   }
-  endpoint ??= await resolveEndpoint(requestedEndpoint, catalog.endpoints, selected);
+  if (!endpoint && !requestedEndpoint?.trim() && fallbackEndpoint) log(`using ${fallbackEndpoint} (no repository .ditto default here)`);
+  endpoint ??= await resolveEndpoint(requestedEndpoint?.trim() ? requestedEndpoint : fallbackEndpoint, catalog.endpoints, selected);
   const hooks = harness === "claude" ? await repoHooks(endpoint, repoProfile, cwd, Boolean(requestedEndpoint?.trim()), options.hooks !== false) : undefined;
   if (harness === "claude") {
     endpoint = { ...endpoint, providerOptions: { ...endpoint.providerOptions, ...repoLaunchDefaults } };

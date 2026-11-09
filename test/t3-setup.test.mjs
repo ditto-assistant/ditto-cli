@@ -249,3 +249,14 @@ test("an endpoint choice with an expired saved login signs in again, except in a
   await assert.rejects(chooseEndpoint("claude", false));
   assert.equal(calls.at(-1), deviceCode);
 });
+
+test("the default provider follows the checkout's .ditto/; profile and custom instances pin, --pin/--no-pin override", (t) => {
+  const f = fixture(t);
+  const mode = (plan) => plan.files.find((x) => x.path === plan.launcherPath).content.match(/DITTO_T3_ENDPOINT_MODE=(\w+)/)[1];
+  assert.equal(mode(f.plan()), "fallback");
+  assert.equal(f.plan().pin, false);
+  assert.equal(mode(f.plan({ instance: "claude_ditto_subnet_cliproxy" })), "pin");
+  assert.equal(mode(f.plan({ pin: true })), "pin");
+  assert.equal(mode(f.plan({ instance: "claude_ditto_subnet_cliproxy", pin: false })), "fallback");
+  assert.notEqual(f.plan().launcherPath, f.plan({ pin: true }).launcherPath, "the mode is part of the immutable launcher's digest");
+});

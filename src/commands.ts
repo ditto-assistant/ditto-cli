@@ -1508,6 +1508,7 @@ export function registerHarnessCommands(program: Command, addExamples: (c: Comma
       )
       .summary(`launch ${label} through a Ditto endpoint`)
       .option("-e, --endpoint <slug>", "inference endpoint slug or id (default: saved default, or a picker)")
+      .option("--fallback-endpoint <slug>", "endpoint to use only when no --endpoint, --profile, resumed session or repository .ditto/ default names one (T3 providers pass theirs here)")
       .option("--budget <tokens>", "spend cap for this session's key, in Ditto tokens")
       .addOption(
         new Option("--expires <duration>", "server-side safety expiry for the key (revoked on exit anyway unless --keep-key)")
