@@ -60,6 +60,16 @@ test("an unsafe server name is left out of the attachment for every harness, and
   assert.ok(args.every((a) => !a.includes("evil")));
 });
 
+test("codexMcpArgs: an unattended run under client approvals has Ditto refuse gated tools, since codex exec asks nobody", () => {
+  const deny = '"X-Ditto-Tool-Deny"="class:gated"';
+  assert.ok(codexMcpArgs(claudeMcpAttachment(catalog(true), "s"), true).filter((a) => a !== "-c").every((a) => a.includes(deny)));
+  assert.ok(codexMcpArgs(claudeMcpAttachment(catalog(true), "s"), false).every((a) => !a.includes(deny)), "an attended TUI prompts instead");
+  assert.ok(codexMcpArgs(claudeMcpAttachment(catalog(false), "s"), true).every((a) => !a.includes(deny)), "Ditto holds gated calls itself");
+  assert.ok(codexMcpArgs(claudeMcpAttachment(catalog(true), "s", { yolo: true }), true).every((a) => !a.includes(deny)), "--yolo chose to run them");
+  const plan = planCodex({ ...base, mcp: claudeMcpAttachment(catalog(true), "s"), prompt: "hi" });
+  assert.ok(plan.args.some((a) => a.startsWith("mcp_servers.") && a.includes(deny)), "a -p plan is unattended");
+});
+
 test("planCodex: native MCP attaches the servers, passes the key by env and tells the router", () => {
   const mcp = claudeMcpAttachment(catalog(false), "sess-1");
   const plan = planCodex({ ...base, mcp, mcpApiKey: "mcp-key", prompt: "hi" });
