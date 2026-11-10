@@ -22,8 +22,10 @@ export async function exportMcpConfig(options: { endpoint?: string; session?: st
   const { endpoints, baseUrl } = await listEndpoints();
   const explicit = options.endpoint?.trim() || (await explicitProfileEndpoint())?.endpoint;
   let endpoint: InferenceEndpoint | undefined;
-  if (explicit) endpoint = findEndpoint(endpoints, explicit);
-  else {
+  if (explicit) {
+    endpoint = findEndpoint(endpoints, explicit);
+    if (!endpoint) throw new Error(`No endpoint named "${explicit}"`);
+  } else {
     const profile = await repoDefaultProfile(process.cwd());
     if (profile) {
       endpoint = await findProfileEndpoint(profile, endpoints);
@@ -41,7 +43,9 @@ export async function exportMcpConfig(options: { endpoint?: string; session?: st
     for (const line of mcpUnavailableLines(catalog)) process.stderr.write(`${line}\n`);
     process.stdout.write(`${JSON.stringify(sdkMcpConfig(catalog, sessionId, key.key))}\n`);
   } catch (error) {
-    await revokeKey(endpoint.id, key.id).catch(() => {});
+    await revokeKey(endpoint.id, key.id).catch(() => {
+      process.stderr.write(`warning: could not revoke MCP key ${key.id}; it may remain valid until its one-hour expiry\n`);
+    });
     throw error;
   }
 }

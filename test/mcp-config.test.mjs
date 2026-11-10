@@ -23,6 +23,7 @@ test("mcp-config selects .ditto Backroom endpoint in cwd, overrides explicitly, 
   const dir = await mkdtemp(path.join(os.tmpdir(), "mcp-sdk-"));
   const requests = [];
   let failCatalog = false;
+  let failRevoke = false;
   const server = http.createServer((req, res) => {
     requests.push([req.method, req.url]);
     res.setHeader("content-type", "application/json");
@@ -32,7 +33,10 @@ test("mcp-config selects .ditto Backroom endpoint in cwd, overrides explicitly, 
       {id:"project",slug:"sn118",model:"native",status:"active"}, {id:"personal",slug:"other",model:"native",status:"active"},
     ]}));
     if (req.method === "POST" && req.url.endsWith("/keys")) return res.end(JSON.stringify({id:"test-key",key:"synthetic-key"}));
-    if (req.method === "DELETE") return res.end("{}");
+    if (req.method === "DELETE") {
+      if (failRevoke) res.statusCode = 503;
+      return res.end("{}");
+    }
     if (req.url === "/v1/mcp") {
       if (failCatalog) { res.statusCode = 503; return res.end("{}"); }
       return res.end(JSON.stringify({endpoint:"sn118",approvalMode:"park",clientApprovals:false,servers:[
@@ -62,10 +66,24 @@ test("mcp-config selects .ditto Backroom endpoint in cwd, overrides explicitly, 
     const override = await run(["--endpoint","other"]);
     assert.equal(override.code,0,override.stderr);
     assert.ok(requests.some(([method,url])=>method==="POST"&&url==="/api/v5/inference/endpoints/personal/keys"));
+    const createdBeforeUnknown = requests.filter(([method]) => method === "POST").length;
+    const unknown = await run(["--endpoint", "missing-endpoint"]);
+    assert.notEqual(unknown.code, 0);
+    assert.equal(unknown.stdout, "");
+    assert.match(unknown.stderr, /No endpoint named "missing-endpoint"/);
+    assert.equal(requests.filter(([method]) => method === "POST").length, createdBeforeUnknown);
     failCatalog = true;
     const failed = await run();
     assert.notEqual(failed.code,0);
     assert.equal(failed.stdout,"");
     assert.ok(requests.some(([method,url])=>method==="DELETE"&&url==="/api/v5/inference/endpoints/project/keys/test-key"));
+    assert.doesNotMatch(failed.stderr, /could not revoke MCP key/);
+    failRevoke = true;
+    const unrevoked = await run();
+    assert.notEqual(unrevoked.code, 0);
+    assert.equal(unrevoked.stdout, "");
+    assert.match(unrevoked.stderr, /could not revoke MCP key test-key; it may remain valid until its one-hour expiry/);
+    assert.match(unrevoked.stderr, /503/);
+    assert.doesNotMatch(unrevoked.stderr, /synthetic-key/);
   } finally { server.closeAllConnections(); await new Promise(resolve=>server.close(resolve)); await rm(dir,{recursive:true,force:true}); }
 });
