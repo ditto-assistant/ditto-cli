@@ -278,9 +278,10 @@ const PRIVATE_SETTINGS_PREFIX = "ditto-claude-settings-";
 /** One private directory per temp root for the life of this process. */
 const privateSettingsDirs = new Map<string, string>();
 
-/** The pid a settings directory belongs to: ditto-claude-settings-<pid>-<random>. */
-function ownerPid(name: string): number | undefined {
-  const m = /^ditto-claude-settings-(\d+)-/.exec(name);
+/** The pid a private directory belongs to: <prefix><pid>-<random>. */
+function ownerPid(name: string, prefix: string): number | undefined {
+  if (!name.startsWith(prefix)) return undefined;
+  const m = /^(\d+)-/.exec(name.slice(prefix.length));
   return m ? Number(m[1]) : undefined;
 }
 
@@ -306,7 +307,7 @@ const STALE_SETTINGS_GRACE_MS = 5 * 60 * 1000;
  * keeps reading its settings for as long as it runs. A dead owner's directory
  * is kept for a short grace period after its last write.
  */
-export function sweepStaleSettings(tmp: string, isAlive: (pid: number) => boolean = alive, now: number = Date.now()): void {
+export function sweepStaleSettings(tmp: string, isAlive: (pid: number) => boolean = alive, now: number = Date.now(), prefix: string = PRIVATE_SETTINGS_PREFIX): void {
   let entries: string[];
   try {
     entries = readdirSync(tmp);
@@ -315,8 +316,7 @@ export function sweepStaleSettings(tmp: string, isAlive: (pid: number) => boolea
   }
   const uid = process.getuid?.();
   for (const name of entries) {
-    if (!name.startsWith(PRIVATE_SETTINGS_PREFIX)) continue;
-    const pid = ownerPid(name);
+    const pid = ownerPid(name, prefix);
     if (pid === undefined || pid === process.pid || isAlive(pid)) continue;
     const dir = path.join(tmp, name);
     try {
