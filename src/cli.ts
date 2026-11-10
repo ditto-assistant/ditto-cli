@@ -40,6 +40,7 @@ import { registerConfigCommands } from "./dittoconfig/commands.js";
 import { deviceLogin } from "./device-login.js";
 import { registerSelfUpdateCommands } from "./self-update.js";
 import { registerRelayCommands } from "./relay/commands.js";
+import { registerMcpConfigCommand } from "./agents/mcp-config.js";
 import { registerT3Commands } from "./t3/setup.js";
 import { addProfileOption, installProfileHook, registerProfileCommands, selectedProfile } from "./profiles.js";
 
@@ -1344,6 +1345,7 @@ your own workspace or an app workspace.`,
   registerHarnessCommands(program, addExamples);
   registerRelayCommands(program);
   registerT3Commands(program);
+  registerMcpConfigCommand(program);
   registerCodexAppCommand(program, addExamples);
   registerSessionCommands(program, addExamples);
   registerTeleportCommands(program, addExamples);

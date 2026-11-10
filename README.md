@@ -1592,3 +1592,25 @@ CLI session and cancel only the matching later steer. They do not cancel normal
 queued prompts or interrupt unrelated current turns. Repeated exact Stop frames
 send one physical interrupt. This intent does not survive a fresh CLI process;
 steering is not automatically replayed offline.
+
+### SDK MCP configuration
+
+`heyditto mcp-config --session <id>` emits HTTP MCP server JSON for a trusted
+SDK host. It selects the repository's `.ditto/` default endpoint, including its
+Backroom tools, before the personal default; `--endpoint` overrides both.
+It requires an existing CLI login and never opens an interactive picker.
+The JSON contains an endpoint key that expires in one hour: pipe it directly
+to the host, never save it in a project or include it in logs. Refresh before
+subsequent turns; a single turn longer than an hour may need to be restarted.
+Each export creates a fresh expiring key. Failed catalog exports revoke it.
+
+With a T3 build that supports the Cursor SDK configuration hook, set this in
+**the T3 server environment**, then restart that service and create a new
+Cursor thread:
+
+```sh
+T3CODE_CURSOR_MCP_CONFIG_COMMAND='["heyditto","mcp-config"]'
+```
+
+T3 supplies `T3CODE_THREAD_ID` and runs the command in the thread's directory.
+This hook does not invoke `heyditto cursor` or change Cursor's user settings.
