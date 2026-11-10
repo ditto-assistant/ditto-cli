@@ -217,14 +217,12 @@ function mcpChosen(options: Pick<LaunchOptions, "mcp">, endpoint: Pick<Inference
  * The banner's tools field. A fallback to the router is yellow only when MCP
  * was asked for; by default it is as quiet as the log line that explains it.
  */
-function mcpBanner(mcp: ClaudeMcpAttachment | undefined, opts: { dryRun?: boolean; noTools?: boolean; chosen?: boolean; agent: string; refusesAsked?: boolean; rejectsAll?: boolean }): string {
+function mcpBanner(mcp: ClaudeMcpAttachment | undefined, opts: { dryRun?: boolean; noTools?: boolean; chosen?: boolean; agent: string; unattended?: boolean; rejectsAll?: boolean }): string {
   if (opts.noTools) return c("dim", "none (the endpoint has no tools)");
   if (!mcp) return opts.dryRun ? "mcp (catalog read at launch)" : c(opts.chosen ? "yellow" : "dim", "router (MCP not attached)");
-  // An unattended Grok run refuses what it would have asked about (grok.ts);
-  // Cursor's -p without --yolo rejects every MCP call, gated or not (cursor.ts).
-  const note = opts.rejectsAll ? "every call rejected: Cursor's -p needs --yolo"
-    : opts.refusesAsked && mcp.ask.length ? `${mcp.ask.length} gated refused: nobody to approve them`
-    : mcpApprovalNote(mcp, opts.agent);
+  // Cursor's -p without --yolo rejects every MCP call, gated or not (cursor.ts);
+  // any other unattended run refuses what it would have asked about.
+  const note = opts.rejectsAll ? "every call rejected: Cursor's -p needs --yolo" : mcpApprovalNote(mcp, opts.agent, opts.unattended);
   return `mcp ${c("dim", `(${mcp.servers} servers, ${mcp.tools} tools; ${note})`)}`;
 }
 
@@ -840,7 +838,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     field("expires", `${expiresIn}${options.keepKey ? "" : c("dim", " (revoked on exit)")}`),
     budget !== undefined ? field("budget", `${budget.toLocaleString()} tokens`) : undefined,
     field("session", c("bold", sessionId)),
-    wantMcp ? field("tools", mcpBanner(mcp, { dryRun: options.dryRun, noTools, chosen, agent: AGENT_LABELS[harness], refusesAsked: harness === "grok" && (options.prompt !== undefined || options.headless), rejectsAll: cursorPRejectsMcp })) : undefined,
+    wantMcp ? field("tools", mcpBanner(mcp, { dryRun: options.dryRun, noTools, chosen, agent: AGENT_LABELS[harness], unattended: options.prompt !== undefined || options.headless, rejectsAll: cursorPRejectsMcp })) : undefined,
     hooks?.banner ? field("hooks", hooks.banner) : undefined,
   ]
     .filter(Boolean)

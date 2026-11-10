@@ -248,9 +248,12 @@ export function claudeMcpAttachment(catalog: McpCatalog, sessionId: string, opts
 }
 
 /** Who stops a gated call, for the launch banner: only what is actually true. */
-export function mcpApprovalNote(mcp: ClaudeMcpAttachment, agent = "Claude Code"): string {
+export function mcpApprovalNote(mcp: ClaudeMcpAttachment, agent = "Claude Code", unattended = false): string {
   if (mcp.gated === 0) return "no gated tools";
   if (!mcp.clientApprovals) return `Ditto holds ${mcp.gated} gated`;
+  // A -p or headless run has nobody to answer a prompt: Grok and Codex have
+  // Ditto refuse gated tools then, and Claude Code denies its own ask rules.
+  if (unattended && mcp.ask.length) return `${mcp.ask.length} gated refused: nobody to approve them`;
   return mcp.ask.length ? `${agent} asks before ${mcp.ask.length} gated` : `${mcp.gated} gated run unasked (--yolo)`;
 }
 
