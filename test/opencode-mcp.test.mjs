@@ -48,12 +48,15 @@ test("opencodeConfig: native MCP attaches remote servers and tells the router", 
   assert.deepEqual(config.permission, { "ditto_*": "allow", "ditto-github_*": "allow" }, "Ditto holds gated calls, so OpenCode asks about nothing");
 });
 
-test("opencodeMcp: gated tools ask, are denied when unattended, and run under --yolo", () => {
-  assert.deepEqual(opencodeMcp(claudeMcpAttachment(catalog(true), "s")).permission, { "ditto_*": "allow", "ditto-github_*": "allow", "ditto-github_delete_repo": "ask" });
+test("opencodeMcp: under client approvals each server asks (denies when unattended) and allows only its listed ungated tools", () => {
+  assert.deepEqual(opencodeMcp(claudeMcpAttachment(catalog(true), "s")).permission, {
+    "ditto_*": "ask", "ditto-github_*": "ask", "ditto_search_memories": "allow", "ditto-github_list_issues": "allow",
+  }, "a gated or later-advertised tool falls to ask");
   const unattended = opencodeMcp(claudeMcpAttachment(catalog(true), "s"), true).permission;
-  assert.equal(unattended["ditto-github_delete_repo"], "deny");
-  assert.deepEqual(Object.keys(unattended).at(-1), "ditto-github_delete_repo", "the specific rule comes after the server-wide allow");
-  assert.deepEqual(opencodeMcp(claudeMcpAttachment(catalog(true), "s", { yolo: true }), true).permission, { "ditto_*": "allow", "ditto-github_*": "allow" });
+  assert.deepEqual(unattended, { "ditto_*": "deny", "ditto-github_*": "deny", "ditto_search_memories": "allow", "ditto-github_list_issues": "allow" });
+  assert.deepEqual(Object.keys(unattended).slice(0, 2), ["ditto_*", "ditto-github_*"], "server-wide rules first, so the listed allows win");
+  assert.deepEqual(opencodeMcp(claudeMcpAttachment(catalog(true), "s", { yolo: true }), true).permission, { "ditto_*": "allow", "ditto-github_*": "allow" }, "--yolo runs them");
+  assert.deepEqual(opencodeMcp(claudeMcpAttachment(catalog(false), "s"), true).permission, { "ditto_*": "allow", "ditto-github_*": "allow" }, "Ditto holds gated calls itself");
 });
 
 test("planOpencode: TUI and run forms, keys only in env", () => {
@@ -63,7 +66,7 @@ test("planOpencode: TUI and run forms, keys only in env", () => {
   assert.deepEqual(run.args, ["run", "--format", "json", "hi"]);
   assert.equal(run.envSet[OPENCODE_KEY_ENV], "inf-key");
   assert.equal(run.envSet[MCP_KEY_ENV], "mcp-key");
-  assert.equal(JSON.parse(run.envSet.OPENCODE_CONFIG_CONTENT).permission["ditto-github_delete_repo"], "deny", "a run cannot answer a prompt");
+  assert.equal(JSON.parse(run.envSet.OPENCODE_CONFIG_CONTENT).permission["ditto-github_*"], "deny", "a run cannot answer a prompt");
   assert.ok(run.args.every((a) => !a.includes("key")));
 
   assert.deepEqual(planOpencode({ ...base, resumeLast: true, plan: true }).args, ["--continue", "--agent", "plan"]);

@@ -20,9 +20,12 @@ export const OPENCODE_PROVIDER_ID = "ditto";
  *    the session header on every request;
  *  - with native MCP, one remote MCP server per attached source, keyed by
  *    `{env:DITTO_ROUTER_MCP_KEY}`, and `permission` rules for their tools.
- *    OpenCode names a tool `<server>_<tool>`: each server's tools are allowed,
- *    and the gated ones ask, or are denied when nobody can answer (an
- *    `opencode run` without --yolo).
+ *    OpenCode names a tool `<server>_<tool>` and allows any tool no rule
+ *    names. When Ditto holds gated calls (or --yolo runs them) each server is
+ *    allowed whole. When OpenCode decides them (client approvals), each
+ *    server asks by default (denies, when nobody can answer: an `opencode
+ *    run` without --yolo) and only its listed ungated tools are allowed, so a
+ *    tool the server advertises after launch is never covered by an allow.
  */
 export function opencodeConfig(input: PlanInput): string {
   const model = input.model ?? OPENCODE_PROVIDER_ID;
@@ -50,10 +53,10 @@ export function opencodeConfig(input: PlanInput): string {
 /** The `mcp` and `permission` sections for an attachment. */
 export function opencodeMcp(mcp: McpAttachment, unattended = false): { mcp: Record<string, unknown>; permission: Record<string, string> } {
   const servers: Record<string, unknown> = {};
-  // Later keys win in OpenCode's permission matching, so the server-wide
-  // allows come first and each gated tool's rule after them.
-  const allow: Record<string, string> = {};
-  const gated: Record<string, string> = {};
+  // Later keys win in OpenCode's permission matching, so each server-wide
+  // rule comes first and the per-tool rules after it.
+  const wide: Record<string, string> = {};
+  const listed: Record<string, string> = {};
   for (const server of mcp.attached) {
     servers[server.name] = {
       type: "remote",
@@ -63,10 +66,14 @@ export function opencodeMcp(mcp: McpAttachment, unattended = false): { mcp: Reco
       oauth: false,
       headers: { Authorization: `Bearer {env:${MCP_KEY_ENV}}`, ...server.headers },
     };
-    allow[`${server.name}_*`] = "allow";
-    for (const tool of server.askTools) gated[`${server.name}_${tool}`] = unattended ? "deny" : "ask";
+    if (!mcp.clientAsks) {
+      wide[`${server.name}_*`] = "allow";
+      continue;
+    }
+    wide[`${server.name}_*`] = unattended ? "deny" : "ask";
+    for (const tool of server.allowTools) listed[`${server.name}_${tool}`] = "allow";
   }
-  return { mcp: servers, permission: { ...allow, ...gated } };
+  return { mcp: servers, permission: { ...wide, ...listed } };
 }
 
 /** Builds the `opencode` invocation: the TUI, or `opencode run` for a prompt. */

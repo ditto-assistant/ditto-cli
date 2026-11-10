@@ -747,6 +747,22 @@ How the wiring works:
   since `--force` also allows any command). An untrusted workspace needs
   Cursor's own `--trust`. Remote control and
   `--headless` are not available for Cursor yet.
+- **OpenCode** (`heyditto opencode`, or `opencode run` for `-p`) gets
+  everything through `OPENCODE_CONFIG_CONTENT`, which OpenCode merges over
+  your own config for that run, so nothing is written to disk.
+  - **Inference:** a `ditto` provider (`@ai-sdk/openai-compatible`) points at
+    the endpoint. The key is read from `{env:DITTO_INFERENCE_API_KEY}`, and
+    the model defaults to the endpoint's slug.
+  - **Tools:** one remote MCP server per catalog source, keyed by
+    `{env:DITTO_ROUTER_MCP_KEY}`, plus `permission` rules. Tools are named
+    `<server>_<tool>`, and OpenCode allows any tool no rule names. When
+    Ditto holds gated calls, or under `--yolo` (`--auto`), each server is
+    allowed whole. Under `client_approvals`, each server asks by default
+    (denies in an unattended `opencode run`) and allows only its listed
+    ungated tools, so a tool the server adds after launch is never covered
+    by an allow.
+  - **Not yet:** remote control, `--headless` and `--yellow` are not
+    available for OpenCode.
 
 ### `codex-app`
 
