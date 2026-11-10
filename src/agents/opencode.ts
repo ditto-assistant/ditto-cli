@@ -60,6 +60,10 @@ export function opencodeMcp(mcp: McpAttachment, unattended = false): { mcp: Reco
   // rule comes first and the per-tool rules after it.
   const wide: Record<string, string> = {};
   const listed: Record<string, string> = {};
+  // OpenCode joins server and tool with "_", so with a server named "a_b"
+  // next to "a", an allow for tool "b_c" on "a" would also allow tool "c" on
+  // "a_b". Then nothing is allowed by name, and every tool asks.
+  const ambiguous = mcp.attached.some((s) => s.name.includes("_"));
   for (const server of mcp.attached) {
     servers[server.name] = {
       type: "remote",
@@ -74,7 +78,7 @@ export function opencodeMcp(mcp: McpAttachment, unattended = false): { mcp: Reco
       continue;
     }
     wide[`${server.name}_*`] = unattended ? "deny" : "ask";
-    for (const tool of server.allowTools) listed[`${server.name}_${tool}`] = "allow";
+    if (!ambiguous) for (const tool of server.allowTools) listed[`${server.name}_${tool}`] = "allow";
   }
   return { mcp: servers, permission: { ...wide, ...listed } };
 }

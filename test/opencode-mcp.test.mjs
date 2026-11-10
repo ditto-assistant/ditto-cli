@@ -64,6 +64,19 @@ test("opencodeMcp: under client approvals each server asks (denies when unattend
   assert.deepEqual(opencodeMcp(claudeMcpAttachment(catalog(false), "s"), true).permission, { "ditto_*": "allow", "ditto-github_*": "allow" }, "Ditto holds gated calls itself");
 });
 
+test("opencodeMcp: when flattened names could collide, nothing is allowed by name", () => {
+  const cat = {
+    endpoint: "e", approvalMode: "park", clientApprovals: true,
+    servers: [
+      { name: "a", url: "https://router.test/v1/mcp/a", tools: [{ name: "b_c", tier: "read", approval: false }] },
+      { name: "a_b", url: "https://router.test/v1/mcp/a_b", tools: [{ name: "c", tier: "gated", approval: true }] },
+    ],
+  };
+  // claudeServerName prefixes non-ditto sources: "ditto-a" and "ditto-a_b".
+  const permission = opencodeMcp(claudeMcpAttachment(cat, "s")).permission;
+  assert.deepEqual(permission, { "ditto-a_*": "ask", "ditto-a_b_*": "ask" }, "ditto-a_b_c must not be allowed by ditto-a's b_c");
+});
+
 test("planOpencode: TUI and run forms, keys only in env", () => {
   const mcp = claudeMcpAttachment(catalog(true), "s");
   const run = planOpencode({ ...base, mcp, mcpApiKey: "mcp-key", prompt: "hi", passthrough: ["--format", "json"] });

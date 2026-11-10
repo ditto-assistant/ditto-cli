@@ -708,7 +708,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   // an id, --continue would pick whichever conversation in the directory is
   // newest, so a resume by name refuses instead (-c is that choice made openly).
   if ((harness === "cursor" || harness === "opencode") && record && !record.harnessSessionId) {
-    const hint = harness === "cursor" ? "cursor-agent --resume" : "opencode --session";
+    const hint = harness === "cursor" ? "cursor-agent --resume (a picker)" : "heyditto opencode -c (OpenCode's newest conversation here)";
     throw new Error(`session ${record.id} has no ${AGENT_LABELS[harness]} conversation id to resume; start a new one, or reopen it with ${hint}`);
   }
   // When OpenCode's session is looked up after the launch: only one created since then.
