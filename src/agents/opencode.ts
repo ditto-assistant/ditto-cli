@@ -1,3 +1,5 @@
+import { spawnSync } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { MCP_KEY_ENV, type McpAttachment, TOOL_SURFACE_HEADER, TOOL_SURFACE_MCP } from "./claude-mcp.js";
 import { harnessHeaders } from "./harness-headers.js";
 import { type HarnessPlan, type PlanInput, SESSION_HEADER } from "./types.js";
@@ -74,6 +76,33 @@ export function opencodeMcp(mcp: McpAttachment, unattended = false): { mcp: Reco
     for (const tool of server.allowTools) listed[`${server.name}_${tool}`] = "allow";
   }
   return { mcp: servers, permission: { ...wide, ...listed } };
+}
+
+/**
+ * The OpenCode session a launch in `cwd` created, from `opencode session
+ * list`: the one session in that directory created at or after `since`.
+ * Undefined when there is none or more than one (a parallel run in the same
+ * directory), so a resume never names someone else's conversation.
+ */
+export function findOpencodeSession(cwd: string, since: number, run: typeof spawnSync = spawnSync): string | undefined {
+  const res = run("opencode", ["session", "list", "--format", "json"], { cwd, encoding: "utf8", timeout: 15_000 });
+  if (res.status !== 0 || typeof res.stdout !== "string") return undefined;
+  let dir = cwd;
+  try {
+    dir = realpathSync(cwd);
+  } catch {
+    // An unreadable directory is compared as given.
+  }
+  let sessions: unknown;
+  try {
+    sessions = JSON.parse(res.stdout);
+  } catch {
+    return undefined;
+  }
+  if (!Array.isArray(sessions)) return undefined;
+  const mine = sessions.filter((s): s is { id: string } =>
+    typeof s?.id === "string" && typeof s?.created === "number" && s.created >= since && (s.directory === dir || s.directory === cwd));
+  return mine.length === 1 ? mine[0].id : undefined;
 }
 
 /** Builds the `opencode` invocation: the TUI, or `opencode run` for a prompt. */

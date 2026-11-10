@@ -35,7 +35,7 @@ import { watchClaudeSessionTitle } from "./claude-title-sync.js";
 import { type ClaudeHookAttachment, claudeHookAttachment } from "./claude-hooks.js";
 import { planCodex } from "./codex.js";
 import { createCursorChat, planCursor, writeCursorPlugin } from "./cursor.js";
-import { planOpencode } from "./opencode.js";
+import { findOpencodeSession, planOpencode } from "./opencode.js";
 import { cliProxyModel, resolveCliProxy } from "./cliproxy.js";
 import { readHarnessVersion } from "./harness-headers.js";
 import { ensureGrokHome, planGrok } from "./grok.js";
@@ -704,9 +704,15 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   }
   // Claude: the resumed conversation, or the id a fresh one is created under.
   // Cursor: a fresh session opens a chat of its own, so a later resume names it.
-  if (harness === "cursor" && record && !record.harnessSessionId) {
-    throw new Error(`session ${record.id} has no Cursor chat id to resume; start a new one, or reopen it with cursor-agent --resume`);
+  // OpenCode: the session it created is recorded when the launch ends. Without
+  // an id, --continue would pick whichever conversation in the directory is
+  // newest, so a resume by name refuses instead (-c is that choice made openly).
+  if ((harness === "cursor" || harness === "opencode") && record && !record.harnessSessionId) {
+    const hint = harness === "cursor" ? "cursor-agent --resume" : "opencode --session";
+    throw new Error(`session ${record.id} has no ${AGENT_LABELS[harness]} conversation id to resume; start a new one, or reopen it with ${hint}`);
   }
+  // When OpenCode's session is looked up after the launch: only one created since then.
+  const launchStartedAt = Date.now();
   let harnessSessionId = harness === "claude"
     ? (transcript?.id ?? (resumeLast ? undefined : sessionId))
     : record?.harnessSessionId;
@@ -988,6 +994,11 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
         log(`${c("yellow", "could not revoke")} key …${key.keyHint} (${err instanceof Error ? err.message : String(err)}); it expires in ${expiresIn}`);
       }
     }
+    // OpenCode picks its own session id; record the one this launch created.
+    if (harness === "opencode" && !harnessSessionId && exitCode !== null) {
+      harnessSessionId = findOpencodeSession(cwd, launchStartedAt);
+      if (harnessSessionId) nextRecord.harnessSessionId = harnessSessionId;
+    }
     // Headless runs (-p / codex exec) are scripted, and a launch whose spawn
     // failed has no conversation to reopen; neither wants the resume epilogue.
     if (options.prompt === undefined && exitCode !== null) {
@@ -997,9 +1008,9 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
       const empty = harness === "claude" && harnessSessionId !== undefined && plan.args.includes(harnessSessionId) &&
         !(await findTranscriptById(harnessSessionId, cwd));
       if (empty) log(`nothing was sent, so there is no conversation to resume ${c("dim", "(heyditto claude --resume lists the ones there are)")}`);
-      // A Cursor session without its own chat id cannot be resumed by name
-      // (the launch refuses it), so it gets no hint that would fail.
-      else if (harness !== "cursor" || harnessSessionId) logResumeHint(harness, sessionId);
+      // A Cursor or OpenCode session without its own conversation id cannot be
+      // resumed by name (the launch refuses it), so it gets no hint that would fail.
+      else if ((harness !== "cursor" && harness !== "opencode") || harnessSessionId) logResumeHint(harness, sessionId);
     }
     await writeSession({ ...nextRecord, endedAt: new Date().toISOString(), exitCode });
   }

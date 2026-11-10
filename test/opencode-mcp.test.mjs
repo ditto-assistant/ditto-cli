@@ -79,3 +79,15 @@ test("wantsMcp: OpenCode follows --mcp, then opencode_tool_surface, then native 
   assert.equal(wantsMcp({ mcp: false }, {}, "opencode"), false);
   assert.equal(wantsMcp({}, { providerOptions: { opencode_tool_surface: "router" } }, "opencode"), false);
 });
+
+test("findOpencodeSession names the one session this launch created in its directory, and nothing it cannot be sure of", async () => {
+  const { findOpencodeSession } = await import("../dist/agents/opencode.js");
+  const list = (sessions, status = 0) => () => ({ status, stdout: JSON.stringify(sessions) });
+  const since = 1000;
+  const mine = { id: "ses_mine", created: 1500, directory: "/work/repo" };
+  assert.equal(findOpencodeSession("/work/repo", since, list([mine, { id: "ses_old", created: 500, directory: "/work/repo" }, { id: "ses_other", created: 1600, directory: "/elsewhere" }])), "ses_mine");
+  assert.equal(findOpencodeSession("/work/repo", since, list([mine, { id: "ses_parallel", created: 1700, directory: "/work/repo" }])), undefined, "two candidates: a parallel run");
+  assert.equal(findOpencodeSession("/work/repo", since, list([])), undefined);
+  assert.equal(findOpencodeSession("/work/repo", since, list([mine], 1)), undefined, "a failed listing");
+  assert.equal(findOpencodeSession("/work/repo", since, () => ({ status: 0, stdout: "not json" })), undefined);
+});
