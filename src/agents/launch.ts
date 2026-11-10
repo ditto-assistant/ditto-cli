@@ -995,7 +995,8 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
       }
     }
     // OpenCode picks its own session id; record the one this launch created.
-    if (harness === "opencode" && !harnessSessionId && exitCode !== null) {
+    // A --continue launch created none, so a session found then is someone else's.
+    if (harness === "opencode" && !harnessSessionId && !resumeLast && exitCode !== null) {
       harnessSessionId = findOpencodeSession(cwd, launchStartedAt);
       if (harnessSessionId) nextRecord.harnessSessionId = harnessSessionId;
     }
