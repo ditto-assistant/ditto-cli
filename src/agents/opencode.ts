@@ -31,7 +31,8 @@ export const OPENCODE_PROVIDER_ID = "ditto";
  */
 export function opencodeConfig(input: PlanInput): string {
   const model = input.model ?? OPENCODE_PROVIDER_ID;
-  const headers: Record<string, string> = {
+  // Local inference (CLIProxy) gets none of the Router's headers.
+  const headers: Record<string, string> = input.localInference ? {} : {
     [SESSION_HEADER]: input.sessionId,
     ...Object.fromEntries(harnessHeaders("opencode", input.harnessVersion)),
     // The tools are attached below; the router must not inject them again.
@@ -100,8 +101,10 @@ export function findOpencodeSession(cwd: string, since: number, run: typeof spaw
     return undefined;
   }
   if (!Array.isArray(sessions)) return undefined;
+  // A subagent's child session is not the conversation to resume.
   const mine = sessions.filter((s): s is { id: string } =>
-    typeof s?.id === "string" && typeof s?.created === "number" && s.created >= since && (s.directory === dir || s.directory === cwd));
+    typeof s?.id === "string" && typeof s?.created === "number" && s.created >= since && (s.directory === dir || s.directory === cwd) &&
+    !s.parentID && !s.parentId);
   return mine.length === 1 ? mine[0].id : undefined;
 }
 

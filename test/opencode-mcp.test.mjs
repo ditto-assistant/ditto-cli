@@ -35,6 +35,11 @@ test("opencodeConfig: a Ditto provider on the endpoint, the key only as {env:…
   assert.ok(!JSON.stringify(config).includes("inf-key"));
 });
 
+test("opencodeConfig: local inference sends none of the Router's headers", () => {
+  const config = JSON.parse(opencodeConfig({ ...base, localInference: true, mcp: claudeMcpAttachment(catalog(false), "s") }));
+  assert.deepEqual(config.provider.ditto.options.headers, {});
+});
+
 test("opencodeConfig: native MCP attaches remote servers and tells the router", () => {
   const config = JSON.parse(opencodeConfig({ ...base, mcp: claudeMcpAttachment(catalog(false), "sess-1") }));
   assert.equal(config.provider.ditto.options.headers[TOOL_SURFACE_HEADER], "mcp");
@@ -87,6 +92,7 @@ test("findOpencodeSession names the one session this launch created in its direc
   const mine = { id: "ses_mine", created: 1500, directory: "/work/repo" };
   assert.equal(findOpencodeSession("/work/repo", since, list([mine, { id: "ses_old", created: 500, directory: "/work/repo" }, { id: "ses_other", created: 1600, directory: "/elsewhere" }])), "ses_mine");
   assert.equal(findOpencodeSession("/work/repo", since, list([mine, { id: "ses_parallel", created: 1700, directory: "/work/repo" }])), undefined, "two candidates: a parallel run");
+  assert.equal(findOpencodeSession("/work/repo", since, list([mine, { id: "ses_child", created: 1600, directory: "/work/repo", parentID: "ses_mine" }])), "ses_mine", "a subagent's child session does not count");
   assert.equal(findOpencodeSession("/work/repo", since, list([])), undefined);
   assert.equal(findOpencodeSession("/work/repo", since, list([mine], 1)), undefined, "a failed listing");
   assert.equal(findOpencodeSession("/work/repo", since, () => ({ status: 0, stdout: "not json" })), undefined);
