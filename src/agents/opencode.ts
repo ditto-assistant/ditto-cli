@@ -105,10 +105,14 @@ export function findOpencodeSession(cwd: string, since: number, run: typeof spaw
     return undefined;
   }
   if (!Array.isArray(sessions)) return undefined;
-  // A subagent's child session is not the conversation to resume.
-  const mine = sessions.filter((s): s is { id: string } =>
-    typeof s?.id === "string" && typeof s?.created === "number" && s.created >= since && (s.directory === dir || s.directory === cwd) &&
-    !s.parentID && !s.parentId);
+  // 1.18's list prints a top-level `created`; OpenCode's own session record
+  // nests it as `time.created`. A subagent's child session is not the
+  // conversation to resume.
+  const mine = sessions.filter((s): s is { id: string } => {
+    const created = typeof s?.created === "number" ? s.created : s?.time?.created;
+    return typeof s?.id === "string" && typeof created === "number" && created >= since &&
+      (s.directory === dir || s.directory === cwd) && !s.parentID && !s.parentId;
+  });
   return mine.length === 1 ? mine[0].id : undefined;
 }
 

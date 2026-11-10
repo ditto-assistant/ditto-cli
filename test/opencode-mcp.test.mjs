@@ -106,6 +106,8 @@ test("findOpencodeSession names the one session this launch created in its direc
   assert.equal(findOpencodeSession("/work/repo", since, list([mine, { id: "ses_old", created: 500, directory: "/work/repo" }, { id: "ses_other", created: 1600, directory: "/elsewhere" }])), "ses_mine");
   assert.equal(findOpencodeSession("/work/repo", since, list([mine, { id: "ses_parallel", created: 1700, directory: "/work/repo" }])), undefined, "two candidates: a parallel run");
   assert.equal(findOpencodeSession("/work/repo", since, list([mine, { id: "ses_child", created: 1600, directory: "/work/repo", parentID: "ses_mine" }])), "ses_mine", "a subagent's child session does not count");
+  assert.equal(findOpencodeSession("/work/repo", since, list([{ id: "ses_nested", time: { created: 1500 }, directory: "/work/repo" }])), "ses_nested", "the nested time.created form");
+  assert.equal(findOpencodeSession("/work/repo", since, list([{ id: "ses_old_nested", time: { created: 500 }, directory: "/work/repo" }])), undefined);
   assert.equal(findOpencodeSession("/work/repo", since, list([])), undefined);
   assert.equal(findOpencodeSession("/work/repo", since, list([mine], 1)), undefined, "a failed listing");
   assert.equal(findOpencodeSession("/work/repo", since, () => ({ status: 0, stdout: "not json" })), undefined);
