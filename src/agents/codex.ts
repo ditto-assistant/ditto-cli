@@ -1,3 +1,4 @@
+import { TOOL_DENY_HEADER } from "./claude-deny.js";
 import { MCP_KEY_ENV, type McpAttachment, TOOL_SURFACE_HEADER, TOOL_SURFACE_MCP } from "./claude-mcp.js";
 import { harnessHeaders } from "./harness-headers.js";
 import { CODEX_KEY_ENV, type HarnessPlan, type PlanInput, SESSION_HEADER } from "./types.js";
@@ -20,12 +21,18 @@ export function tomlInlineTable(entries: Array<[string, string]>): string {
  * every override turns its server on. The key stays out of argv: Codex reads
  * it from MCP_KEY_ENV (bearer_token_env_var).
  *
- * Approvals follow the attachment: tools Ditto holds itself, or that bypass
- * runs unasked, are "approve"; the rest are "prompt", so Codex asks about
- * exactly the calls Ditto would have held.
+ * Approvals follow the attachment: when Ditto holds gated calls itself, or
+ * bypass runs them, everything is "approve". Under client approvals the
+ * default is "prompt" and only the listed ungated tools are "approve", so
+ * Codex asks about the calls Ditto would have held, including any tool the
+ * server advertises after launch.
  */
-export function codexMcpArgs(mcp: McpAttachment): string[] {
+export function codexMcpArgs(mcp: McpAttachment, unattended = false): string[] {
   const args: string[] = [];
+  // `codex exec` has nobody to ask and runs "prompt" tools anyway (observed
+  // on codex-cli 0.167), so an unattended run under client approvals has
+  // Ditto refuse gated tools instead (tighten-only deny header, class:gated).
+  const denyGated = unattended && mcp.clientAsks;
   // Names are bare keys (claudeMcpAttachment drops any other), so they can
   // sit in the dotted -c path as they are.
   for (const server of mcp.attached) {
@@ -33,12 +40,16 @@ export function codexMcpArgs(mcp: McpAttachment): string[] {
       ["enabled", "true"],
       ["url", tomlString(server.url)],
       ["bearer_token_env_var", tomlString(MCP_KEY_ENV)],
-      ["http_headers", tomlInlineTable(Object.entries(server.headers))],
-      ["default_tools_approval_mode", tomlString("approve")],
+      ["http_headers", tomlInlineTable(Object.entries(denyGated ? { ...server.headers, [TOOL_DENY_HEADER]: [server.headers[TOOL_DENY_HEADER], "class:gated"].filter(Boolean).join(",") } : server.headers))],
+      // When Codex decides gated calls, a tool the server advertises after
+      // launch prompts by default; only the listed ungated ones are approved.
+      ["default_tools_approval_mode", tomlString(mcp.clientAsks ? "prompt" : "approve")],
     ];
-    if (server.askTools.length) {
-      const prompt = `{${tomlString("approval_mode")}=${tomlString("prompt")}}`;
-      fields.push(["tools", `{${server.askTools.map((t) => `${tomlString(t)}=${prompt}`).join(",")}}`]);
+    const mode = mcp.clientAsks ? "approve" : "prompt";
+    const listed = mcp.clientAsks ? server.allowTools : server.askTools;
+    if (listed.length) {
+      const rule = `{${tomlString("approval_mode")}=${tomlString(mode)}}`;
+      fields.push(["tools", `{${listed.map((t) => `${tomlString(t)}=${rule}`).join(",")}}`]);
     }
     args.push("-c", `mcp_servers.${server.name}={${fields.map(([k, v]) => `${k}=${v}`).join(",")}}`);
   }
@@ -88,7 +99,7 @@ export function planCodex(input: PlanInput): HarnessPlan {
       ...(input.mcp ? [[TOOL_SURFACE_HEADER, TOOL_SURFACE_MCP] as [string, string]] : []),
     ])}`,
   );
-  if (input.mcp) args.push(...codexMcpArgs(input.mcp));
+  if (input.mcp) args.push(...codexMcpArgs(input.mcp, input.prompt !== undefined || Boolean(input.unattended)));
   if (input.model) args.push("-m", input.model);
 
   if (input.yolo) args.push("--dangerously-bypass-approvals-and-sandbox");

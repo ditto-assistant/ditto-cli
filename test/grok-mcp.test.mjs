@@ -54,6 +54,19 @@ test("ensureGrokHome denies gated tools for a -p launch", async () => {
   assert.ok(planGrok({ ...base, prompt: "hi" }, home).args.includes("--always-approve"), "the reason: -p runs always-approve");
 });
 
+test("grokMcpConfig: under client approvals a tool nobody listed is not covered by an allow", () => {
+  const toml = grokMcpConfig(claudeMcpAttachment(catalog(true), "s"));
+  assert.match(toml, /\nallow = \["MCPTool\(ditto__search_memories\)","MCPTool\(ditto-github__list_issues\)"\]\n/);
+  assert.ok(!toml.includes("__*)"), "no server-wide allow");
+  assert.ok(!toml.includes("X-Ditto-Tool-Deny"), "an attended run asks; nothing to refuse");
+  const unattended = grokMcpConfig(claudeMcpAttachment(catalog(true), "s"), true);
+  assert.match(unattended, /"X-Ditto-Tool-Deny" = "class:gated"/, "--always-approve would run an unlisted gated tool, so Ditto refuses it");
+  for (const [clientApprovals, opts] of [[false, {}], [true, { yolo: true }]]) {
+    const wide = grokMcpConfig(claudeMcpAttachment(catalog(clientApprovals), "s", opts), true);
+    assert.ok(wide.includes("MCPTool(ditto__*)") && !wide.includes("X-Ditto-Tool-Deny"), "Ditto holds gated calls, or --yolo runs them: server-wide allow");
+  }
+});
+
 test("grokModelConfig tells the router the tools are attached only when they are", () => {
   const mcp = claudeMcpAttachment(catalog(false), "s");
   assert.ok(grokModelConfig({ ...base, mcp }).includes(`extra_headers = { "${TOOL_SURFACE_HEADER}" = "mcp" }`));

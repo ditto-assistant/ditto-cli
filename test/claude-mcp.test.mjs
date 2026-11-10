@@ -253,3 +253,11 @@ test("mcpApprovalNote says who stops a gated call, and never claims a gate that 
   assert.equal(mcpApprovalNote(claudeMcpAttachment(off, "s")), "no gated tools");
   assert.equal(mcpApprovalNote(claudeMcpAttachment({ ...off, clientApprovals: false }, "s")), "no gated tools");
 });
+
+test("mcpApprovalNote: an unattended run says the gated tools are refused, not asked about", () => {
+  const asked = claudeMcpAttachment(catalog(true), "s");
+  assert.match(mcpApprovalNote(asked, "Codex"), /^Codex asks before 1 gated$/);
+  assert.equal(mcpApprovalNote(asked, "Codex", true), "1 gated refused: nobody to approve them");
+  assert.equal(mcpApprovalNote(claudeMcpAttachment(catalog(false), "s"), "Codex", true), "Ditto holds 1 gated", "Ditto's own hold is unchanged");
+  assert.match(mcpApprovalNote(claudeMcpAttachment(catalog(true), "s", { yolo: true }), "Codex", true), /run unasked \(--yolo\)/);
+});
