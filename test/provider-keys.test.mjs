@@ -96,6 +96,8 @@ test('the hidden prompt drops escape sequences and control characters',async()=>
  assert.equal(input.value,'sk-abce');
  assert.equal(input.feed('f\rignored'),'done');assert.equal(input.value,'sk-abcef');
  assert.equal(new SecretInput().feed('x\u0003'),'cancel');
+ const restarted=new SecretInput();restarted.feed('k\u001b[\u001b[Ay');assert.equal(restarted.value,'ky');
+ const astral=new SecretInput();astral.feed('a\u{1F511}\u007f');assert.equal(astral.value,'a');
 });
 
 test('keys set refuses an empty key and a key given as an argument',async()=>{

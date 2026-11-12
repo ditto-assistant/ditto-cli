@@ -171,7 +171,9 @@ export class SecretInput {
         continue;
       }
       if (this.escape === "csi") {
-        if (ch >= "@" && ch <= "~") this.escape = undefined;
+        // an ESC inside a sequence starts a new one
+        if (ch === "\u001b") this.escape = "start";
+        else if (ch >= "@" && ch <= "~") this.escape = undefined;
         continue;
       }
       if (this.escape === "ss3") {
@@ -181,7 +183,8 @@ export class SecretInput {
       if (ch === "\u001b") this.escape = "start";
       else if (ch === "\r" || ch === "\n" || ch === "\u0004") return "done";
       else if (ch === "\u0003") return "cancel";
-      else if (ch === "\u007f" || ch === "\b") this.value = this.value.slice(0, -1);
+      // by code point, so an astral character never leaves half a surrogate pair behind
+      else if (ch === "\u007f" || ch === "\b") this.value = Array.from(this.value).slice(0, -1).join("");
       else {
         const code = ch.codePointAt(0) ?? 0;
         if (code >= 0x20 && !(code >= 0x7f && code <= 0x9f)) this.value += ch;
@@ -379,7 +382,13 @@ export function registerKeyCommands(
     .addOption(outputOption())
     .action(action(async (target: string, options: KeyOptions & { yes?: boolean }) => {
       const key = await resolveProviderKey(target, options.label);
-      await confirmTyped({ action: `remove your ${keyName(key)} key from Ditto`, expected: key.provider, label: "the provider", yes: options.yes });
+      // a named key is confirmed by its name, so it can't be mistaken for the provider's original key
+      await confirmTyped({
+        action: `remove your ${keyName(key)} key from Ditto`,
+        expected: key.label || key.provider,
+        label: key.label ? "the key's name" : "the provider",
+        yes: options.yes,
+      });
       await withKeyAccess(isJSON(options), () => removeProviderKey(key.id));
       print(options, { removed: key }, `Removed your ${keyName(key)} key from Ditto.\n`);
     }));
