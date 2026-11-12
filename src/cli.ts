@@ -38,6 +38,7 @@ import { registerCodexAppCommand } from "./agents/codexapp.js";
 import { registerAppCommands } from "./app-commands.js";
 import { registerConfigCommands } from "./dittoconfig/commands.js";
 import { deviceLogin } from "./device-login.js";
+import { registerKeyCommands } from "./provider-keys.js";
 import { registerSelfUpdateCommands } from "./self-update.js";
 import { registerRelayCommands } from "./relay/commands.js";
 import { registerMcpConfigCommand } from "./agents/mcp-config.js";
@@ -159,6 +160,8 @@ interface InitOptions extends CommonOptions {
 interface LoginOptions extends CommonOptions {
   paste?: boolean;
   stdin?: boolean;
+  /** Approve key access too (device intent "keys"). */
+  keys?: boolean;
 }
 
 function outputOption(): Option {
@@ -405,16 +408,23 @@ async function cmdLogin(keyArg: string | undefined, options: LoginOptions): Prom
   let defaultEndpoint: string | undefined;
   let pickedEndpoint: string | undefined;
 
+  if (options.keys && (key || options.stdin || options.paste)) {
+    throw new Error("--keys signs in through the browser; drop the key, --stdin and --paste");
+  }
+  if (options.keys && !process.stdin.isTTY) {
+    throw new Error("--keys signs in through the browser and needs a terminal");
+  }
+
   if (!key && options.stdin) {
     key = (await readKeyFromStdin()).trim();
   } else if (!key && !options.paste && process.stdin.isTTY) {
     // Browser device flow: no key to copy around. The page signs the user in
     // (or creates the account) and hands the key back to this process.
     const result = await deviceLogin({
-      intent: "login",
+      intent: options.keys ? "keys" : "login",
       onCode: (userCode, url) => {
         process.stderr.write(
-          `\nSign in to Ditto in your browser:\n\n` +
+          `\nSign in to Ditto in your browser${options.keys ? " (with access to your provider keys)" : ""}:\n\n` +
             `  ${url}\n\n` +
             `  Code: ${userCode}\n\n` +
             `Opening your browser…\n`,
@@ -1331,11 +1341,13 @@ your own workspace or an app workspace.`,
     .argument("[key]", "Ditto API key (omit to sign in through the browser)")
     .option("--paste", "open the key creation page and paste a key instead of the device flow")
     .option("--stdin", "read the API key from stdin")
+    .option("--keys", "also let this sign-in manage your provider keys ('heyditto keys')")
     .addOption(hiddenOutputOption())
     .action(cmdLogin);
 
   installProfileHook(program);
   registerEndpointCommands(program, addExamples, outputOption);
+  registerKeyCommands(program, addExamples, outputOption);
   registerProfileCommands(program, addExamples, outputOption);
   registerAppCommands(program, addExamples, outputOption);
   registerOrgCommands(program, addExamples, outputOption, orgOption,
