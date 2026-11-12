@@ -10,7 +10,7 @@ const cli=new URL('../dist/cli.js',import.meta.url);
 const SECRET='sk-or-v1-never-printed';
 
 // A stand-in Ditto API for /api/v5/inference/provider-keys.
-async function startKeysStub({grant=true}={}){
+async function startKeysStub({grant=true,limit=false}={}){
  const calls=[];
  const keys=[{id:'11111111-1111-4111-8111-111111111111',provider:'openrouter',configured:true,enabled:true,metadata:{secret:'must-not-leak'}},
   {id:'22222222-2222-4222-8222-222222222222',provider:'gm',label:'work',configured:true,enabled:true}];
@@ -24,7 +24,9 @@ async function startKeysStub({grant=true}={}){
   if(req.url==='/api/v5/inference/provider-keys'&&req.method==='GET')return send(200,{keys});
   if(req.url==='/api/v5/inference/provider-keys'&&req.method==='POST'){
    if(!grant)return refused();
-   return send(200,{key:{id:'33333333-3333-4333-8333-333333333333',provider:body.provider,configured:true,enabled:body.enabled!==false},validation:{ok:false,status:401,error:'bad key',checkedAt:'2026-11-11T00:00:00Z'}});
+   if(limit&&body.label)return send(402,{message:'plan does not allow more keys for this provider',code:'provider_key_limit',status:402});
+   // A careless server echoing the key must not reach stdout.
+   return send(200,{key:{id:'33333333-3333-4333-8333-333333333333',provider:body.provider,...(body.label?{label:body.label}:{}),configured:true,enabled:body.enabled!==false,key:body.key},validation:{ok:false,status:401,error:'bad key',checkedAt:'2026-11-11T00:00:00Z'}});
   }
   const m=req.url.match(/^\/api\/v5\/inference\/provider-keys\/([^/]+)(\/validate)?$/);
   if(m&&m[2])return send(200,{validation:{ok:true,checkedAt:'2026-11-11T00:00:00Z'}});
@@ -48,7 +50,7 @@ test('keys list and providers print metadata only',async()=>{
  try{
   const json=await run(stub.base,['keys','list','--output','json']);assert.equal(json.status,0,json.stderr);
   const listed=JSON.parse(json.stdout);assert.equal(listed.keys.length,2);assert.ok(!json.stdout.includes('must-not-leak'));
-  const text=await run(stub.base,['keys','list']);assert.match(text.stdout,/openrouter  on  11111111/);assert.match(text.stdout,/gm  on  22222222.*work/);
+  const text=await run(stub.base,['keys','list']);assert.match(text.stdout,/openrouter  on  11111111/);assert.match(text.stdout,/gm "work"  on  22222222/);
   const providers=await run(stub.base,['keys','providers','--output','json']);assert.deepEqual(JSON.parse(providers.stdout).providers.map(p=>p.id),['gm','claude']);
  }finally{stub.close();}
 });
@@ -66,7 +68,34 @@ test('keys set reads the key from stdin, normalizes the provider and never print
   assert.equal(json.status,0,json.stderr);const saved=JSON.parse(json.stdout);
   assert.equal(saved.key.provider,'gm');assert.equal(saved.key.enabled,false);assert.equal(saved.validation.status,401);
   assert.deepEqual(stub.calls.filter(c=>c.method==='POST').at(-1).body,{provider:'gm',key:'gm_live_x',enabled:false});
+  assert.ok(!json.stdout.includes('gm_live_x'),'an echoed key is dropped from the output');
  }finally{stub.close();}
+});
+
+test('keys set --label saves a named key, and explains the plan limit',async()=>{
+ const stub=await startKeysStub();
+ try{
+  const out=await run(stub.base,['keys','set','gm','--label',' work '],'gm_live_work');
+  assert.equal(out.status,0,out.stderr);
+  assert.deepEqual(stub.calls.find(c=>c.method==='POST').body,{provider:'gm',key:'gm_live_work',label:'work'});
+  assert.match(out.stdout,/Saved your gm "work" key to Ditto\./);
+ }finally{stub.close();}
+ const limited=await startKeysStub({limit:true});
+ try{
+  const out=await run(limited.base,['keys','set','gm','--label','work','--output','json'],'gm_live_work');
+  assert.equal(out.status,1);const {error}=JSON.parse(out.stdout);
+  assert.equal(error.code,'provider_key_limit');assert.match(error.message,/plan allows no more gm keys/);
+ }finally{limited.close();}
+});
+
+test('the hidden prompt drops escape sequences and control characters',async()=>{
+ const {SecretInput}=await import('../dist/provider-keys.js');
+ const input=new SecretInput();
+ assert.equal(input.feed('sk-\u001b[Dab\u001bOH\u0015c'),undefined);
+ assert.equal(input.feed('d\u007fe\u001b[1;5C'),undefined);
+ assert.equal(input.value,'sk-abce');
+ assert.equal(input.feed('f\rignored'),'done');assert.equal(input.value,'sk-abcef');
+ assert.equal(new SecretInput().feed('x\u0003'),'cancel');
 });
 
 test('keys set refuses an empty key and a key given as an argument',async()=>{
@@ -97,7 +126,7 @@ test('enable, disable, validate and remove resolve a provider or an id',async()=
  try{
   const off=await run(stub.base,['keys','disable','openrouter','--output','json']);assert.equal(off.status,0,off.stderr);
   assert.deepEqual(stub.calls.find(c=>c.method==='PATCH'),{method:'PATCH',url:'/api/v5/inference/provider-keys/11111111-1111-4111-8111-111111111111',body:{enabled:false},auth:'Bearer ditto_mcp_fixture'});
-  const on=await run(stub.base,['keys','enable','gm','--label','work']);assert.equal(on.status,0,on.stderr);assert.match(on.stdout,/Turned on your gm key/);
+  const on=await run(stub.base,['keys','enable','gm','--label','work']);assert.equal(on.status,0,on.stderr);assert.match(on.stdout,/Turned on your gm "work" key/);
   const missing=await run(stub.base,['keys','enable','gm','--output','json']);
   assert.equal(missing.status,1);assert.equal(JSON.parse(missing.stdout).error.code,'key_not_found');
   const checked=await run(stub.base,['keys','validate','11111111-1111-4111-8111-111111111111']);

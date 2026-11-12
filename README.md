@@ -229,7 +229,7 @@ heyditto graphs subscribers
 heyditto graphs sharing (--enable|--disable) [--title <t>] [--description <d>]
 heyditto init [--name <name>] [--subscribe <@graph>]... [<@graph>...] [--json]
 heyditto login [<key>] [--paste] [--stdin] [--keys]
-heyditto keys list|providers|set|enable|disable|remove|validate [<provider>]
+heyditto keys list|providers|set|enable|disable|remove|validate [<provider>] [--label <name>]
 heyditto endpoints [--set-default <slug>] [--clear-default]
 heyditto apps list [--company <id>]
 heyditto apps create <name> [--gh-secret NAME --repo o/r | --gcp-secret NAME | …]
@@ -999,10 +999,17 @@ heyditto login --keys                         # sign in and approve key access
 heyditto keys providers                       # what you can save a key for
 heyditto keys set openrouter                  # prompts, input hidden
 printf %s "$GM_KEY" | heyditto keys set gm    # or pipe it on stdin
+heyditto keys set gm --label work             # a second, named gm key
 heyditto keys list
 heyditto keys disable gm                      # enable | disable | validate | remove
+heyditto keys disable gm --label work         # the named one
 heyditto keys remove openrouter --yes
 ```
+
+A provider can hold several keys, each with its own name: `--label` picks one,
+and saving under a name that exists replaces that key. No `--label` means the
+provider's original key. How many keys one provider may hold depends on your
+plan (one on Free); past it, `keys set` fails with `provider_key_limit`.
 
 `keys set` reads the key from stdin or a hidden prompt, never from an argument,
 and checks it with the provider right away: a refused key is still saved, and
@@ -1011,8 +1018,8 @@ sign-in approved for key access: `heyditto login --keys`. A plain login can
 list and check keys, and `keys set` on a terminal offers to sign in again.
 With `--output json`, results print the API's JSON and failures print
 `{"error":{"code","message","status"}}` on stdout with exit code 1 (codes
-include `provider_keys_not_granted`, `provider_not_supported`, `empty_key`,
-`key_not_found` and `not_logged_in`).
+include `provider_keys_not_granted`, `provider_not_supported`,
+`provider_key_limit`, `empty_key`, `key_not_found` and `not_logged_in`).
 
 ### `sessions`
 

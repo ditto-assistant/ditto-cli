@@ -60,11 +60,20 @@ export class KeysError extends Error {
   }
 }
 
+/** Metadata only: drops anything else a server might add to a key. */
+function keyMetadata({ id, provider, label, modelAllow, modelDeny, configured, enabled }: ProviderKey): ProviderKey {
+  return { id, provider, label, modelAllow, modelDeny, configured, enabled };
+}
+
+/** How a key is named in messages: `gm`, or `gm "work"` for a named key. */
+export function keyName(key: { provider: string; label?: string }): string {
+  return key.label ? `${key.provider} "${key.label}"` : key.provider;
+}
+
 export async function listProviderKeys(): Promise<{ keys: ProviderKey[] }> {
   const response = await apiFetch<{ keys?: ProviderKey[] }>(BASE);
   if (!response || !Array.isArray(response.keys)) throw new Error("Ditto returned an invalid provider-key list");
-  // Metadata only: drop anything else a server might add.
-  return { keys: response.keys.map(({ id, provider, label, modelAllow, modelDeny, configured, enabled }) => ({ id, provider, label, modelAllow, modelDeny, configured, enabled })) };
+  return { keys: response.keys.map(keyMetadata) };
 }
 
 export async function listKeyProviders(): Promise<{ providers: KeyProvider[] }> {
@@ -73,16 +82,22 @@ export async function listKeyProviders(): Promise<{ providers: KeyProvider[] }> 
   return { providers: response.providers };
 }
 
-export async function saveProviderKey(input: { provider: string; key: string; enabled?: boolean }): Promise<{ key: ProviderKey; validation?: KeyValidation }> {
+export async function saveProviderKey(input: { provider: string; label?: string; key: string; enabled?: boolean }): Promise<{ key: ProviderKey; validation?: KeyValidation }> {
   const key = input.key.trim();
   if (!key) throw new KeysError("empty_key", "no key given: pipe it on stdin or paste it at the prompt");
   const body: Record<string, unknown> = { provider: normalizeProvider(input.provider), key };
+  const label = input.label?.trim();
+  if (label) body.label = label;
   if (input.enabled === false) body.enabled = false;
-  return apiFetch(BASE, { method: "POST", body });
+  const response = await apiFetch<{ key?: ProviderKey; validation?: KeyValidation }>(BASE, { method: "POST", body });
+  if (!response?.key) throw new Error("Ditto returned an invalid provider-key response");
+  return { key: keyMetadata(response.key), ...(response.validation ? { validation: response.validation } : {}) };
 }
 
 export async function setProviderKeyEnabled(id: string, enabled: boolean): Promise<{ key: ProviderKey }> {
-  return apiFetch(`${BASE}/${encodeURIComponent(id)}`, { method: "PATCH", body: { enabled } });
+  const response = await apiFetch<{ key?: ProviderKey }>(`${BASE}/${encodeURIComponent(id)}`, { method: "PATCH", body: { enabled } });
+  if (!response?.key) throw new Error("Ditto returned an invalid provider-key response");
+  return { key: keyMetadata(response.key) };
 }
 
 export async function removeProviderKey(id: string): Promise<Record<string, never>> {
@@ -139,6 +154,43 @@ export function errorJSON(error: unknown): { error: { code: string; message: str
   return { error: { code: code ?? "error", message: errorMessage(error), ...(status ? { status } : {}) } };
 }
 
+/**
+ * Keystrokes of a hidden prompt in raw mode. Enter or Ctrl-D ends it, Ctrl-C
+ * cancels, backspace edits. Terminal escape sequences (arrow keys, Home, …)
+ * and other control characters are dropped, never saved as part of the key.
+ */
+export class SecretInput {
+  value = "";
+  private escape: "start" | "csi" | "ss3" | undefined;
+
+  /** Feeds raw input; "done" or "cancel" once the prompt is over. */
+  feed(chunk: string): "done" | "cancel" | undefined {
+    for (const ch of chunk) {
+      if (this.escape === "start") {
+        this.escape = ch === "[" ? "csi" : ch === "O" ? "ss3" : undefined;
+        continue;
+      }
+      if (this.escape === "csi") {
+        if (ch >= "@" && ch <= "~") this.escape = undefined;
+        continue;
+      }
+      if (this.escape === "ss3") {
+        this.escape = undefined;
+        continue;
+      }
+      if (ch === "\u001b") this.escape = "start";
+      else if (ch === "\r" || ch === "\n" || ch === "\u0004") return "done";
+      else if (ch === "\u0003") return "cancel";
+      else if (ch === "\u007f" || ch === "\b") this.value = this.value.slice(0, -1);
+      else {
+        const code = ch.codePointAt(0) ?? 0;
+        if (code >= 0x20 && !(code >= 0x7f && code <= 0x9f)) this.value += ch;
+      }
+    }
+    return undefined;
+  }
+}
+
 /** Reads the key without echoing it: stdin when piped, else a hidden prompt. */
 export async function readSecret(prompt: string): Promise<string> {
   if (!process.stdin.isTTY) {
@@ -155,22 +207,13 @@ export async function readSecret(prompt: string): Promise<string> {
   stdin.resume();
   try {
     return await new Promise<string>((resolve, reject) => {
-      let typed = "";
+      const input = new SecretInput();
       const onData = (chunk: string) => {
-        for (const ch of chunk) {
-          if (ch === "\r" || ch === "\n" || ch === "\u0004") {
-            stdin.off("data", onData);
-            resolve(typed.trim());
-            return;
-          }
-          if (ch === "\u0003") {
-            stdin.off("data", onData);
-            reject(new Error("cancelled"));
-            return;
-          }
-          if (ch === "\u007f" || ch === "\b") typed = typed.slice(0, -1);
-          else typed += ch;
-        }
+        const end = input.feed(chunk);
+        if (!end) return;
+        stdin.off("data", onData);
+        if (end === "done") resolve(input.value.trim());
+        else reject(new Error("cancelled"));
       };
       stdin.on("data", onData);
     });
@@ -268,7 +311,7 @@ export function registerKeyCommands(
       .addOption(outputOption())
       .action(action(async (options: KeyOptions) => {
         const result = await listProviderKeys();
-        const lines = result.keys.map((k) => `${k.provider}  ${k.configured && k.enabled ? "on" : "off"}  ${k.id}${k.label ? `  ${k.label}` : ""}\n`);
+        const lines = result.keys.map((k) => `${keyName(k)}  ${k.configured && k.enabled ? "on" : "off"}  ${k.id}\n`);
         print(options, result, `Provider keys in Ditto (${result.keys.length}; keys are never shown)\n${lines.join("")}`);
       })),
     `  heyditto keys list
@@ -290,17 +333,27 @@ export function registerKeyCommands(
       .command("set")
       .description("save or replace a provider key in Ditto (read from stdin or a hidden prompt)")
       .argument("<provider>", "provider id, e.g. gm, engy, instant, openrouter, openai, anthropic, google")
+      .option("--label <label>", "name the key, to keep several for one provider (replaces the key with that name)")
       .option("--disabled", "save it turned off")
       .addOption(outputOption())
       .action(action(async (providerArg: string, options: KeyOptions & { disabled?: boolean }) => {
         const provider = normalizeProvider(providerArg);
-        const secret = await readSecret(`Paste your ${provider} key (input hidden): `);
-        const result = await withKeyAccess(isJSON(options), () => saveProviderKey({ provider, key: secret, enabled: !options.disabled }));
+        const label = options.label?.trim();
+        const secret = await readSecret(`Paste your ${keyName({ provider, label })} key (input hidden): `);
+        let result: Awaited<ReturnType<typeof saveProviderKey>>;
+        try {
+          result = await withKeyAccess(isJSON(options), () => saveProviderKey({ provider, label, key: secret, enabled: !options.disabled }));
+        } catch (error) {
+          if (apiErrorCode(error) !== "provider_key_limit") throw error;
+          throw new KeysError("provider_key_limit",
+            `your Ditto plan allows no more ${provider} keys. Replace one by saving it under the same --label, remove one, or upgrade your plan.`);
+        }
         print(options, result,
-          `Saved your ${result.key.provider} key to Ditto${result.key.enabled ? "" : " (turned off)"}.\n${describeValidation(result.key.provider, result.validation)}`);
+          `Saved your ${keyName(result.key)} key to Ditto${result.key.enabled ? "" : " (turned off)"}.\n${describeValidation(keyName(result.key), result.validation)}`);
       })),
     `  heyditto keys set openrouter              (prompts, input hidden)
-  printf %s "$GM_KEY" | heyditto keys set gm --output json`,
+  printf %s "$GM_KEY" | heyditto keys set gm --output json
+  heyditto keys set gm --label work         (a second, named gm key)`,
   );
 
   for (const [name, enabled] of [["enable", true], ["disable", false]] as const) {
@@ -313,7 +366,7 @@ export function registerKeyCommands(
       .action(action(async (target: string, options: KeyOptions) => {
         const key = await resolveProviderKey(target, options.label);
         const result = await withKeyAccess(isJSON(options), () => setProviderKeyEnabled(key.id, enabled));
-        print(options, result, `Turned ${enabled ? "on" : "off"} your ${result.key.provider} key.\n`);
+        print(options, result, `Turned ${enabled ? "on" : "off"} your ${keyName(result.key)} key.\n`);
       }));
   }
 
@@ -326,9 +379,9 @@ export function registerKeyCommands(
     .addOption(outputOption())
     .action(action(async (target: string, options: KeyOptions & { yes?: boolean }) => {
       const key = await resolveProviderKey(target, options.label);
-      await confirmTyped({ action: `remove your ${key.provider} key from Ditto`, expected: key.provider, label: "the provider", yes: options.yes });
+      await confirmTyped({ action: `remove your ${keyName(key)} key from Ditto`, expected: key.provider, label: "the provider", yes: options.yes });
       await withKeyAccess(isJSON(options), () => removeProviderKey(key.id));
-      print(options, { removed: key }, `Removed your ${key.provider} key from Ditto.\n`);
+      print(options, { removed: key }, `Removed your ${keyName(key)} key from Ditto.\n`);
     }));
 
   keys
@@ -340,6 +393,6 @@ export function registerKeyCommands(
     .action(action(async (target: string, options: KeyOptions) => {
       const key = await resolveProviderKey(target, options.label);
       const result = await validateProviderKey(key.id);
-      print(options, result, describeValidation(key.provider, result.validation));
+      print(options, result, describeValidation(keyName(key), result.validation));
     }));
 }
