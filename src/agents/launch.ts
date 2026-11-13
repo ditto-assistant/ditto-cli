@@ -738,7 +738,9 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   const recordedModel = record?.model === endpoint.slug ? undefined : record?.model;
   const model = proxy ? cliProxyModel(proxy, harness as "claude" | "codex", options.model ?? recordedModel) : options.model ?? recordedModel;
   const classifier = proxy && harness === "claude"
-    ? cliProxyClassifierModel(proxy, options.autoModeClassifier ?? process.env[AUTO_MODE_CLASSIFIER_ENV], model)
+    ? options.autoModeClassifier !== undefined
+      ? cliProxyClassifierModel(proxy, options.autoModeClassifier, model)
+      : cliProxyClassifierModel(proxy, process.env[AUTO_MODE_CLASSIFIER_ENV], model, AUTO_MODE_CLASSIFIER_ENV)
     : {};
   if (classifier.notice) log(c("yellow", classifier.notice));
   const now = new Date().toISOString();
