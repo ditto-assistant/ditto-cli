@@ -344,3 +344,23 @@ test("an explicitly empty --auto-mode-classifier fails before any proxy or cloud
     assert.equal(cloud.calls.length, 0);
   } finally { proxy.close(); cloud.close(); }
 });
+
+test("classifier errors name the setting that carried the id", async () => {
+  const proxy = { models: [...MODELS, CLASSIFIER] };
+  assert.throws(() => cliProxyClassifierModel(proxy, "claude-sonnet-5", undefined, "DITTO_AUTO_MODE_CLASSIFIER"), /^Error: DITTO_AUTO_MODE_CLASSIFIER needs a dedicated model id/);
+  const listed = await proxyServer({ models: [...MODELS, CLASSIFIER] }); const cloud = await cloudServer(); const f = fixture(listed.url);
+  try {
+    for (const [value, mainModel] of [["Not Valid", "claude-sonnet-5"], ["claude-sonnet-5", "claude-sonnet-5"], [CLASSIFIER, CLASSIFIER]]) {
+      // A bad ambient value only costs the opt-in; the launch goes ahead.
+      const ambient = await run(["claude", "--cliproxy", "--model", mainModel, "--dry-run", "--endpoint", "alpha"], { ...f.env, DITTO_API_BASE: cloud.url, DITTO_AUTO_MODE_CLASSIFIER: value });
+      assert.equal(ambient.status, 0, ambient.stderr);
+      assert.match(ambient.stderr, /DITTO_AUTO_MODE_CLASSIFIER (needs|cannot)/);
+      assert.match(ambient.stderr, /keep Claude Code's default classifier model/);
+      assert.doesNotMatch(ambient.stderr, /--auto-mode-classifier (needs|cannot)/);
+      assert.equal(JSON.parse(ambient.stdout).env.CLAUDE_CODE_AUTO_MODE_MODEL, undefined);
+    }
+    const flag = await run(["claude", "--cliproxy", "--auto-mode-classifier", "Not Valid", "--dry-run", "--endpoint", "alpha"], { ...f.env, DITTO_API_BASE: cloud.url });
+    assert.equal(flag.status, 1, "the explicit flag still stops the launch");
+    assert.match(flag.stderr, /--auto-mode-classifier needs a model id/);
+  } finally { listed.close(); cloud.close(); }
+});

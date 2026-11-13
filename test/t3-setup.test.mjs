@@ -22,7 +22,7 @@ function fixture(t) {
   const claude = path.join(root, "claude");
   const heyditto = path.join(root, "heyditto");
   writeFileSync(claude, `#!${process.execPath}\nprocess.stdout.write("fake Claude 1.0.0\\n");\n`, { mode: 0o700 });
-  writeFileSync(heyditto, `#!${process.execPath}\nif(process.argv.includes('--help'))process.stdout.write('--cliproxy --mcp --no-mcp --no-mcp-only --no-remote-control\\n');else process.stdout.write(JSON.stringify({args:process.argv.slice(2),endpoint:process.env.DITTO_T3_ENDPOINT,inference:process.env.DITTO_T3_INFERENCE}));\n`, { mode: 0o700 });
+  writeFileSync(heyditto, `#!${process.execPath}\nif(process.argv.includes('--help'))process.stdout.write('--cliproxy --mcp --no-mcp --no-mcp-only --no-remote-control --auto-mode-classifier\\n');else process.stdout.write(JSON.stringify({args:process.argv.slice(2),endpoint:process.env.DITTO_T3_ENDPOINT,inference:process.env.DITTO_T3_INFERENCE}));\n`, { mode: 0o700 });
   const options = { endpoint: "ditto-dev", baseDir: base, claudeBin: claude, heydittoBin: heyditto };
   return { root, base, userdata, settings, original, options, plan: (overrides = {}) => planT3Setup({ ...options, ...overrides }) };
 }
@@ -276,4 +276,11 @@ test("--auto-mode-classifier exports the classifier id from a CLIProxy launcher 
   applyT3Setup(plan);
   const launched = spawnSync(plan.launcherPath, ["--print"], { encoding: "utf8", env: { ...process.env, DITTO_AUTO_MODE_CLASSIFIER: "" } });
   assert.equal(launched.status, 0, launched.stderr);
+});
+
+test("--auto-mode-classifier needs a heyditto that knows the option, or the launcher would ignore it", (t) => {
+  const f = fixture(t);
+  writeFileSync(f.options.heydittoBin, `#!${process.execPath}\nif(process.argv.includes('--help'))process.stdout.write('--cliproxy --mcp --no-mcp --no-mcp-only --no-remote-control\\n');\n`, { mode: 0o700 });
+  assert.doesNotThrow(() => f.plan(), "setup without the option still works with an older heyditto");
+  assert.throws(() => f.plan({ autoModeClassifier: "ditto-auto-mode-classifier" }), /does not support --auto-mode-classifier/);
 });

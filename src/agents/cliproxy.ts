@@ -106,10 +106,14 @@ export const CLASSIFIER_APPLIED_ENV = "DITTO_AUTO_MODE_CLASSIFIER_APPLIED";
 
 const CLASSIFIER_MODEL_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 
-/** Syntax and dedication rules for a classifier id, without a proxy at hand. */
-export function assertClassifierModelId(id: string): string {
-  if (!CLASSIFIER_MODEL_ID.test(id)) throw new Error("--auto-mode-classifier needs a model id of lowercase letters, digits, '.', '_' or '-' (at most 64 characters)");
-  if (id.startsWith("claude-")) throw new Error("--auto-mode-classifier needs a dedicated model id, not a Claude model id; CLIProxy serves claude-* ids from your subscriptions");
+/**
+ * Syntax and dedication rules for a classifier id, without a proxy at hand.
+ * `source` names where the id came from, so an error points at the setting
+ * the user actually wrote.
+ */
+export function assertClassifierModelId(id: string, source = "--auto-mode-classifier"): string {
+  if (!CLASSIFIER_MODEL_ID.test(id)) throw new Error(`${source} needs a model id of lowercase letters, digits, '.', '_' or '-' (at most 64 characters)`);
+  if (id.startsWith("claude-")) throw new Error(`${source} needs a dedicated model id, not a Claude model id; CLIProxy serves claude-* ids from your subscriptions`);
   return id;
 }
 
@@ -126,11 +130,11 @@ export function assertClassifierModelId(id: string): string {
  * on its default model: an id nobody serves would fail every check, and Claude
  * Code blocks the action whenever its classifier cannot answer.
  */
-export function cliProxyClassifierModel(proxy: Pick<CliProxy, "models">, requested: string | undefined, mainModel?: string): { model?: string; notice?: string } {
+export function cliProxyClassifierModel(proxy: Pick<CliProxy, "models">, requested: string | undefined, mainModel?: string, source = "--auto-mode-classifier"): { model?: string; notice?: string } {
   const id = requested?.trim();
   if (!id) return {};
-  assertClassifierModelId(id);
-  if (mainModel !== undefined && id === mainModel) throw new Error("--auto-mode-classifier cannot be the session's main model");
+  assertClassifierModelId(id, source);
+  if (mainModel !== undefined && id === mainModel) throw new Error(`${source} cannot be the session's main model`);
   if (!proxy.models.includes(id)) {
     return { notice: `auto-mode classifier ${id} is not in CLIProxy's model catalog; permission checks keep Claude Code's default classifier model` };
   }
