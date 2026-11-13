@@ -97,6 +97,13 @@ export async function resolveCliProxy(requested: string | true, env: NodeJS.Proc
  */
 export const AUTO_MODE_CLASSIFIER_ENV = "DITTO_AUTO_MODE_CLASSIFIER";
 
+/**
+ * Set beside CLAUDE_CODE_AUTO_MODE_MODEL when a launch applied the classifier
+ * id, so a later launch inside that session can tell the id it inherited from
+ * one the user chose, and drop only the former.
+ */
+export const CLASSIFIER_APPLIED_ENV = "DITTO_AUTO_MODE_CLASSIFIER_APPLIED";
+
 const CLASSIFIER_MODEL_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 
 /** Syntax and dedication rules for a classifier id, without a proxy at hand. */

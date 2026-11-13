@@ -618,6 +618,9 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   if (options.autoModeClassifier !== undefined && (harness !== "claude" || !options.cliproxy)) {
     throw new Error("--auto-mode-classifier applies only to heyditto claude --cliproxy");
   }
+  if (options.autoModeClassifier !== undefined && !options.autoModeClassifier.trim()) {
+    throw new Error("--auto-mode-classifier requires a model id; omit it to keep Claude Code's default classifier model");
+  }
   // Check the local proxy before sign-in or minting any cloud key. A failure
   // must never silently switch inference back to the paid Router.
   const proxy = options.cliproxy ? await resolveCliProxy(options.cliproxy) : undefined;
