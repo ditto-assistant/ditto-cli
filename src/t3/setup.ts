@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Command, Option } from "commander";
+import { assertClassifierModelId } from "../agents/cliproxy.js";
 import { chooseEndpoint } from "../agents/launch.js";
 import { LEGACY_PROFILE, profileLabel } from "../profile-state.js";
 import { type SelectedProfile, addProfileOption, selectedProfile, setProfileOverride } from "../profiles.js";
@@ -30,6 +31,12 @@ export interface T3SetupOptions {
    * custom `--instance` provider is a deliberate choice and pins.
    */
   pin?: boolean;
+  /**
+   * CLIProxy providers only: export DITTO_AUTO_MODE_CLASSIFIER in the
+   * launcher, so every chat requests this dedicated id for Auto Mode
+   * permission checks once the proxy lists it.
+   */
+  autoModeClassifier?: string;
   /** Set by commander; read through the shared --profile hook. */
   profile?: string;
 }
@@ -41,6 +48,7 @@ export interface T3SetupPlan {
   endpoint: string;
   inference: "router" | "cliproxy";
   pin: boolean;
+  autoModeClassifier?: string;
   displayName: string;
   managedRoot: string;
   homePath: string;
@@ -118,6 +126,8 @@ export function planT3Setup(options: T3SetupOptions): T3SetupPlan {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(endpoint)) throw new Error("Use an endpoint CLI slug or UUID with --endpoint");
   const inference = options.inference ?? "cliproxy";
   if (inference !== "router" && inference !== "cliproxy") throw new Error("--inference must be router or cliproxy");
+  const autoModeClassifier = options.autoModeClassifier === undefined ? undefined : assertClassifierModelId(options.autoModeClassifier.trim());
+  if (autoModeClassifier !== undefined && inference !== "cliproxy") throw new Error("--auto-mode-classifier applies only to --inference cliproxy");
   const instance = options.instance ?? DEFAULT_T3_INSTANCE;
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/.test(instance)) throw new Error("--instance must contain letters, digits, '-' or '_' and be at most 80 characters");
   const base = userPath(options.baseDir ?? process.env.T3CODE_HOME ?? path.join(os.homedir(), ".t3"));
@@ -151,11 +161,13 @@ export function planT3Setup(options: T3SetupOptions): T3SetupPlan {
     throw new Error(`The selected heyditto does not support ${inference} T3 launches; update it before setup`);
   }
   const launcher = readFileSync(fileURLToPath(new URL("../../scripts/claude-router-launcher.sh", import.meta.url)), "utf8");
-  const digest = createHash("sha256").update(JSON.stringify({ inference, endpoint, pin, heydittoBin, claudeBin, launcher })).digest("hex").slice(0, 20);
+  // The classifier joins the digest only when set, so existing installs keep
+  // their launcher directory.
+  const digest = createHash("sha256").update(JSON.stringify({ inference, endpoint, pin, heydittoBin, claudeBin, launcher, ...(autoModeClassifier ? { autoModeClassifier } : {}) })).digest("hex").slice(0, 20);
   const versionDir = path.join(managedRoot, instance, digest);
   const supportPath = path.join(versionDir, "claude-router-launcher.sh");
   const launcherPath = path.join(versionDir, "launch");
-  const wrapper = `#!/bin/sh\n# Managed by heyditto t3 setup. No credentials are stored here.\nexport DITTO_T3_INFERENCE=${shellQuote(inference)}\nexport DITTO_T3_ENDPOINT=${shellQuote(endpoint)}\nexport DITTO_T3_ENDPOINT_MODE=${pin ? "pin" : "fallback"}\nexport DITTO_T3_HEYDITTO_BIN=${shellQuote(heydittoBin)}\nexport DITTO_T3_CLAUDE_BIN=${shellQuote(claudeBin)}\nexec ${shellQuote(supportPath)} "$@"\n`;
+  const wrapper = `#!/bin/sh\n# Managed by heyditto t3 setup. No credentials are stored here.\nexport DITTO_T3_INFERENCE=${shellQuote(inference)}\nexport DITTO_T3_ENDPOINT=${shellQuote(endpoint)}\nexport DITTO_T3_ENDPOINT_MODE=${pin ? "pin" : "fallback"}\nexport DITTO_T3_HEYDITTO_BIN=${shellQuote(heydittoBin)}\nexport DITTO_T3_CLAUDE_BIN=${shellQuote(claudeBin)}\n${autoModeClassifier ? `export DITTO_AUTO_MODE_CLASSIFIER=${shellQuote(autoModeClassifier)}\n` : ""}exec ${shellQuote(supportPath)} "$@"\n`;
   const displayName = options.name?.trim() || (inference === "cliproxy" ? "Claude CLIProxy + Ditto" : "Ditto Router");
   const previous = object(existing) ? existing : {};
   const provider = { ...previous, driver: "claudeAgent", displayName, enabled: true, config: { ...(object(previous.config) ? previous.config : {}), binaryPath: launcherPath, homePath } };
@@ -163,7 +175,7 @@ export function planT3Setup(options: T3SetupOptions): T3SetupPlan {
   const same = JSON.stringify(settings) === JSON.stringify(updatedObject);
   return {
     settingsPath, original, updated: same ? original : JSON.stringify(updatedObject, null, 2) + "\n",
-    instance, endpoint, inference, pin, displayName, managedRoot, homePath, launcherPath,
+    instance, endpoint, inference, pin, ...(autoModeClassifier ? { autoModeClassifier } : {}), displayName, managedRoot, homePath, launcherPath,
     files: [{ path: supportPath, content: launcher }, { path: launcherPath, content: wrapper }],
     action: existing === undefined ? "add" : same ? "unchanged" : "update",
     runningPid: runningServer(userdata),
@@ -277,6 +289,7 @@ export function registerT3Commands(program: Command, deps: T3SetupDeps = {}): vo
     .option("--name <name>", "provider display name (default from the profile, e.g. \"Claude Subnet\")")
     .option("--pin", "use this provider's endpoint in every chat, even in a checkout whose .ditto/ names another (default for --profile / --instance providers)")
     .option("--no-pin", "use this provider's endpoint only where the checkout has no .ditto/ default (default for the default provider)")
+    .option("--auto-mode-classifier <model>", "CLIProxy providers: dedicated CLIProxy model id for Auto Mode permission checks (exported as DITTO_AUTO_MODE_CLASSIFIER; used only when the proxy lists it)")
     .option("--base-dir <dir>", "T3 base directory (default: T3CODE_HOME or ~/.t3; userdata is appended)")
     .option("--claude-bin <path>", "installed Claude executable named claude")
     .option("--heyditto-bin <path>", "installed heyditto executable")
@@ -306,7 +319,7 @@ export function registerT3Commands(program: Command, deps: T3SetupDeps = {}): vo
       }
       const plan = planT3Setup(options);
       const applied = options.dryRun ? undefined : applyT3Setup(plan);
-      const summary = { action: plan.action, dryRun: Boolean(options.dryRun), profile: profileName ?? null, instance: plan.instance, displayName: plan.displayName, endpoint: plan.endpoint, endpointMode: plan.pin ? "pin" : "fallback", inference: plan.inference, settingsPath: plan.settingsPath, binaryPath: plan.launcherPath, homePath: plan.homePath, runningPid: plan.runningPid ?? null, ...applied };
+      const summary = { action: plan.action, dryRun: Boolean(options.dryRun), profile: profileName ?? null, instance: plan.instance, displayName: plan.displayName, endpoint: plan.endpoint, endpointMode: plan.pin ? "pin" : "fallback", inference: plan.inference, autoModeClassifier: plan.autoModeClassifier ?? null, settingsPath: plan.settingsPath, binaryPath: plan.launcherPath, homePath: plan.homePath, runningPid: plan.runningPid ?? null, ...applied };
       if (options.json) process.stdout.write(JSON.stringify(summary, null, 2) + "\n");
       else {
         process.stdout.write(`${options.dryRun ? "Plan" : "Configured"}: ${plan.displayName} → ${plan.endpoint} (${plan.inference}, ${plan.pin ? "pinned" : "unless the checkout's .ditto/ names another"})\nSettings: ${plan.settingsPath}\nBinary: ${plan.launcherPath}\nClaude config: ${plan.homePath}\n`);

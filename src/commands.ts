@@ -1566,6 +1566,7 @@ export function registerHarnessCommands(program: Command, addExamples: (c: Comma
     cmd.option("--no-mcp", "keep the endpoint's tools on the router for this session (Code Mode / injected tools)");
     if (harness === "claude") {
       cmd.option("--no-hooks", "leave out the Claude Code hooks this repository's .ditto profile declares (claude_hooks)");
+      cmd.option("--auto-mode-classifier <model>", "with --cliproxy: dedicated CLIProxy model id for Auto Mode permission checks, used only when the proxy lists it (default: DITTO_AUTO_MODE_CLASSIFIER, else Claude Code's own classifier model)");
       cmd.option("--mcp-only", "use your native Claude Code account for inference; Ditto supplies only selected MCP tools and remote control");
       cmd.option("--no-mcp-only", "use Ditto Router inference for this launch, overriding the saved native-account default");
       cmd.addOption(new Option("--remote-transport <transport>", "remote prompt delivery: CLI terminal bridge (default) or MCP Channels (native account only, research preview)").choices(["cli", "channels"]));

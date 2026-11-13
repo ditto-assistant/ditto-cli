@@ -54,6 +54,12 @@ export interface PlanInput {
   mcpApiKey?: string;
   /** Direct CLIProxy inference; do not forward Router headers or auth overrides. */
   localInference?: boolean;
+  /**
+   * CLIProxy only: the dedicated model id Claude Code's Auto Mode classifier
+   * requests (CLAUDE_CODE_AUTO_MODE_MODEL), already checked against the
+   * proxy's catalog by cliProxyClassifierModel.
+   */
+  autoModeClassifierModel?: string;
   /** Ditto session id sent as X-Ditto-Session-Id. */
   sessionId: string;
   /**

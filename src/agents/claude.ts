@@ -69,6 +69,14 @@ export function planClaude(input: PlanInput): HarnessPlan {
     // Cloud MCP auth never becomes the local inference credential, and a
     // parent Router launch's custom headers/other provider modes stay out.
     delete envSet.ANTHROPIC_CUSTOM_HEADERS;
+    if (input.autoModeClassifierModel) {
+      // Only the Auto Mode classifier reads this id, so CLIProxy can route
+      // permission checks by model alone. The request-class header lets the
+      // proxy confirm the call is auxiliary rather than a main-loop turn that
+      // happened to name the same id.
+      envSet.CLAUDE_CODE_AUTO_MODE_MODEL = input.autoModeClassifierModel;
+      if (input.env.CLAUDE_CODE_GATEWAY_HINT_HEADERS === undefined) envSet.CLAUDE_CODE_GATEWAY_HINT_HEADERS = "1";
+    }
     return {
       command: "claude", args: finalArgs, envSet,
       envUnset: ["ANTHROPIC_API_KEY", "ANTHROPIC_CUSTOM_HEADERS", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", ...(!input.model ? ["ANTHROPIC_MODEL"] : []), ...(!input.mcp ? [MCP_KEY_ENV] : [])],
