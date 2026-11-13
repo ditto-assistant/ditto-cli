@@ -143,6 +143,20 @@ export function t3FallbackEndpoint(options: LaunchOptions, env: NodeJS.ProcessEn
 
 const T3_LAUNCHER_ENV = ["DITTO_T3_ENDPOINT", "DITTO_T3_ENDPOINT_MODE", "DITTO_T3_INFERENCE", "DITTO_T3_HEYDITTO_BIN", "DITTO_T3_CLAUDE_BIN"];
 
+/**
+ * The flag is explicit, so a bad value stops the launch. The environment
+ * fallback is ambient (a shell profile, a T3 launcher), so a bad value there
+ * only costs the opt-in: a notice, and Claude Code's default classifier.
+ */
+function ambientOrExplicitClassifier(proxy: { models: string[] }, flag: string | undefined, mainModel: string | undefined): { model?: string; notice?: string } {
+  if (flag !== undefined) return cliProxyClassifierModel(proxy, flag, mainModel);
+  try {
+    return cliProxyClassifierModel(proxy, process.env[AUTO_MODE_CLASSIFIER_ENV], mainModel, AUTO_MODE_CLASSIFIER_ENV);
+  } catch (err) {
+    return { notice: `${(err as Error).message}; ignoring it, so permission checks keep Claude Code's default classifier model` };
+  }
+}
+
 /** Explicit flags (or resumed choices) win over repo/cloud launch defaults. */
 export function resolveClaudeLaunchDefaults(options: LaunchOptions, defaults: Record<string, unknown> = {}): LaunchOptions {
   const mcpOnly = options.cliproxy ? false : options.mcpOnly ?? (defaults.claude_inference === "native");
@@ -737,11 +751,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   // slug; that pin is dropped on resume so they pass through too.
   const recordedModel = record?.model === endpoint.slug ? undefined : record?.model;
   const model = proxy ? cliProxyModel(proxy, harness as "claude" | "codex", options.model ?? recordedModel) : options.model ?? recordedModel;
-  const classifier = proxy && harness === "claude"
-    ? options.autoModeClassifier !== undefined
-      ? cliProxyClassifierModel(proxy, options.autoModeClassifier, model)
-      : cliProxyClassifierModel(proxy, process.env[AUTO_MODE_CLASSIFIER_ENV], model, AUTO_MODE_CLASSIFIER_ENV)
-    : {};
+  const classifier = proxy && harness === "claude" ? ambientOrExplicitClassifier(proxy, options.autoModeClassifier, model) : {};
   if (classifier.notice) log(c("yellow", classifier.notice));
   const now = new Date().toISOString();
 

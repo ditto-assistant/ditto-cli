@@ -160,6 +160,10 @@ export function planT3Setup(options: T3SetupOptions): T3SetupPlan {
   if (help.status !== 0 || required.some((flag) => !new RegExp(`(^|[\\s,])${flag}([\\s,]|$)`, "m").test(help.stdout ?? ""))) {
     throw new Error(`The selected heyditto does not support ${inference} T3 launches; update it before setup`);
   }
+  // An older heyditto would ignore the exported variable without a word.
+  if (autoModeClassifier !== undefined && !/(^|[\s,])--auto-mode-classifier([\s,]|$)/m.test(help.stdout ?? "")) {
+    throw new Error("The selected heyditto does not support --auto-mode-classifier; update it (3.18.0 or newer) before setup");
+  }
   const launcher = readFileSync(fileURLToPath(new URL("../../scripts/claude-router-launcher.sh", import.meta.url)), "utf8");
   // The classifier joins the digest only when set, so existing installs keep
   // their launcher directory.
