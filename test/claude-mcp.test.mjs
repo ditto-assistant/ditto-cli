@@ -21,6 +21,8 @@ import {
 } from "../dist/agents/claude-mcp.js";
 import { wantsMcp } from "../dist/agents/launch.js";
 import { withHookArgs } from "../dist/remote/hooks.js";
+import { CLIENT_HEADER, clientHeaders } from "../dist/config.js";
+const CLIENT = clientHeaders()[CLIENT_HEADER];
 
 const catalog = (clientApprovals) => ({
   endpoint: "ditto-dev",
@@ -52,7 +54,7 @@ test("claudeMcpAttachment: one http server per source, the key only as a variabl
   assert.deepEqual(config.mcpServers["ditto-github"], {
     type: "http",
     url: "https://router.test/v1/mcp/github",
-    headers: { Authorization: `Bearer \${${MCP_KEY_ENV}}`, "X-Ditto-Session-Id": "sess-1" },
+    headers: { Authorization: `Bearer \${${MCP_KEY_ENV}}`, "X-Ditto-Session-Id": "sess-1", [CLIENT_HEADER]: CLIENT },
   });
   assert.equal(mcp.servers, 2);
   assert.equal(mcp.tools, 3);

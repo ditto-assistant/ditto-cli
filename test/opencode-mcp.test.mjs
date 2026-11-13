@@ -4,6 +4,8 @@ import test from "node:test";
 import { MCP_KEY_ENV, TOOL_SURFACE_HEADER, claudeMcpAttachment } from "../dist/agents/claude-mcp.js";
 import { OPENCODE_KEY_ENV, opencodeConfig, opencodeMcp, planOpencode } from "../dist/agents/opencode.js";
 import { wantsMcp } from "../dist/agents/launch.js";
+import { CLIENT_HEADER, clientHeaders } from "../dist/config.js";
+const CLIENT = clientHeaders()[CLIENT_HEADER];
 
 const catalog = (clientApprovals) => ({
   endpoint: "ditto-dev",
@@ -48,7 +50,7 @@ test("opencodeConfig: native MCP attaches remote servers and tells the router", 
     url: "https://router.test/v1/mcp/github",
     enabled: true,
     oauth: false,
-    headers: { Authorization: `Bearer {env:${MCP_KEY_ENV}}`, "X-Ditto-Session-Id": "sess-1" },
+    headers: { Authorization: `Bearer {env:${MCP_KEY_ENV}}`, "X-Ditto-Session-Id": "sess-1", [CLIENT_HEADER]: CLIENT },
   });
   assert.deepEqual(config.permission, { "ditto_*": "allow", "ditto-github_*": "allow" }, "Ditto holds gated calls, so OpenCode asks about nothing");
 });

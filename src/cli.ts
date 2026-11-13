@@ -9,6 +9,7 @@ import {
   agentSignupURL,
   apiBaseURL,
   authFilePath,
+  clientHeaders,
   mcpServerURL,
   newKeyURL,
   packageName,
@@ -30,6 +31,7 @@ import {
 import { type ActiveSession, markSessionUsed, resolveActiveSession, sessionHeaders } from "./mcp-session.js";
 import { NO_KEY_MESSAGE } from "./api.js";
 import { openInBrowser } from "./browser.js";
+import { runConsent } from "./consent.js";
 import { registerOrgCommands } from "./org-commands.js";
 import { registerReviewCommands } from "./review-commands.js";
 import { registerTeleportCommands } from "./teleport/commands.js";
@@ -276,7 +278,7 @@ async function getClient(): Promise<Client> {
   const client = new Client({ name: packageName, version: packageVersion });
   const transport = new StreamableHTTPClientTransport(new URL(mcpServerURL()), {
     requestInit: {
-      headers: { Authorization: `Bearer ${key}`, ...sessionHeaders(session) },
+      headers: { Authorization: `Bearer ${key}`, ...clientHeaders(), ...sessionHeaders(session) },
     },
   });
   try {
@@ -540,6 +542,7 @@ async function cmdInit(graphs: string[], options: InitOptions): Promise<void> {
     headers: {
       "Content-Type": "application/json",
       "User-Agent": `${packageName}/${packageVersion}`,
+      ...clientHeaders(),
     },
     body: JSON.stringify({
       agentCaller,
@@ -929,13 +932,37 @@ async function cmdStatus(options: CommonOptions): Promise<void> {
   process.stdout.write(`${lines.join("\n")}\n`);
 }
 
+async function cmdConsent(options: CommonOptions & { wait?: boolean; open?: boolean }): Promise<void> {
+  const format = parseOutputFormat(options.output);
+  const stored = await readStoredAuth();
+  const client = await getClient();
+  try {
+    const outcome = await runConsent(client, {
+      wait: options.wait !== false,
+      open: options.open !== false && process.stdout.isTTY === true,
+      json: format === "json" || format === "raw",
+      claimURL: stored?.agentMode ? stored.claimURL : undefined,
+    }, {
+      out: (text) => process.stdout.write(text),
+      err: (text) => process.stderr.write(text),
+      openURL: openInBrowser,
+      sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+      now: () => Date.now(),
+    });
+    // A person still has to act: claim the agent first.
+    if (outcome === "needs_claim") process.exitCode = 2;
+  } finally {
+    await client.close().catch(() => undefined);
+  }
+}
+
 function cmdConfig(options: CommonOptions): void {
   parseOutputFormat(options.output); // accepted; output is always JSON
   const config = {
     mcpServers: {
       ditto: {
         url: mcpServerURL(),
-        headers: { Authorization: "Bearer ${DITTO_API_KEY}" },
+        headers: { Authorization: "Bearer ${DITTO_API_KEY}", ...clientHeaders() },
       },
     },
     notes: { apiBase: apiBaseURL(), newKey: newKeyURL() },
@@ -1485,6 +1512,24 @@ your own workspace or an app workspace.`,
     .description("show CLI auth and endpoint status")
     .addOption(outputOption())
     .action(cmdStatus));
+
+  addExamples(
+    program
+      .command("consent")
+      .description("get Ditto's Terms of Service and AI processing accepted for this account (prints a link for its owner)")
+      .option("--no-wait", "print the link and exit instead of waiting for it to be accepted")
+      .option("--no-open", "do not open the link in a browser")
+      .addOption(outputOption())
+      .action(cmdConsent),
+    `  heyditto consent                 # show the link, open it, wait until it is accepted
+  heyditto consent --no-wait --output json
+
+Accepting is the account owner's decision: the link asks them to sign in and
+accept. For an agent account, that is the person who claimed it. An agent
+nobody has claimed yet is claimed first (the claim link from 'heyditto init').
+Exit status: 0 accepted (or link printed with --no-wait), 2 the agent must be
+claimed first, 1 error or the link expired.`,
+  );
 
   program
     .command("config")

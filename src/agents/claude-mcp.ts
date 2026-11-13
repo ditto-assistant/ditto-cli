@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { clientHeaders } from "../config.js";
 import { TOOL_DENY_HEADER } from "./claude-deny.js";
 
 /**
@@ -165,7 +166,7 @@ export async function fetchMcpCatalog(
 ): Promise<McpCatalog> {
   const url = `${baseUrl.replace(/\/+$/, "")}/mcp`;
   const res = await fetchImpl(url, {
-    headers: { Authorization: `Bearer ${apiKey}`, "X-Ditto-Session-Id": sessionId, Accept: "application/json" },
+    headers: { Authorization: `Bearer ${apiKey}`, "X-Ditto-Session-Id": sessionId, Accept: "application/json", ...clientHeaders() },
     signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) {
@@ -203,7 +204,7 @@ export function claudeMcpAttachment(catalog: McpCatalog, sessionId: string, opts
       continue;
     }
     const name = claudeServerName(server.name);
-    const headers: Record<string, string> = { "X-Ditto-Session-Id": sessionId, ...(opts.toolDeny?.length ? { [TOOL_DENY_HEADER]: opts.toolDeny.join(",") } : {}) };
+    const headers: Record<string, string> = { "X-Ditto-Session-Id": sessionId, ...clientHeaders(), ...(opts.toolDeny?.length ? { [TOOL_DENY_HEADER]: opts.toolDeny.join(",") } : {}) };
     mcpServers[name] = {
       type: "http",
       url: server.url,

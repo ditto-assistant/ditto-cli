@@ -1,5 +1,5 @@
 import os from "node:os";
-import { packageName, packageVersion, resolveApiKey } from "./config.js";
+import { clientHeaders, packageName, packageVersion, resolveApiKey } from "./config.js";
 
 /** Minimal authenticated REST client for the Ditto management API. */
 
@@ -22,6 +22,24 @@ function userAgent(): string {
   return `${packageName}/${packageVersion}`;
 }
 
+/** Response header Ditto sets when this CLI version should be upgraded. */
+export const UPGRADE_HEADER = "X-Heyditto-Upgrade";
+
+let upgradeNoticeShown = false;
+
+/**
+ * Prints Ditto's upgrade notice once per process, on stderr so JSON output
+ * stays parseable. The notice never blocks the command. Only printable ASCII
+ * is kept and the text is capped, since it comes from a response header.
+ */
+export function noteUpgradeNotice(response: { headers: { get(name: string): string | null } }, write: (text: string) => void = (t) => process.stderr.write(t)): void {
+  if (upgradeNoticeShown) return;
+  const notice = (response.headers.get(UPGRADE_HEADER) ?? "").replace(/[^\x20-\x7e]/g, "").trim().slice(0, 300);
+  if (!notice) return;
+  upgradeNoticeShown = true;
+  write(`warning: ${notice}\n`);
+}
+
 /** Shared "not logged in" message: browser login first, then the alternatives. */
 export const NO_KEY_MESSAGE =
   "no Ditto API key configured.\n\n" +
@@ -42,6 +60,7 @@ export async function apiFetch<T>(
   const headers: Record<string, string> = {
     Accept: "application/json",
     "User-Agent": userAgent(),
+    ...clientHeaders(),
   };
   if (init.body !== undefined) headers["Content-Type"] = "application/json";
   if (init.auth !== false) headers.Authorization = `Bearer ${await requireKey()}`;
@@ -51,6 +70,7 @@ export async function apiFetch<T>(
     body: init.body === undefined ? undefined : JSON.stringify(init.body),
     signal: init.signal,
   });
+  noteUpgradeNotice(response);
   if (!response.ok) {
     const text = await response.text().catch(() => "");
     let detail = text;
