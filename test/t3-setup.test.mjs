@@ -260,3 +260,20 @@ test("the default provider follows the checkout's .ditto/; profile and custom in
   assert.equal(mode(f.plan({ instance: "claude_ditto_subnet_cliproxy", pin: false })), "fallback");
   assert.notEqual(f.plan().launcherPath, f.plan({ pin: true }).launcherPath, "the mode is part of the immutable launcher's digest");
 });
+
+test("--auto-mode-classifier exports the classifier id from a CLIProxy launcher only", (t) => {
+  const f = fixture(t);
+  const plain = f.plan();
+  assert.doesNotMatch(plain.files.find((file) => file.path === plain.launcherPath).content, /DITTO_AUTO_MODE_CLASSIFIER/);
+  const plan = f.plan({ autoModeClassifier: "ditto-auto-mode-classifier" });
+  assert.notEqual(plan.launcherPath, plain.launcherPath, "a classifier launcher is a new immutable version");
+  assert.equal(plan.autoModeClassifier, "ditto-auto-mode-classifier");
+  assert.match(plan.files.find((file) => file.path === plan.launcherPath).content, /^export DITTO_AUTO_MODE_CLASSIFIER='ditto-auto-mode-classifier'$/m);
+  assert.equal(f.plan({}).launcherPath, plain.launcherPath, "existing installs keep their launcher directory");
+  assert.throws(() => f.plan({ autoModeClassifier: "ditto-auto-mode-classifier", inference: "router" }), /only to --inference cliproxy/);
+  assert.throws(() => f.plan({ autoModeClassifier: "claude-sonnet-5" }), /dedicated model id/);
+  assert.throws(() => f.plan({ autoModeClassifier: "x'; rm -rf ~" }), /lowercase/);
+  applyT3Setup(plan);
+  const launched = spawnSync(plan.launcherPath, ["--print"], { encoding: "utf8", env: { ...process.env, DITTO_AUTO_MODE_CLASSIFIER: "" } });
+  assert.equal(launched.status, 0, launched.stderr);
+});

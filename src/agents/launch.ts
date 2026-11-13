@@ -36,7 +36,7 @@ import { type ClaudeHookAttachment, claudeHookAttachment } from "./claude-hooks.
 import { planCodex } from "./codex.js";
 import { createCursorChat, planCursor, writeCursorPlugin } from "./cursor.js";
 import { findOpencodeSession, planOpencode } from "./opencode.js";
-import { cliProxyModel, resolveCliProxy } from "./cliproxy.js";
+import { AUTO_MODE_CLASSIFIER_ENV, cliProxyClassifierModel, cliProxyModel, resolveCliProxy } from "./cliproxy.js";
 import { readHarnessVersion } from "./harness-headers.js";
 import { ensureGrokHome, planGrok } from "./grok.js";
 import { type SessionRecord, latestSession, readSession, sessionForHarnessId, writeSession } from "./sessions.js";
@@ -115,6 +115,11 @@ export interface LaunchOptions {
   hooks?: boolean;
   /** Direct inference through a loopback CLIProxy; URL is persisted, keys are not. */
   cliproxy?: string | boolean;
+  /**
+   * Claude with --cliproxy: the dedicated CLIProxy model id for Auto Mode
+   * permission checks (else DITTO_AUTO_MODE_CLASSIFIER). Not persisted.
+   */
+  autoModeClassifier?: string;
   remoteTransport?: "cli" | "channels";
 }
 
@@ -607,6 +612,15 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   if (options.cliproxy && options.mcpOnly) throw new Error("choose either --cliproxy or --mcp-only");
   if (options.cliproxy && harness === "grok") throw new Error("--cliproxy is supported for claude and codex");
   if (options.cliproxy && options.budget !== undefined) throw new Error("--budget cannot cap CLIProxy subscription inference; configure limits in your local proxy instead");
+  // The flag is explicit, so it fails where it cannot apply; the environment
+  // fallback is ambient (a T3 launcher, a shell profile) and simply does not
+  // apply outside CLIProxy Claude launches.
+  if (options.autoModeClassifier !== undefined && (harness !== "claude" || !options.cliproxy)) {
+    throw new Error("--auto-mode-classifier applies only to heyditto claude --cliproxy");
+  }
+  if (options.autoModeClassifier !== undefined && !options.autoModeClassifier.trim()) {
+    throw new Error("--auto-mode-classifier requires a model id; omit it to keep Claude Code's default classifier model");
+  }
   // Check the local proxy before sign-in or minting any cloud key. A failure
   // must never silently switch inference back to the paid Router.
   const proxy = options.cliproxy ? await resolveCliProxy(options.cliproxy) : undefined;
@@ -723,6 +737,10 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
   // slug; that pin is dropped on resume so they pass through too.
   const recordedModel = record?.model === endpoint.slug ? undefined : record?.model;
   const model = proxy ? cliProxyModel(proxy, harness as "claude" | "codex", options.model ?? recordedModel) : options.model ?? recordedModel;
+  const classifier = proxy && harness === "claude"
+    ? cliProxyClassifierModel(proxy, options.autoModeClassifier ?? process.env[AUTO_MODE_CLASSIFIER_ENV], model)
+    : {};
+  if (classifier.notice) log(c("yellow", classifier.notice));
   const now = new Date().toISOString();
 
   if (!(await isDirectory(cwd))) throw new Error(`launch directory ${cwd} does not exist`);
@@ -822,6 +840,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     apiKey: proxy?.apiKey ?? key?.key ?? DRY_RUN_KEY,
     mcpApiKey: key?.key ?? DRY_RUN_KEY,
     localInference: Boolean(proxy),
+    autoModeClassifierModel: classifier.model,
     sessionId,
     harnessVersion,
     // OpenCode needs a model id to address; the endpoint slug routes to its default.
@@ -849,6 +868,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
     field("endpoint", c(["bold", "cyan"], endpoint.slug)),
     field("inference", proxy ? `CLIProxy (${proxy.baseUrl})` : options.mcpOnly || mcpOnlyHarness ? `native ${AGENT_LABELS[harness]} account (MCP only)` : "Ditto Router"),
     field("model", model ?? c("dim", options.mcpOnly || mcpOnlyHarness ? `(native ${AGENT_LABELS[harness]} default)` : "(harness default → endpoint routes)")),
+    classifier.model ? field("auto-mode classifier", classifier.model) : undefined,
     field("key", key ? `…${key.keyHint || maskKey(key.key ?? "")}` : "(dry run)"),
     field("expires", `${expiresIn}${options.keepKey ? "" : c("dim", " (revoked on exit)")}`),
     budget !== undefined ? field("budget", `${budget.toLocaleString()} tokens`) : undefined,
@@ -962,6 +982,7 @@ export async function launchHarness(harness: Harness, rawArgs: string[], options
         apiKey: proxy?.apiKey ?? key.key ?? "",
         mcpApiKey: key.key ?? "",
         localInference: Boolean(proxy),
+        autoModeClassifierModel: classifier.model,
         harnessVersion,
         model,
         options,
@@ -1148,6 +1169,7 @@ interface HeadlessRunContext extends RemoteRunContext {
   apiKey: string;
   mcpApiKey?: string;
   localInference?: boolean;
+  autoModeClassifierModel?: string;
   /** Installed harness version read at launch (X-Ditto-Harness-Version). */
   harnessVersion?: string;
   model?: string;
@@ -1205,6 +1227,7 @@ async function runHeadless(harness: Harness, ctx: HeadlessRunContext): Promise<n
         apiKey: ctx.apiKey,
         mcpApiKey: ctx.mcpApiKey,
         localInference: ctx.localInference,
+        autoModeClassifierModel: ctx.autoModeClassifierModel,
         sessionId: ctx.sessionId,
         harnessVersion: ctx.harnessVersion,
         model: ctx.model,

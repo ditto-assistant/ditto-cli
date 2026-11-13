@@ -1,4 +1,5 @@
 import { TOOL_DENY_HEADER } from "./claude-deny.js";
+import { CLASSIFIER_APPLIED_ENV } from "./cliproxy.js";
 import { MCP_KEY_ENV, TOOL_SURFACE_HEADER, TOOL_SURFACE_MCP, attachmentSettings, mergeSettings, withClaudeSettings } from "./claude-mcp.js";
 import { harnessHeaders } from "./harness-headers.js";
 import { HARNESS_HEADER, HARNESS_VERSION_HEADER, type HarnessPlan, type PlanInput, SESSION_HEADER, apiRootOf } from "./types.js";
@@ -52,13 +53,22 @@ export function planClaude(input: PlanInput): HarnessPlan {
   };
   if (input.model) envSet.ANTHROPIC_MODEL = input.model;
   if (input.mcp) envSet[MCP_KEY_ENV] = input.mcpApiKey ?? input.apiKey;
+  // A launch inside a classifier-routed session inherits the classifier id
+  // that launch set. Anywhere this launch does not set it, the id names a
+  // model nobody serves (native, another proxy) or one the Router quietly
+  // resolves to the endpoint default, so drop it. A value the user set
+  // themselves carries no marker and stays.
+  const inheritedClassifier = input.env[CLASSIFIER_APPLIED_ENV];
+  const staleClassifier = !input.autoModeClassifierModel && inheritedClassifier !== undefined
+    ? [CLASSIFIER_APPLIED_ENV, ...(input.env.CLAUDE_CODE_AUTO_MODE_MODEL === inheritedClassifier ? ["CLAUDE_CODE_AUTO_MODE_MODEL"] : [])]
+    : [];
   if (input.mcpOnly) {
     // Endpoint keys are only MCP credentials in this mode. Never forward one
     // to Anthropic or inherit a parent launch's inference gateway settings.
     return {
       command: "claude", args: finalArgs,
       envSet: input.mcp ? { [MCP_KEY_ENV]: input.apiKey } : {},
-      envUnset: ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_CUSTOM_HEADERS", "ANTHROPIC_MODEL", "ANTHROPIC_API_KEY"],
+      envUnset: ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_CUSTOM_HEADERS", "ANTHROPIC_MODEL", "ANTHROPIC_API_KEY", ...staleClassifier],
       installHint: "install Claude Code and sign in with `claude auth login`",
     };
   }
@@ -69,9 +79,18 @@ export function planClaude(input: PlanInput): HarnessPlan {
     // Cloud MCP auth never becomes the local inference credential, and a
     // parent Router launch's custom headers/other provider modes stay out.
     delete envSet.ANTHROPIC_CUSTOM_HEADERS;
+    if (input.autoModeClassifierModel) {
+      // Only the Auto Mode classifier reads this id, so CLIProxy can route
+      // permission checks by model alone. The request-class header lets the
+      // proxy confirm the call is auxiliary rather than a main-loop turn that
+      // happened to name the same id.
+      envSet.CLAUDE_CODE_AUTO_MODE_MODEL = input.autoModeClassifierModel;
+      envSet[CLASSIFIER_APPLIED_ENV] = input.autoModeClassifierModel;
+      if (input.env.CLAUDE_CODE_GATEWAY_HINT_HEADERS === undefined) envSet.CLAUDE_CODE_GATEWAY_HINT_HEADERS = "1";
+    }
     return {
       command: "claude", args: finalArgs, envSet,
-      envUnset: ["ANTHROPIC_API_KEY", "ANTHROPIC_CUSTOM_HEADERS", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", ...(!input.model ? ["ANTHROPIC_MODEL"] : []), ...(!input.mcp ? [MCP_KEY_ENV] : [])],
+      envUnset: ["ANTHROPIC_API_KEY", "ANTHROPIC_CUSTOM_HEADERS", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", ...(!input.model ? ["ANTHROPIC_MODEL"] : []), ...(!input.mcp ? [MCP_KEY_ENV] : []), ...staleClassifier],
       installHint: "install Claude Code: npm i -g @anthropic-ai/claude-code",
     };
   }
@@ -84,7 +103,7 @@ export function planClaude(input: PlanInput): HarnessPlan {
     command: "claude",
     args: finalArgs,
     envSet,
-    envUnset: ["ANTHROPIC_API_KEY"],
+    envUnset: ["ANTHROPIC_API_KEY", ...staleClassifier],
     installHint: "install Claude Code: npm i -g @anthropic-ai/claude-code (or see https://code.claude.com)",
   };
 }

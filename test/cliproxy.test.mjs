@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { cliProxyBaseUrl, cliProxyConfigPaths, cliProxyModel, resolveCliProxy } from "../dist/agents/cliproxy.js";
+import { cliProxyBaseUrl, cliProxyClassifierModel, cliProxyConfigPaths, cliProxyModel, resolveCliProxy } from "../dist/agents/cliproxy.js";
 import { planClaude } from "../dist/agents/claude.js";
 import { planCodex } from "../dist/agents/codex.js";
 import { resolveClaudeLaunchDefaults } from "../dist/agents/launch.js";
@@ -252,4 +252,95 @@ test("headless turns retain local inference and the separate cloud MCP credentia
   assert.equal(await turn.exit, 0);
   const captured = JSON.parse(readFileSync(capture, "utf8"));
   assert.equal(captured.auth, LOCAL_KEY); assert.equal(captured.mcp, CLOUD_KEY);
+});
+
+const CLASSIFIER = "ditto-auto-mode-classifier";
+
+test("the auto-mode classifier id needs a CLIProxy catalog entry and is never a Claude or main-loop id", () => {
+  const proxy = { models: [...MODELS, CLASSIFIER] };
+  assert.deepEqual(cliProxyClassifierModel(proxy, undefined), {});
+  assert.deepEqual(cliProxyClassifierModel(proxy, "  "), {});
+  assert.deepEqual(cliProxyClassifierModel(proxy, CLASSIFIER, "claude-sonnet-5"), { model: CLASSIFIER });
+  const missing = cliProxyClassifierModel({ models: MODELS }, CLASSIFIER);
+  assert.equal(missing.model, undefined, "an id the proxy does not serve would fail, and so block, every permission check");
+  assert.match(missing.notice, /keep Claude Code's default classifier model/);
+  assert.throws(() => cliProxyClassifierModel(proxy, "claude-sonnet-5"), /dedicated model id/);
+  assert.throws(() => cliProxyClassifierModel(proxy, "Ditto Classifier"), /lowercase/);
+  assert.throws(() => cliProxyClassifierModel({ models: [CLASSIFIER] }, CLASSIFIER, CLASSIFIER), /main model/);
+});
+
+test("Claude plans set the classifier id and request-class hints only for a vetted CLIProxy id", () => {
+  const input = { baseUrl: "http://127.0.0.1:8317/v1", apiKey: LOCAL_KEY, localInference: true, sessionId: "s", passthrough: [], env: {} };
+  const off = planClaude(input).envSet;
+  assert.equal(off.CLAUDE_CODE_AUTO_MODE_MODEL, undefined);
+  assert.equal(off.CLAUDE_CODE_GATEWAY_HINT_HEADERS, undefined, "without the opt-in the CLIProxy route keeps its current headers");
+  const on = planClaude({ ...input, autoModeClassifierModel: CLASSIFIER }).envSet;
+  assert.equal(on.CLAUDE_CODE_AUTO_MODE_MODEL, CLASSIFIER);
+  assert.equal(on.CLAUDE_CODE_GATEWAY_HINT_HEADERS, "1");
+  assert.equal(on.CLAUDE_CODE_AUTO_MODE_SERVER, "0", "the local classifier still decides");
+  const explicit = planClaude({ ...input, autoModeClassifierModel: CLASSIFIER, env: { CLAUDE_CODE_GATEWAY_HINT_HEADERS: "0" } }).envSet;
+  assert.equal(explicit.CLAUDE_CODE_GATEWAY_HINT_HEADERS, undefined, "an explicit caller choice stays");
+});
+
+test("dry-run applies --auto-mode-classifier or its environment fallback only when CLIProxy lists the id", async () => {
+  const listed = await proxyServer({ models: [...MODELS, CLASSIFIER] }); const unlisted = await proxyServer(); const cloud = await cloudServer();
+  try {
+    const f = fixture(listed.url);
+    const flag = await run(["claude", "--cliproxy", "--auto-mode-classifier", CLASSIFIER, "--dry-run", "--endpoint", "alpha"], { ...f.env, DITTO_API_BASE: cloud.url });
+    assert.equal(flag.status, 0, flag.stderr);
+    const plan = JSON.parse(flag.stdout);
+    assert.equal(plan.env.CLAUDE_CODE_AUTO_MODE_MODEL, CLASSIFIER);
+    assert.equal(plan.env.CLAUDE_CODE_GATEWAY_HINT_HEADERS, "1");
+    assert.match(flag.stderr, /auto-mode classifier=ditto-auto-mode-classifier/);
+
+    const g = fixture(unlisted.url);
+    const ambient = await run(["claude", "--cliproxy", "--dry-run", "--endpoint", "alpha"], { ...g.env, DITTO_API_BASE: cloud.url, DITTO_AUTO_MODE_CLASSIFIER: CLASSIFIER });
+    assert.equal(ambient.status, 0, ambient.stderr);
+    assert.equal(JSON.parse(ambient.stdout).env.CLAUDE_CODE_AUTO_MODE_MODEL, undefined);
+    assert.match(ambient.stderr, /not in CLIProxy's model catalog/);
+
+    const router = await run(["claude", "--auto-mode-classifier", CLASSIFIER, "--dry-run", "--endpoint", "alpha"], { ...g.env, DITTO_API_BASE: cloud.url });
+    assert.equal(router.status, 1);
+    assert.match(router.stderr, /applies only to heyditto claude --cliproxy/);
+    const routerAmbient = await run(["claude", "--no-mcp-only", "--dry-run", "--endpoint", "alpha"], { ...g.env, DITTO_API_BASE: cloud.url, DITTO_AUTO_MODE_CLASSIFIER: CLASSIFIER });
+    assert.equal(routerAmbient.status, 0, routerAmbient.stderr);
+    assert.equal(JSON.parse(routerAmbient.stdout).env.CLAUDE_CODE_AUTO_MODE_MODEL, undefined, "the environment fallback never reaches a Router launch");
+  } finally { listed.close(); unlisted.close(); cloud.close(); }
+});
+
+test("a launch inside a classifier-routed session drops only the classifier id heyditto injected", () => {
+  const base = { baseUrl: "http://127.0.0.1:8317/v1", apiKey: LOCAL_KEY, sessionId: "s", passthrough: [] };
+  const injected = { CLAUDE_CODE_AUTO_MODE_MODEL: CLASSIFIER, DITTO_AUTO_MODE_CLASSIFIER_APPLIED: CLASSIFIER };
+  const applied = planClaude({ ...base, localInference: true, autoModeClassifierModel: CLASSIFIER, env: {} });
+  assert.equal(applied.envSet.DITTO_AUTO_MODE_CLASSIFIER_APPLIED, CLASSIFIER, "an applied id is marked for later launches");
+  for (const [name, input] of [
+    ["router", { ...base, env: injected }],
+    ["cliproxy without the opt-in", { ...base, localInference: true, env: injected }],
+    ["native account", { ...base, mcpOnly: true, env: injected }],
+  ]) {
+    const env = childEnv(planClaude(input), injected);
+    assert.equal(env.CLAUDE_CODE_AUTO_MODE_MODEL, undefined, `${name}: the inherited id would reach a model that does not serve it`);
+    assert.equal(env.DITTO_AUTO_MODE_CLASSIFIER_APPLIED, undefined, name);
+  }
+  const own = { CLAUDE_CODE_AUTO_MODE_MODEL: "claude-opus-4-8" };
+  assert.equal(childEnv(planClaude({ ...base, env: own }), own).CLAUDE_CODE_AUTO_MODE_MODEL, "claude-opus-4-8", "a value the user chose stays");
+  const changed = { CLAUDE_CODE_AUTO_MODE_MODEL: "claude-opus-4-8", DITTO_AUTO_MODE_CLASSIFIER_APPLIED: CLASSIFIER };
+  const after = childEnv(planClaude({ ...base, env: changed }), changed);
+  assert.equal(after.CLAUDE_CODE_AUTO_MODE_MODEL, "claude-opus-4-8", "a value changed after the marker was set is the user's");
+  assert.equal(after.DITTO_AUTO_MODE_CLASSIFIER_APPLIED, undefined);
+  const reapplied = childEnv(planClaude({ ...base, localInference: true, autoModeClassifierModel: CLASSIFIER, env: injected }), injected);
+  assert.equal(reapplied.CLAUDE_CODE_AUTO_MODE_MODEL, CLASSIFIER, "a nested CLIProxy launch that opts in keeps it");
+});
+
+test("an explicitly empty --auto-mode-classifier fails before any proxy or cloud activity", async () => {
+  const proxy = await proxyServer({ models: [...MODELS, CLASSIFIER] }); const cloud = await cloudServer(); const f = fixture(proxy.url);
+  try {
+    for (const value of ["", "   "]) {
+      const result = await run(["claude", "--cliproxy", `--auto-mode-classifier=${value}`, "--dry-run", "--endpoint", "alpha"], { ...f.env, DITTO_API_BASE: cloud.url });
+      assert.equal(result.status, 1, result.stderr);
+      assert.match(result.stderr, /--auto-mode-classifier requires a model id/);
+    }
+    assert.equal(proxy.calls.length, 0);
+    assert.equal(cloud.calls.length, 0);
+  } finally { proxy.close(); cloud.close(); }
 });
