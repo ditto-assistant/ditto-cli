@@ -1028,6 +1028,7 @@ async function cmdConsent(): Promise<void> {
     if (request.url) {
       process.stdout.write(`Open this link while signed in as the owner of this Ditto account and accept the Terms of Service and AI processing:\n${request.url}\n`);
       if (request.code) process.stdout.write(`Confirmation code: ${request.code}\n`);
+      openInBrowser(request.url);
       return;
     }
     process.stdout.write(`${request.message ?? "No consent link was returned."}\n`);
