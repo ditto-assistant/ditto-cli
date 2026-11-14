@@ -28,6 +28,14 @@ test("global --help prints command list", () => {
   assert.match(result.stdout, /\bgraphs\b/);
 });
 
+test("consent help is available without authentication", () => {
+  const result = run(["consent", "--help"]);
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /Usage: heyditto consent/);
+  assert.match(result.stdout, /Terms and AI processing/);
+  assert.equal(result.stderr, "");
+});
+
 test("global -h prints help", () => {
   const result = run(["-h"]);
   assert.equal(result.status, 0);

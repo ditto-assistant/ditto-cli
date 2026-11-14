@@ -7,7 +7,8 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { SESSION_ID_HEADER, SESSION_NAME_HEADER, sessionHeaders } from "../dist/mcp-session.js";
+import { CLIENT_HEADER, SESSION_ID_HEADER, SESSION_NAME_HEADER, sessionHeaders } from "../dist/mcp-session.js";
+import { packageVersion } from "../dist/config.js";
 
 const cliPath = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
 
@@ -32,7 +33,7 @@ function runAsync(args, configDir, extra = {}) {
 }
 
 /** Minimal Streamable-HTTP MCP server that records request headers. */
-function startStubMCP() {
+function startStubMCP(toolResults = {}) {
   const calls = [];
   const server = http.createServer((req, res) => {
     let body = "";
@@ -44,7 +45,7 @@ function startStubMCP() {
       } catch {
         /* not json */
       }
-      calls.push({ method: msg.method, headers: req.headers });
+      calls.push({ method: msg.method, params: msg.params, headers: req.headers });
       if (req.method !== "POST") {
         res.statusCode = 405;
         return res.end();
@@ -66,6 +67,11 @@ function startStubMCP() {
       if (msg.method === "tools/list") {
         res.setHeader("content-type", "application/json");
         return res.end(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { tools: [{ name: "save_memory", inputSchema: { type: "object" } }] } }));
+      }
+      if (msg.method === "tools/call") {
+        res.setHeader("content-type", "application/json");
+        const result = toolResults[msg.params.name];
+        return res.end(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text: JSON.stringify(result) }] } }));
       }
       res.statusCode = 202;
       res.end();
@@ -143,14 +149,33 @@ test("DITTO_SESSION_ID pins the session and validates its shape", () => {
   assert.match(bad.stderr, /DITTO_SESSION_ID must match/);
 });
 
-test("sessionHeaders: id always, name only until sent", () => {
-  assert.deepEqual(sessionHeaders(undefined), {});
-  assert.deepEqual(sessionHeaders({ id: "abc", source: "env", sendName: false }), { [SESSION_ID_HEADER]: "abc" });
+test("consent opens a pending link for the account owner", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "heyditto-consent-"));
+  const stub = await startStubMCP({
+    consent_status: { complete: false, account: "claimed_agent", message: "Not accepted yet." },
+    request_consent: { status: "pending", url: "https://app.example/mcp/consent?code=ABCD-EFGH", code: "ABCD-EFGH" },
+  });
+  try {
+    const result = await runAsync(["consent"], dir, { DITTO_API_KEY: "ditto_mcp_test", DITTO_API_BASE: stub.base });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /https:\/\/app\.example\/mcp\/consent\?code=ABCD-EFGH/);
+    assert.match(result.stdout, /ABCD-EFGH/);
+    assert.deepEqual(stub.calls.filter((call) => call.method === "tools/call").map((call) => call.params.name), ["consent_status", "request_consent"]);
+  } finally {
+    stub.close();
+  }
+});
+
+test("sessionHeaders: client version always, session name only until sent", () => {
+  const client = { [CLIENT_HEADER]: `heyditto-cli/${packageVersion}` };
+  assert.deepEqual(sessionHeaders(undefined), client);
+  assert.deepEqual(sessionHeaders({ id: "abc", source: "env", sendName: false }), { ...client, [SESSION_ID_HEADER]: "abc" });
   assert.deepEqual(sessionHeaders({ id: "abc", name: "Refactor", source: "config", sendName: true }), {
+    ...client,
     [SESSION_ID_HEADER]: "abc",
     [SESSION_NAME_HEADER]: "Refactor",
   });
-  assert.deepEqual(sessionHeaders({ id: "abc", name: "Refactor", source: "config", sendName: false }), { [SESSION_ID_HEADER]: "abc" });
+  assert.deepEqual(sessionHeaders({ id: "abc", name: "Refactor", source: "config", sendName: false }), { ...client, [SESSION_ID_HEADER]: "abc" });
 });
 
 test("MCP requests carry X-Ditto-Session-Id, and the name exactly once", async () => {
@@ -171,6 +196,7 @@ test("MCP requests carry X-Ditto-Session-Id, and the name exactly once", async (
     assert.equal(init.headers["x-ditto-session-id"], id);
     assert.equal(init.headers["x-ditto-session-name"], "wire check");
     assert.equal(init.headers.authorization, "Bearer ditto_mcp_test");
+    assert.equal(init.headers["x-heyditto-client"], `heyditto-cli/${packageVersion}`);
 
     stub.calls.length = 0;
     const second = await runAsync(["status", "--output", "json"], dir, env);
@@ -178,6 +204,7 @@ test("MCP requests carry X-Ditto-Session-Id, and the name exactly once", async (
     const init2 = stub.calls.find((c) => c.method === "initialize");
     assert.equal(init2.headers["x-ditto-session-id"], id);
     assert.equal(init2.headers["x-ditto-session-name"], undefined, "name is sent only once");
+    assert.equal(init2.headers["x-heyditto-client"], `heyditto-cli/${packageVersion}`);
 
     stub.calls.length = 0;
     const pinned = await runAsync(["status", "--output", "json"], dir, { ...env, DITTO_SESSION_ID: "other-session" });
@@ -188,7 +215,9 @@ test("MCP requests carry X-Ditto-Session-Id, and the name exactly once", async (
     stub.calls.length = 0;
     const none = await runAsync(["status", "--output", "json"], dir, env);
     assert.equal(none.status, 0, none.stderr);
-    assert.equal(stub.calls.find((c) => c.method === "initialize").headers["x-ditto-session-id"], undefined);
+    const noSessionHeaders = stub.calls.find((c) => c.method === "initialize").headers;
+    assert.equal(noSessionHeaders["x-ditto-session-id"], undefined);
+    assert.equal(noSessionHeaders["x-heyditto-client"], `heyditto-cli/${packageVersion}`);
   } finally {
     stub.close();
   }

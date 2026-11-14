@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { MCP_KEY_ENV, TOOL_SURFACE_HEADER, claudeMcpAttachment } from "../dist/agents/claude-mcp.js";
+import { packageVersion } from "../dist/config.js";
 import { codexMcpArgs, planCodex } from "../dist/agents/codex.js";
 import { wantsMcp } from "../dist/agents/launch.js";
 
@@ -29,9 +30,9 @@ test("codexMcpArgs: one -c override per server that turns it on, with the key on
   const args = codexMcpArgs(claudeMcpAttachment(catalog(false), "sess-1"));
   assert.deepEqual(args, [
     "-c",
-    `mcp_servers.ditto={enabled=true,url="https://router.test/v1/mcp/ditto",bearer_token_env_var="${MCP_KEY_ENV}",http_headers={"X-Ditto-Session-Id"="sess-1"},default_tools_approval_mode="approve"}`,
+    `mcp_servers.ditto={enabled=true,url="https://router.test/v1/mcp/ditto",bearer_token_env_var="${MCP_KEY_ENV}",http_headers={"X-Ditto-Session-Id"="sess-1","X-Heyditto-Client"="heyditto-cli/${packageVersion}"},default_tools_approval_mode="approve"}`,
     "-c",
-    `mcp_servers.ditto-github={enabled=true,url="https://router.test/v1/mcp/github",bearer_token_env_var="${MCP_KEY_ENV}",http_headers={"X-Ditto-Session-Id"="sess-1"},default_tools_approval_mode="approve"}`,
+    `mcp_servers.ditto-github={enabled=true,url="https://router.test/v1/mcp/github",bearer_token_env_var="${MCP_KEY_ENV}",http_headers={"X-Ditto-Session-Id"="sess-1","X-Heyditto-Client"="heyditto-cli/${packageVersion}"},default_tools_approval_mode="approve"}`,
   ], "Ditto holds gated calls, so Codex is not asked twice; a source with no tools is not attached");
   assert.ok(args.every((a) => !a.includes("inf-key")));
 });
