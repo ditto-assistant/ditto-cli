@@ -32,6 +32,7 @@ const replies = {
     { id: "agent-triage", name: "Feedback Triage", main_thread_id: "agent-triage", status: "active", thread_count: 1 },
   ], ...(args.space ? { space: args.space } : {}) }),
   list_agent_threads: () => ({ agent: "agent-triage", threads: [{ id: "agent-triage", title: "Feedback Triage", kind: "main", url: "https://app.heyditto.ai/chat/agent-triage" }] }),
+  get_agent_thread: (args) => ({ thread_id: args.thread, url: "https://app.heyditto.ai/chat/agent-triage", next_cursor: "older-page", exchanges: [{ pair_id: "pair-1", message: "Which issue?", answer: "ditto-app#2137 has the most reporters." }] }),
   send_message_to_agent: (args) => args.message === "fail"
     ? { message_id: "m-2", status: "failed", failure: { code: "insufficient_credits", message: "Add credits to keep chatting.", ref: "ref-1" } }
     : args.wait_seconds === 0
@@ -87,6 +88,13 @@ test("agents commands call the MCP agent-chat tools", async () => {
     assert.equal(last().name, "list_agent_threads");
     assert.deepEqual(last().arguments, { agent: "agent-triage", space: "omniaura/feedback-triager" });
     assert.match(r.stdout, /^ID\s+TITLE\s+KIND\s+LAST ACTIVITY\s+URL/m);
+
+    r = await run(["agents", "read", "thread-1", "--agent", "agent-triage", "--space", "omniaura/feedback-triager", "--limit", "5", "--cursor", "previous"], base, dir);
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(last().name, "get_agent_thread");
+    assert.deepEqual(last().arguments, { thread: "thread-1", agent: "agent-triage", space: "omniaura/feedback-triager", limit: 5, cursor: "previous" });
+    assert.match(r.stdout, /Which issue\?\n\nditto-app#2137 has the most reporters\./);
+    assert.match(r.stdout, /More exchanges are available with cursor: older-page/);
 
     r = await run(["agents", "send", "--space", "omniaura/feedback-triager", "--agent", "agent-triage", "--wait", "300", "which", "issue?"], base, dir);
     assert.equal(r.code, 0, r.stderr);

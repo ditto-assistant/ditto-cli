@@ -19,8 +19,10 @@ import { clearStoredKey, readStoredAuth, saveLogin, writeStoredAuth } from "./st
 import {
   printAgents,
   printAgentThreads,
+  printAgentThread,
   printAgentMessage,
   type AgentMessageResult,
+  type AgentThreadResult,
   cmdSessions,
   cmdSessionsRm,
   registerEndpointCommands,
@@ -1427,6 +1429,23 @@ your own workspace or an app workspace.`,
         await callToolRendered("list_agent_threads", agentChatArgs({ ...options, agent }), parseOutputFormat(options.output), printAgentThreads);
       }),
     `  heyditto agents threads agent-research`,
+  );
+  addExamples(
+    agents
+      .command("read <thread>")
+      .description("read recent exchanges in an agent thread, newest first")
+      .option("--agent <id>", "agent that owns the thread")
+      .option("--limit <number>", "exchanges to return (default 10, max 20)")
+      .option("--cursor <cursor>", "page further back using a previous next_cursor")
+      .addOption(spaceOption())
+      .addOption(outputOption())
+      .action(async (thread: string, options: AgentChatOptions & { limit?: string; cursor?: string }) => {
+        const args = agentChatArgs({ ...options, thread });
+        if (options.limit !== undefined) args.limit = parseIntegerOption(options.limit, "--limit");
+        if (options.cursor) args.cursor = options.cursor;
+        await callToolRendered<AgentThreadResult>("get_agent_thread", args, parseOutputFormat(options.output), printAgentThread);
+      }),
+    `  heyditto agents read agent-research --agent agent-research --limit 10`,
   );
   addExamples(
     agents
