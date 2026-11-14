@@ -29,7 +29,7 @@ const base = { baseUrl: "https://inference.heyditto.ai/v1", apiKey: "inf-key", s
 
 test("grokMcpConfig: one [mcp_servers] table per server, the key only as a variable name, Ditto's gate not doubled", () => {
   const toml = grokMcpConfig(claudeMcpAttachment(catalog(false), "sess-1"));
-  assert.match(toml, /\[mcp_servers\."ditto-github"\]\nurl = "https:\/\/router\.test\/v1\/mcp\/github"\nbearer_token_env_var = "DITTO_ROUTER_MCP_KEY"\nenabled = true\nheaders = \{ "X-Ditto-Session-Id" = "sess-1" \}/);
+  assert.match(toml, /\[mcp_servers\."ditto-github"\]\nurl = "https:\/\/router\.test\/v1\/mcp\/github"\nbearer_token_env_var = "DITTO_ROUTER_MCP_KEY"\nenabled = true\nheaders = \{ "X-Ditto-Session-Id" = "sess-1", "X-Heyditto-Client" = "heyditto-cli\/\d+\.\d+\.\d+[^"]*" \}/);
   assert.match(toml, /\[permission\]\nallow = \["MCPTool\(ditto__\*\)","MCPTool\(ditto-github__\*\)"\]$/);
   assert.ok(!toml.includes("ask ="), "Ditto holds gated calls, so grok asks about nothing");
 });

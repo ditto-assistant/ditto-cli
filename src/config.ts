@@ -9,6 +9,19 @@ const pkg = requirePkg("../package.json") as { name: string; version: string };
 export const packageName = pkg.name;
 export const packageVersion = pkg.version;
 
+/**
+ * Names this CLI and its version to Ditto. Sent on every Ditto API and MCP
+ * request, and written into the MCP configurations the CLI generates, so a
+ * session another client opens from that configuration still says which CLI
+ * version set it up (and so whether it can run `heyditto consent`).
+ */
+export const CLIENT_HEADER = "X-Heyditto-Client";
+
+/** The CLIENT_HEADER pair, ready to spread into a headers object. */
+export function clientHeaders(): Record<string, string> {
+  return { [CLIENT_HEADER]: `heyditto-cli/${packageVersion}` };
+}
+
 export function apiBaseURL(): string {
   return (process.env.DITTO_API_BASE || "https://api.heyditto.ai").replace(/\/+$/, "");
 }
