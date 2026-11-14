@@ -93,6 +93,35 @@ test("consent: a server without the consent tools says where to accept instead",
   await assert.rejects(runConsent(client, { wait: true, open: false, json: false }, deps), /app\.heyditto\.ai\/mcp/);
 });
 
+test("consent: a link that is already expired fails without waiting", async () => {
+  const client = fakeClient({ statuses: [{ complete: false }], request: { ...pending, expiresAt: new Date(0).toISOString() } });
+  const { io: deps } = io();
+  await assert.rejects(runConsent(client, { wait: true, open: false, json: false, pollMs: 1_000 }, deps), /expired before it was accepted/);
+  assert.deepEqual(client.calls, [CONSENT_STATUS_TOOL, REQUEST_CONSENT_TOOL], "no status poll for an expired link");
+});
+
+test("consent: a failed poll keeps waiting for the owner", async () => {
+  let polls = 0;
+  const client = {
+    calls: [],
+    async callTool({ name }) {
+      if (name === REQUEST_CONSENT_TOOL) return text(pending);
+      polls++;
+      if (polls === 2) throw new Error("socket hang up");
+      return text({ complete: polls >= 3 });
+    },
+  };
+  const { io: deps } = io();
+  assert.equal(await runConsent(client, { wait: true, open: false, json: false, pollMs: 1_000 }, deps), "complete");
+  assert.equal(polls, 3);
+});
+
+test("consent: other errors are not mistaken for an older server", async () => {
+  const client = { async callTool() { return { content: [{ type: "text", text: "agent account not found" }], isError: true }; } };
+  const { io: deps } = io();
+  await assert.rejects(runConsent(client, { wait: true, open: false, json: false }, deps), (err) => /agent account not found/.test(err.message) && !/app\.heyditto\.ai\/mcp/.test(err.message));
+});
+
 test("the upgrade notice prints once, on stderr, as plain text", () => {
   const written = [];
   const response = (value) => ({ headers: { get: (name) => (name === UPGRADE_HEADER ? value : null) } });

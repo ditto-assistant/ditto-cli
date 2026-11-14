@@ -940,7 +940,7 @@ async function cmdConsent(options: CommonOptions & { wait?: boolean; open?: bool
     const outcome = await runConsent(client, {
       wait: options.wait !== false,
       open: options.open !== false && process.stdout.isTTY === true,
-      json: format === "json" || format === "raw",
+      json: format === "json",
       claimURL: stored?.agentMode ? stored.claimURL : undefined,
     }, {
       out: (text) => process.stdout.write(text),
@@ -1519,7 +1519,7 @@ your own workspace or an app workspace.`,
       .description("get Ditto's Terms of Service and AI processing accepted for this account (prints a link for its owner)")
       .option("--no-wait", "print the link and exit instead of waiting for it to be accepted")
       .option("--no-open", "do not open the link in a browser")
-      .addOption(outputOption())
+      .addOption(new Option("--output <format>", "output format").choices(["text", "json"]).default("text"))
       .action(cmdConsent),
     `  heyditto consent                 # show the link, open it, wait until it is accepted
   heyditto consent --no-wait --output json

@@ -69,6 +69,9 @@ const UNSUPPORTED =
   "this Ditto server cannot ask for consent from the CLI yet. Open https://app.heyditto.ai/mcp, " +
   "sign in to the account and accept there.";
 
+/** Only a missing consent tool means an older server; other errors pass through. */
+const TOOL_MISSING = /unknown tool|tool\s+['"]?(?:consent_status|request_consent)['"]?\s+not found|-32602/i;
+
 function textOf(result: unknown): string {
   const content = (result as { content?: unknown }).content;
   if (!Array.isArray(content)) return "";
@@ -85,12 +88,12 @@ async function callJSON<T>(client: Pick<Client, "callTool">, name: string): Prom
     result = await client.callTool({ name, arguments: {} });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    if (/not found|unknown tool|-32602/i.test(message)) throw new Error(UNSUPPORTED);
+    if (TOOL_MISSING.test(message)) throw new Error(UNSUPPORTED);
     throw err;
   }
   const text = textOf(result);
   if ((result as { isError?: unknown }).isError) {
-    if (/not found|unknown tool/i.test(text)) throw new Error(UNSUPPORTED);
+    if (TOOL_MISSING.test(text)) throw new Error(UNSUPPORTED);
     throw new Error(text || `${name} failed`);
   }
   try {
@@ -104,7 +107,8 @@ async function callJSON<T>(client: Pick<Client, "callTool">, name: string): Prom
 
 function deadlineOf(request: ConsentRequest, now: number, fallbackMs: number): number {
   const at = request.expiresAt ? Date.parse(request.expiresAt) : Number.NaN;
-  return Number.isFinite(at) && at > now ? at : now + fallbackMs;
+  // A link that has already expired is expired: no fallback wait.
+  return Number.isFinite(at) ? at : now + fallbackMs;
 }
 
 export async function runConsent(client: Pick<Client, "callTool">, options: ConsentOptions, io: ConsentIO): Promise<ConsentOutcome> {
@@ -142,13 +146,23 @@ export async function runConsent(client: Pick<Client, "callTool">, options: Cons
   io.err("Waiting for the account owner to accept (Ctrl-C to stop; run `heyditto consent` again any time)...\n");
   const pollMs = options.pollMs ?? DEFAULT_POLL_MS;
   const deadline = deadlineOf(request, io.now(), options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  // A failed poll (a dropped connection, a bad response) does not end the
+  // wait: the owner may still accept before the link expires.
+  let lastError: unknown;
   while (io.now() < deadline) {
     await io.sleep(pollMs);
-    const next = await callJSON<ConsentStatus>(client, CONSENT_STATUS_TOOL);
+    let next: ConsentStatus;
+    try {
+      next = await callJSON<ConsentStatus>(client, CONSENT_STATUS_TOOL);
+    } catch (err) {
+      lastError = err;
+      continue;
+    }
     if (next.complete) {
       emit(next, "Accepted. Ditto can run for this account now.");
       return "complete";
     }
   }
-  throw new Error("the link expired before it was accepted; run `heyditto consent` for a new one");
+  const tail = lastError ? ` (last check failed: ${lastError instanceof Error ? lastError.message : String(lastError)})` : "";
+  throw new Error(`the link expired before it was accepted; run \`heyditto consent\` for a new one${tail}`);
 }
