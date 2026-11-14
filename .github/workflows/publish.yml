@@ -18,7 +18,7 @@ jobs:
       # The real checkout authenticates with RELEASE_TOKEN, so read the check
       # with the built-in token first: an expired release token should fail
       # here, by name, not at checkout with a git credential prompt error.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: .release-check
           sparse-checkout: .github/scripts
