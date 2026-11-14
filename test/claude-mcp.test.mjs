@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { packageVersion } from "../dist/config.js";
 import { planClaude } from "../dist/agents/claude.js";
 import {
   MCP_KEY_ENV,
@@ -52,7 +53,7 @@ test("claudeMcpAttachment: one http server per source, the key only as a variabl
   assert.deepEqual(config.mcpServers["ditto-github"], {
     type: "http",
     url: "https://router.test/v1/mcp/github",
-    headers: { Authorization: `Bearer \${${MCP_KEY_ENV}}`, "X-Ditto-Session-Id": "sess-1" },
+    headers: { Authorization: `Bearer \${${MCP_KEY_ENV}}`, "X-Ditto-Session-Id": "sess-1", "X-Heyditto-Client": `heyditto-cli/${packageVersion}` },
   });
   assert.equal(mcp.servers, 2);
   assert.equal(mcp.tools, 3);

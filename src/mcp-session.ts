@@ -1,7 +1,7 @@
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import { configDir } from "./config.js";
+import { configDir, packageVersion } from "./config.js";
 import { readStoredAuth, updateStoredAuth } from "./store.js";
 
 /**
@@ -13,6 +13,7 @@ import { readStoredAuth, updateStoredAuth } from "./store.js";
 
 export const SESSION_ID_HEADER = "X-Ditto-Session-Id";
 export const SESSION_NAME_HEADER = "X-Ditto-Session-Name";
+export const CLIENT_HEADER = "X-Heyditto-Client";
 /** Overrides the stored active session so scripts and spawned shells can pin one. */
 export const SESSION_ENV = "DITTO_SESSION_ID";
 export const SESSION_ID_PATTERN = /^[A-Za-z0-9._:@-]{1,128}$/;
@@ -98,8 +99,9 @@ export async function resolveActiveSession(): Promise<ActiveSession | undefined>
 
 /** Pure: the extra headers for one MCP request. */
 export function sessionHeaders(active: ActiveSession | undefined): Record<string, string> {
-  if (!active) return {};
-  const headers: Record<string, string> = { [SESSION_ID_HEADER]: active.id };
+  const headers: Record<string, string> = { [CLIENT_HEADER]: `heyditto-cli/${packageVersion}` };
+  if (!active) return headers;
+  headers[SESSION_ID_HEADER] = active.id;
   if (active.sendName && active.name) headers[SESSION_NAME_HEADER] = active.name;
   return headers;
 }

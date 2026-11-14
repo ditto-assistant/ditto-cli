@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { packageVersion } from "../config.js";
 import { TOOL_DENY_HEADER } from "./claude-deny.js";
 
 /**
@@ -203,7 +204,7 @@ export function claudeMcpAttachment(catalog: McpCatalog, sessionId: string, opts
       continue;
     }
     const name = claudeServerName(server.name);
-    const headers: Record<string, string> = { "X-Ditto-Session-Id": sessionId, ...(opts.toolDeny?.length ? { [TOOL_DENY_HEADER]: opts.toolDeny.join(",") } : {}) };
+    const headers: Record<string, string> = { "X-Ditto-Session-Id": sessionId, "X-Heyditto-Client": `heyditto-cli/${packageVersion}`, ...(opts.toolDeny?.length ? { [TOOL_DENY_HEADER]: opts.toolDeny.join(",") } : {}) };
     mcpServers[name] = {
       type: "http",
       url: server.url,

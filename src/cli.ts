@@ -935,7 +935,7 @@ function cmdConfig(options: CommonOptions): void {
     mcpServers: {
       ditto: {
         url: mcpServerURL(),
-        headers: { Authorization: "Bearer ${DITTO_API_KEY}" },
+        headers: { Authorization: "Bearer ${DITTO_API_KEY}", "X-Heyditto-Client": `heyditto-cli/${packageVersion}` },
       },
     },
     notes: { apiBase: apiBaseURL(), newKey: newKeyURL() },
@@ -996,6 +996,46 @@ function addExamples(command: Command, examples: string): Command {
   return command.addHelpText("after", `\nExamples:\n${examples}`);
 }
 
+async function cmdConsent(): Promise<void> {
+  const client = await getClient();
+  try {
+    const statusResult = await client.callTool({ name: "consent_status", arguments: {} });
+    if (statusResult.isError) throw new Error(formatToolResult(statusResult, "text"));
+    const statusText = extractTextBlock(statusResult);
+    const status = statusText ? JSON.parse(statusText) as { complete?: boolean; request?: { url?: string; code?: string }; account?: string; message?: string } : undefined;
+    if (!status) throw new Error("Ditto returned an invalid consent status.");
+    if (status.complete) {
+      process.stdout.write("This Ditto account has accepted the Terms of Service and AI processing.\n");
+      return;
+    }
+    if (status.account === "unclaimed_agent") {
+      process.stdout.write(`${status.message ?? "Claim this agent account before requesting consent."}\n`);
+      return;
+    }
+    const result = await client.callTool({ name: "request_consent", arguments: {} });
+    if (result.isError) throw new Error(formatToolResult(result, "text"));
+    const text = extractTextBlock(result);
+    const request = text ? JSON.parse(text) as { status?: string; url?: string; code?: string; message?: string } : undefined;
+    if (!request) throw new Error("Ditto returned an invalid consent request.");
+    if (request.status === "complete") {
+      process.stdout.write("This Ditto account has accepted the Terms of Service and AI processing.\n");
+      return;
+    }
+    if (request.status === "needs_claim") {
+      process.stdout.write(`${request.message ?? "Claim this agent account before requesting consent."}\n`);
+      return;
+    }
+    if (request.url) {
+      process.stdout.write(`Open this link while signed in as the owner of this Ditto account and accept the Terms of Service and AI processing:\n${request.url}\n`);
+      if (request.code) process.stdout.write(`Confirmation code: ${request.code}\n`);
+      return;
+    }
+    process.stdout.write(`${request.message ?? "No consent link was returned."}\n`);
+  } finally {
+    await client.close();
+  }
+}
+
 function buildProgram(): Command {
   const program = new Command();
 
@@ -1032,6 +1072,11 @@ Coding agents:
     npx @heyditto/cli@latest claude
 `,
     );
+
+  program
+    .command("consent")
+    .description("ask this Ditto account's owner to accept the Terms and AI processing")
+    .action(cmdConsent);
 
   addExamples(
     program

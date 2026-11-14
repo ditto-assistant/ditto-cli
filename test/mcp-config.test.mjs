@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { sdkMcpConfig } from "../dist/agents/mcp-config.js";
+import { packageVersion } from "../dist/config.js";
 
 test("SDK config exports Ditto and project Backroom with concrete credentials and session", () => {
   const config = sdkMcpConfig({ endpoint: "sn118", approvalMode: "park", clientApprovals: true, servers: [
@@ -10,6 +11,7 @@ test("SDK config exports Ditto and project Backroom with concrete credentials an
   assert.deepEqual(Object.keys(config.mcpServers), ["ditto", "ditto-backroom"]);
   assert.equal(config.mcpServers["ditto-backroom"].headers.Authorization, "Bearer synthetic-key");
   assert.equal(config.mcpServers.ditto.headers["X-Ditto-Session-Id"], "fresh-thread");
+  assert.equal(config.mcpServers.ditto.headers["X-Heyditto-Client"], `heyditto-cli/${packageVersion}`);
 });
 
 import { spawn } from "node:child_process";

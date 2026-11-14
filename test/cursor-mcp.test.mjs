@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { MCP_KEY_ENV, claudeMcpAttachment } from "../dist/agents/claude-mcp.js";
+import { packageVersion } from "../dist/config.js";
 import { CURSOR_PLUGIN_NAME, cursorMcpConfig, planCursor, writeCursorPlugin } from "../dist/agents/cursor.js";
 import { wantsMcp } from "../dist/agents/launch.js";
 
@@ -32,7 +33,7 @@ test("cursorMcpConfig: one url server per source, the key only as ${env:…}", (
   assert.deepEqual(Object.keys(config.mcpServers), ["ditto", "ditto-github"]);
   assert.deepEqual(config.mcpServers["ditto-github"], {
     url: "https://router.test/v1/mcp/github",
-    headers: { Authorization: `Bearer \${env:${MCP_KEY_ENV}}`, "X-Ditto-Session-Id": "sess-1" },
+    headers: { Authorization: `Bearer \${env:${MCP_KEY_ENV}}`, "X-Ditto-Session-Id": "sess-1", "X-Heyditto-Client": `heyditto-cli/${packageVersion}` },
   });
 });
 
