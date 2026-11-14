@@ -116,6 +116,41 @@ test("consent: a failed poll keeps waiting for the owner", async () => {
   assert.equal(polls, 3);
 });
 
+test("consent: a poll error that cannot recover stops the wait", async () => {
+  let polls = 0;
+  const client = {
+    async callTool({ name }) {
+      if (name === REQUEST_CONSENT_TOOL) return text(pending);
+      polls++;
+      if (polls === 1) return text({ complete: false });
+      throw new Error("HTTP 401: unauthorized");
+    },
+  };
+  const { io: deps } = io();
+  await assert.rejects(runConsent(client, { wait: true, open: false, json: false, pollMs: 1_000 }, deps), /unauthorized/);
+  assert.equal(polls, 2, "no retry after a refused key");
+});
+
+test("consent: an older server answering method-not-found gets the app fallback", async () => {
+  const client = { async callTool() { throw new Error("MCP error -32601: Method not found"); } };
+  const { io: deps } = io();
+  await assert.rejects(runConsent(client, { wait: true, open: false, json: false }, deps), /app\.heyditto\.ai\/mcp/);
+});
+
+test("consent: a later good poll clears an earlier poll failure", async () => {
+  let polls = 0;
+  const client = {
+    async callTool({ name }) {
+      if (name === REQUEST_CONSENT_TOOL) return text({ ...pending, expiresAt: new Date(4_500).toISOString() });
+      polls++; // call 1 is the initial status check, call 2 the first poll
+      if (polls === 2) throw new Error("socket hang up");
+      return text({ complete: false });
+    },
+  };
+  const { io: deps } = io();
+  await assert.rejects(runConsent(client, { wait: true, open: false, json: false, pollMs: 1_000 }, deps), (err) => /expired/.test(err.message) && !/socket hang up/.test(err.message));
+});
+
 test("consent: other errors are not mistaken for an older server", async () => {
   const client = { async callTool() { return { content: [{ type: "text", text: "agent account not found" }], isError: true }; } };
   const { io: deps } = io();

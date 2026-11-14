@@ -70,7 +70,13 @@ const UNSUPPORTED =
   "sign in to the account and accept there.";
 
 /** Only a missing consent tool means an older server; other errors pass through. */
-const TOOL_MISSING = /unknown tool|tool\s+['"]?(?:consent_status|request_consent)['"]?\s+not found|-32602/i;
+const TOOL_MISSING = /unknown tool|tool\s+['"]?(?:consent_status|request_consent)['"]?\s+not found|-3260[12]|method not found/i;
+
+/** Errors a later poll cannot recover from: no consent tools, or the key is refused. */
+function permanent(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return message === UNSUPPORTED || /\b40[13]\b|unauthori[sz]ed|forbidden|invalid api key/i.test(message);
+}
 
 function textOf(result: unknown): string {
   const content = (result as { content?: unknown }).content;
@@ -155,9 +161,11 @@ export async function runConsent(client: Pick<Client, "callTool">, options: Cons
     try {
       next = await callJSON<ConsentStatus>(client, CONSENT_STATUS_TOOL);
     } catch (err) {
+      if (permanent(err)) throw err;
       lastError = err;
       continue;
     }
+    lastError = undefined;
     if (next.complete) {
       emit(next, "Accepted. Ditto can run for this account now.");
       return "complete";
