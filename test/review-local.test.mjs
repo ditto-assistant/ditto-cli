@@ -377,3 +377,15 @@ test("failed or cancelled runs with attached findings do not render unavailable 
   assert.match(out.stdout, /1 finding in reviewed scope/);
   assert.match(out.stdout, /Fixture defect/);
 });
+
+test("a deep wait covers a 45-minute repository window and the timeout ceiling is an hour (FB-132)", async t => {
+  const root = await repository(t); await writeFile(path.join(root, "app.ts"), "bug\n");
+  const service = await stub(t);
+  const accepted = await command(root, service.base, ["local", "--profile", "deep", "--timeout", "3600", "--output", "json"]).result;
+  assert.equal(accepted.code, 0, accepted.stderr);
+  const callsBefore = service.calls.length;
+  const tooLong = await command(root, service.base, ["local", "--profile", "deep", "--timeout", "3601"]).result;
+  assert.equal(tooLong.code, 1); assert.match(tooLong.stderr, /--timeout/); assert.equal(service.calls.length, callsBefore);
+  const help = spawnSync(process.execPath, [cli, "review", "local", "--help"], { encoding: "utf8" });
+  assert.match(help.stdout.replace(/\s+/g, " "), /1-3600; default 1200, 3600 for deep/);
+});
