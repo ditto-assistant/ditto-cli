@@ -261,14 +261,20 @@ async function pollLocalRun(route: string, signal: AbortSignal): Promise<LocalRu
   }
 }
 
+// A deep local review runs for the repository's max-minutes (at most 45);
+// the wait adds capture and up to 10 minutes of queue time.
+const LOCAL_DEEP_DEFAULT_TIMEOUT_SECONDS = 45 * 60 + 10 * 60 + 5 * 60;
+const LOCAL_MAX_TIMEOUT_SECONDS = 3600;
+
 export async function cmdReviewLocal(options: LocalOptions): Promise<void> {
   if (options.staged && options.base) throw new Error("--staged and --base cannot be used together");
   if (options.preview && options.gate) throw new Error("--preview starts no review, so it cannot satisfy --gate");
   const profile = options.profile ?? "quick";
   if (!["quick", "standard", "deep"].includes(profile)) throw new Error("--profile must be quick, standard or deep");
   if (options.requestId) { try { runPath(options.requestId); } catch { throw new Error("--request-id must be a UUID"); } }
-  // A deep run may wait up to 10 minutes queued and then run 15 (DITTO-2455).
-  const timeout = intFlag("--timeout", options.timeout ?? (profile === "deep" ? "1800" : "1200"), 1, 1800) * 1000;
+  // A deep run may wait up to 10 minutes queued and then run for the
+  // repository's max-minutes, at most 45 (DITTO-2455, FB-132 / DITTO-2835).
+  const timeout = intFlag("--timeout", options.timeout ?? (profile === "deep" ? String(LOCAL_DEEP_DEFAULT_TIMEOUT_SECONDS) : "1200"), 1, LOCAL_MAX_TIMEOUT_SECONDS) * 1000;
   const context = options.contextFile ? new TextDecoder("utf-8", { fatal: true }).decode(await readFile(options.contextFile)) : undefined;
   if (context && (Buffer.byteLength(context) > 16000 || context.includes("\0"))) throw new Error("--context-file must contain at most 16000 UTF-8 bytes without NUL characters");
   const issueKey = options.issue?.trim().toUpperCase();
@@ -845,7 +851,7 @@ export function registerReviewCommands(
     .option("--repository <owner/name>", "Review repository (default: current checkout's GitHub origin)")
     .option("--directory <directory>", "checkout to review (default: current directory)")
     .option("--preview", "inspect selected paths and upload size locally; no auth, upload or inference")
-    .option("--timeout <seconds>", "cancel after this many seconds including capture and queue time (1-1800; default 1200, 1800 for deep)")
+    .option("--timeout <seconds>", `cancel after this many seconds including capture and queue time (1-${LOCAL_MAX_TIMEOUT_SECONDS}; default 1200, ${LOCAL_DEEP_DEFAULT_TIMEOUT_SECONDS} for deep)`)
     .option("--request-id <uuid>", "recover an uncertain admission with exactly the same source, profile and context")
     .option("--gate", "exit 0 only on an approve recommendation, 2 on changes requested, 1 when there is no recommendation; a timeout (124) or interrupt (130/143) keeps its own code and is never approval")
     .option("--trace <file>", "the coding agent's session (Claude Code or Codex JSONL): its prompt and steps become review input, and its linked issue's written requirements are checked; read only, never deleted")
