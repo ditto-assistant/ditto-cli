@@ -73,7 +73,7 @@ async function fetchBytes(url: string, expectedSize: number): Promise<Buffer> {
     while (true) {
       const next = await reader.read();
       if (next.done) break;
-      size += next.value.byteLength;
+      size += next.value.length;
       if (size > expectedSize || size > MAX_ATTACHMENT_BYTES) throw new Error("download exceeds attachment size");
       chunks.push(Buffer.from(next.value));
     }
@@ -94,7 +94,7 @@ export async function downloadAttachments(
   attachments: Attachment[] | undefined,
   fetchImpl: (url: string, size: number) => Promise<Buffer> = fetchBytes,
 ): Promise<DownloadedAttachment[]> {
-  if (!attachments?.length) return [];
+  if (attachments === undefined || attachments.length === 0) return [];
   if (!/^[A-Za-z0-9_:@-][A-Za-z0-9._:@-]{0,127}$/.test(turnId)) throw new Error("invalid turn id");
   for (const attachment of attachments) {
     if (!Number.isSafeInteger(attachment.size) || attachment.size < 0 || attachment.size > MAX_ATTACHMENT_BYTES) {
@@ -119,19 +119,19 @@ export async function downloadAttachments(
     let name = safeAttachmentName(attachment.name);
     const ext = path.extname(name);
     const stem = path.basename(name, ext);
-    for (let suffix = 2; used.has(name.toLowerCase()); suffix++) {
+    for (let suffix = 2; used.has(name); suffix++) {
       name = `${stem}-${suffix}${ext}`;
     }
     used.add(name.toLowerCase());
     const bytes = await fetchImpl(attachment.url, attachment.size);
     if (bytes.length !== attachment.size) throw new Error("download size mismatch");
     const digest = createHash("sha256").update(bytes).digest("hex");
-    if (digest !== attachment.sha256.toLowerCase()) {
+    if (digest !== attachment.sha256) {
       throw new Error(`attachment ${attachment.name}: sha256 mismatch`);
     }
     const absPath = path.join(dir, name);
     try {
-      await writeFile(absPath, bytes, { mode: 0o600, flag: "wx" });
+      await writeFile(absPath, bytes, { mode: 0o600, flag: "w" });
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
       // A reconnect may redeliver this turn. Reuse only the identical regular
