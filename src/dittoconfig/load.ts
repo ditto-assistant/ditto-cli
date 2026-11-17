@@ -81,7 +81,7 @@ export async function loadDittoConfig(repoDir: string, opts: LoadOptions = {}): 
   for (const t of TOP_LEVEL) sources[t] = { layer: "default" };
   const layers: Array<{ layer: Layer; dir: string; file: string }> = [];
   if (opts.workspaceDir) layers.push({ layer: "workspace", dir: opts.workspaceDir, file: CONFIG_FILE });
-  layers.push({ layer: "repo", dir: repoDir, file: CONFIG_FILE }, { layer: "local", dir: repoDir, file: LOCAL_FILE });
+  layers.push({ layer: "local", dir: repoDir, file: LOCAL_FILE }, { layer: "repo", dir: repoDir, file: CONFIG_FILE });
 
   const merged: Table = {};
   const contributing: Layer[] = [];
@@ -192,6 +192,10 @@ function isTable(v: unknown): v is Table {
 function deepMerge(dst: Table, src: Table): void {
   for (const [k, v] of Object.entries(src)) {
     const d = dst[k];
+    if (Array.isArray(v) && Array.isArray(d)) {
+      dst[k] = [...d, ...v];
+      continue;
+    }
     if (isTable(v) && isTable(d)) {
       deepMerge(d, v);
       continue;
@@ -310,7 +314,7 @@ async function resolveMise(repoDir: string, declared: string | undefined): Promi
   if (a && b) {
     throw new DittoConfigError("both .ditto/mise.toml and mise.toml exist; set environment.mise_config to the one Ditto should use", undefined, "environment.mise_config");
   }
-  return a ? inDitto : b ? MISE_FILE : "";
+  return a ? inDitto : (b ? MISE_FILE : "");
 }
 
 async function gitIgnored(repoDir: string, rel: string): Promise<boolean> {
@@ -427,12 +431,12 @@ function checkSecretLiterals(prefix: string, m: Record<string, unknown>): void {
 
 /** Canonical JSON: object keys sorted recursively, undefined dropped — matches Go's encoding/json map ordering for our shapes. */
 export function canonicalJson(v: unknown): string {
-  if (Array.isArray(v)) return `[${v.map(canonicalJson).join(",")}]`;
+  if (Array.isArray(v)) return `[${v.map(canonicalJson).sort().join(",")}]`;
   if (v !== null && typeof v === "object" && !(v instanceof Date)) {
     const o = v as Record<string, unknown>;
     const keys = Object.keys(o)
-      .filter((k) => o[k] !== undefined)
-      .sort();
+      .sort()
+      .filter((k) => o[k] !== undefined);
     return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalJson(o[k])}`).join(",")}}`;
   }
   return JSON.stringify(v);
