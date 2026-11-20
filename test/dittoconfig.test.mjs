@@ -72,7 +72,7 @@ test("vendored schema matches the pinned backend export", async () => {
   assert.equal(createHash("sha256").update(raw).digest("hex"), SCHEMA_SHA256, "src/dittoconfig/schema.json changed; regenerate from backend `go run ./cmd/dittoconfig-schema` and update SCHEMA_SHA256");
   const doc = JSON.parse(raw.toString("utf8"));
   assert.equal(doc.$id, "https://heyditto.ai/schemas/dittoconfig/v1.json");
-  for (const def of ["Endpoint", "Teleport", "Environment", "Service", "RepairPolicy"]) assert.ok(doc.$defs[def], `schema lacks ${def}`);
+  for (const def of ["Endpoint", "Teleport", "Environment", "Service", "RepairPolicy", "Review"]) assert.ok(doc.$defs[def], `schema lacks ${def}`);
 });
 
 test("loads a valid repository with endpoints, mise and sources", async () => {
