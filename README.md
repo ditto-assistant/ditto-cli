@@ -1454,6 +1454,32 @@ says so. Tracked artifact directories are flagged rather than claimed excluded.
 `heyditto offload` refuses to delete a folder when unrelated files, unknown projects or
 escaping symlinks beneath it would be lost.
 
+### Ditto Review updates (`[review]`)
+
+By default Ditto Review keeps a progress comment on the pull request, edits it
+as the review runs, and posts each finding as soon as it is verified. Every one
+of those writes reaches anything watching the repository, such as a coding agent
+subscribed to pull request events. To have the review write only once, when it
+is published, set:
+
+```toml
+# .ditto/config.toml
+version = 1
+[review]
+updates = "final_only"   # default: "live"
+```
+
+With `final_only` there is no progress comment, no edits to it, and no streamed
+findings: the final review carries every finding. A run that ends without a
+review (it failed, or the repository's allowance ran out) still leaves one
+comment saying so.
+
+Ditto Review reads this from the repository's **default branch**, so a pull
+request cannot change how its own review reports; the setting takes effect once
+it is merged. If the file is missing or unreadable, the review uses `live`.
+`heyditto repo validate` checks the value; the table is read by the Ditto
+backend and is not part of the effective config `heyditto repo show` prints.
+
 ### Claude Code hooks (`claude_hooks`)
 
 A profile can attach Ditto's own Claude Code hooks to `heyditto claude`

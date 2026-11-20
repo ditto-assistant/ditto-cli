@@ -15,9 +15,11 @@ const { loadDittoConfig, DittoConfigError, DittoConfigNotFound, digest, summariz
 /**
  * Pinned checksum of src/dittoconfig/schema.json, the JSON Schema exported by
  * backend `go run ./cmd/dittoconfig-schema`. Regenerate the file AND update this
- * constant together when the Go schema changes.
+ * constant together when the Go schema changes. The `Review` table (FB-133) was
+ * added here first: Ditto Review reads it, and backend PR #2561 (the Go
+ * package) is unmerged; carry it into that export when it lands.
  */
-const SCHEMA_SHA256 = "d416b38ba974a89243a176e1174163d4e6bd9e62eed7b6811e32d4b576be1c48";
+const SCHEMA_SHA256 = "c79918609d6f1980376ce68c30e6fd77106f07a533f927e24f3a722e9345f5af";
 
 async function repo(files) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "dittoconfig-"));
@@ -70,7 +72,7 @@ test("vendored schema matches the pinned backend export", async () => {
   assert.equal(createHash("sha256").update(raw).digest("hex"), SCHEMA_SHA256, "src/dittoconfig/schema.json changed; regenerate from backend `go run ./cmd/dittoconfig-schema` and update SCHEMA_SHA256");
   const doc = JSON.parse(raw.toString("utf8"));
   assert.equal(doc.$id, "https://heyditto.ai/schemas/dittoconfig/v1.json");
-  for (const def of ["Endpoint", "Teleport", "Environment", "Service", "RepairPolicy"]) assert.ok(doc.$defs[def], `schema lacks ${def}`);
+  for (const def of ["Endpoint", "Teleport", "Environment", "Service", "RepairPolicy", "Review"]) assert.ok(doc.$defs[def], `schema lacks ${def}`);
 });
 
 test("loads a valid repository with endpoints, mise and sources", async () => {
@@ -102,6 +104,20 @@ test("rejects unsupported version, unknown keys and typos naming the key", async
   await assert.rejects(loadDittoConfig(await repo({ ".ditto/config.toml": "version = 1\n[teleport]\nexlcude = ['x/']\n" })), /exlcude/);
   await assert.rejects(loadDittoConfig(await repo({ ".ditto/config.toml": "version = 1\n[telport]\n" })), /telport/);
   await assert.rejects(loadDittoConfig(await repo({ ".ditto/config.toml": "version = 1\n", ".ditto/endpoints/a.toml": "managed = true\nname = 'a'\nunknown = 1\n" })), /unknown key/);
+});
+
+test("[review] updates is validated but stays out of the effective config and its digest (FB-133)", async () => {
+  const mise = { ".ditto/mise.toml": "[tools]\nnode = '22'\n" };
+  const plain = await loadDittoConfig(await repo({ ".ditto/config.toml": VALID, ...mise }));
+  for (const updates of ["final_only", "live"]) {
+    const eff = await loadDittoConfig(await repo({ ".ditto/config.toml": VALID + `[review]\nupdates = "${updates}"\n`, ...mise }));
+    assert.equal(eff.config.review, undefined, "the backend reads [review]; this tool does not carry it");
+    assert.equal(digest(eff), digest(plain), "adding [review] must not change the teleport digest");
+  }
+  await assert.rejects(loadDittoConfig(await repo({ ".ditto/config.toml": "version = 1\n[review]\nupdates = 'quiet'\n" })), (e) => e instanceof DittoConfigError && e.field === "review.updates");
+  await assert.rejects(loadDittoConfig(await repo({ ".ditto/config.toml": "version = 1\n[review]\nupdates = true\n" })), (e) => e instanceof DittoConfigError && e.field === "review.updates");
+  await assert.rejects(loadDittoConfig(await repo({ ".ditto/config.toml": "version = 1\n[review]\nupdate = 'final_only'\n" })), /review\.update/);
+  await assert.rejects(loadDittoConfig(await repo({ ".ditto/config.toml": "version = 1\nreview = 'final_only'\n" })), (e) => e instanceof DittoConfigError && e.field === "review");
 });
 
 test("layers merge recursively: workspace < repo < local < override", async () => {
