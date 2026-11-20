@@ -49,6 +49,17 @@ type Table = Record<string, unknown>;
 
 const TOP_LEVEL = new Set(["repository", "teleport", "environment", "tasks", "policy"]);
 
+/**
+ * Tables read by the Ditto backend rather than by this tool. They are
+ * validated here so a typo fails locally, but are not part of the effective
+ * config (or its digest): `[review]` is read by Ditto Review from the default
+ * branch on GitHub.
+ */
+const SERVER_TABLES = new Set(["review"]);
+
+/** `[review] updates`: "live" (default) or "final_only" (FB-133). */
+export const REVIEW_UPDATES = new Set(["live", "final_only"]);
+
 /** TOML snake_case keys → the camelCase field names used by the JSON schema and the Go types. */
 const KEY_MAP: Record<string, string> = {
   default_endpoint: "defaultEndpoint",
@@ -71,6 +82,7 @@ const KNOWN_KEYS: Record<string, Set<string>> = {
   tasks: new Set(["setup", "build", "test", "lint", "dev"]),
   policy: new Set(["repair"]),
   "policy.repair": new Set(["max_attempts", "install_only"]),
+  review: new Set(["updates"]),
 };
 
 const ENDPOINT_KEYS = new Set(["managed", "name", "slug", "description", "model", "fallbacks", "settings"]);
@@ -154,8 +166,8 @@ export function summarize(eff: EffectiveConfig): DittoConfigSummary {
 
 function checkKnownKeys(file: string, doc: Table): void {
   for (const k of Object.keys(doc)) {
-    if (k !== "version" && !TOP_LEVEL.has(k)) {
-      throw new DittoConfigError("unknown top-level table (known: repository, teleport, environment, tasks, policy)", file, k);
+    if (k !== "version" && !TOP_LEVEL.has(k) && !SERVER_TABLES.has(k)) {
+      throw new DittoConfigError("unknown top-level table (known: repository, teleport, environment, tasks, policy, review)", file, k);
     }
   }
   const check = (prefix: string, schemaKey: string, table: unknown): void => {
@@ -182,6 +194,14 @@ function checkKnownKeys(file: string, doc: Table): void {
   check("tasks", "tasks", doc.tasks);
   check("policy", "policy", doc.policy);
   if (isTable(doc.policy)) check("policy.repair", "policy.repair", doc.policy.repair);
+  if ("review" in doc && !isTable(doc.review)) throw new DittoConfigError("must be a table", file, "review");
+  check("review", "review", doc.review);
+  if (isTable(doc.review) && "updates" in doc.review) {
+    const v = doc.review.updates;
+    if (typeof v !== "string" || !REVIEW_UPDATES.has(v)) {
+      throw new DittoConfigError(`must be one of ${[...REVIEW_UPDATES].map((u) => JSON.stringify(u)).join(", ")}`, file, "review.updates");
+    }
+  }
 }
 
 function isTable(v: unknown): v is Table {

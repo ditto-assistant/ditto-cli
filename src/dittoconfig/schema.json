@@ -38,6 +38,9 @@
           "maximum": 1,
           "minimum": 1,
           "description": "Schema version; only 1 is defined"
+        },
+        "review": {
+          "$ref": "#/$defs/Review"
         }
       },
       "additionalProperties": false,
@@ -151,6 +154,20 @@
         },
         "defaultEndpoint": {
           "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "Review": {
+      "properties": {
+        "updates": {
+          "type": "string",
+          "enum": [
+            "live",
+            "final_only"
+          ],
+          "description": "How Ditto Review writes to a pull request: live (default) keeps a progress comment and streams findings; final_only writes once, when the review is published. Read by the Ditto backend from the default branch."
         }
       },
       "additionalProperties": false,
