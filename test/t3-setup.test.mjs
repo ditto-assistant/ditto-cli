@@ -327,4 +327,35 @@ test("T3 setup skips transient cmux CLI shims on PATH and refuses explicit cmux 
   // Explicit --claude-bin pointing at a cmux shim (or a symlink to one) is also refused.
   assert.throws(() => f.plan({ claudeBin: shimClaude }), /Refusing transient cmux CLI shim for claude/);
   assert.throws(() => f.plan({ claudeBin: symlinkToShim }), /Refusing transient cmux CLI shim for claude/);
+
+  // On POSIX, literal backslashes in a directory name are filename characters, not separators.
+  if (path.sep === "/") {
+    const literalBackslashDir = path.join(f.root, ".cmuxterm\\cmux-cli-shims");
+    mkdirSync(literalBackslashDir, { recursive: true });
+    const literalBackslashClaude = path.join(literalBackslashDir, "claude");
+    writeFileSync(literalBackslashClaude, `#!${process.execPath}\nprocess.stdout.write("literal\\n");\n`, { mode: 0o700 });
+    assert.equal(isTransientCliShim(literalBackslashClaude), false);
+    assert.doesNotThrow(() => f.plan({ claudeBin: literalBackslashClaude }));
+  }
+});
+
+test("T3 setup excludes existing managed launchers from PATH detection and explicit overrides", (t) => {
+  const f = fixture(t);
+  const first = f.plan();
+  applyT3Setup(first);
+  const launcherDir = path.dirname(first.launcherPath);
+  // Explicit override pointing at a previously installed launcher under managedRoot is refused.
+  assert.throws(() => f.plan({ heydittoBin: first.launcherPath }), /Refusing a previously installed T3 launcher for heyditto/);
+  // A managed launcher dir on PATH is skipped in favor of the real executable.
+  const managedClaude = path.join(launcherDir, "claude");
+  writeFileSync(managedClaude, `#!${process.execPath}\nprocess.stdout.write("managed\\n");\n`, { mode: 0o700 });
+  const realDir = path.dirname(f.options.claudeBin);
+  const found = resolveExecutableOnPath("claude", `${launcherDir}${path.delimiter}${realDir}`, first.managedRoot);
+  assert.equal(found.path, f.options.claudeBin);
+  // On case-insensitive filesystems (e.g. macOS APFS), differently cased managedRoot paths are still excluded.
+  const upperLauncherDir = launcherDir.replace("ditto-providers", "DITTO-PROVIDERS");
+  if (existsSync(path.join(upperLauncherDir, "claude"))) {
+    const foundUpper = resolveExecutableOnPath("claude", `${upperLauncherDir}${path.delimiter}${realDir}`, first.managedRoot);
+    assert.equal(foundUpper.path, f.options.claudeBin);
+  }
 });

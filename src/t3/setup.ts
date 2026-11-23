@@ -94,15 +94,25 @@ const TRANSIENT_SHIM_PATTERN = /(?:^|\/)\.cmuxterm\/cmux-cli-shims(?:\/|$)/;
 export function isTransientCliShim(target: string): boolean {
   const candidates = [target];
   try { candidates.push(realpathSync(target)); } catch { /* Missing or unreadable target is checked as given. */ }
-  return candidates.some((candidate) => TRANSIENT_SHIM_PATTERN.test(candidate.replaceAll("\\", "/")));
+  return candidates.some((candidate) => TRANSIENT_SHIM_PATTERN.test(path.sep === "\\" ? candidate.replaceAll("\\", "/") : candidate));
 }
 
 function isInsideDirectory(target: string, root: string): boolean {
-  const roots = [path.resolve(root)];
-  try { roots.push(realpathSync(root)); } catch { /* Managed root may not exist yet. */ }
+  let rootReal: string;
+  try {
+    if (!statSync(root).isDirectory()) return false;
+    rootReal = realpathSync.native(root);
+  } catch { return false; }
   const targets = [path.resolve(target)];
-  try { targets.push(realpathSync(target)); } catch { /* Target already checked; ignore realpath errors. */ }
-  return roots.some((r) => targets.some((t) => t.startsWith(r + path.sep)));
+  try { targets.push(realpathSync.native(target)); } catch { /* Target already checked; ignore realpath errors. */ }
+  return targets.some((candidate) => {
+    for (let dir = path.dirname(candidate); ; dir = path.dirname(dir)) {
+      try {
+        if (realpathSync.native(dir) === rootReal) return true;
+      } catch { /* Unreadable ancestor cannot match the managed root. */ }
+      if (path.dirname(dir) === dir) return false;
+    }
+  });
 }
 
 /**
@@ -141,6 +151,9 @@ function executable(value: string | undefined, name: string, managedRoot?: strin
     if (!statSync(resolved).isFile()) throw new Error(`${name} must be an executable file`);
     if (isTransientCliShim(resolved)) {
       throw new Error(`Refusing transient cmux CLI shim for ${name}: ${resolved}; set ${flag} to the real installed executable`);
+    }
+    if (managedRoot && isInsideDirectory(resolved, managedRoot)) {
+      throw new Error(`Refusing a previously installed T3 launcher for ${name}: ${resolved}; set ${flag} to the real installed executable`);
     }
     return resolved;
   }
