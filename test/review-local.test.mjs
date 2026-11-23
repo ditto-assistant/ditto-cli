@@ -139,6 +139,28 @@ test("large unchanged context is omitted explicitly while selected changes must 
   await assert.rejects(captureReviewSnapshot({ cwd: root }), /changed files exceed local review limits/);
 });
 
+test("skipped unchanged binaries do not consume context budget and source outranks bulk assets", async t => {
+  const binary = Buffer.concat([Buffer.from([0, 1, 2, 3]), Buffer.alloc(1.5 * 1024 * 1024, 0x41)]);
+  const root = await repository(t, {
+    "src/app.ts": "export const v = 1;\n",
+    "src/near.png": binary,
+    "src/near2.png": binary,
+    "src/caller.ts": "export const c = 1;\n".repeat(4000),
+    "bun.lock": "lock\n".repeat(300_000),
+    "public/dump.json": "{\"a\":1}\n".repeat(250_000),
+    "other/deep/helper.ts": "export const h = 1;\n".repeat(4000),
+  });
+  await writeFile(path.join(root, "src/app.ts"), "export const v = 2;\n");
+  const { snapshot, bytes } = await captureReviewSnapshot({ cwd: root });
+  assert.ok(bytes <= 4 * 1024 * 1024, `unchanged context exceeded 4 MiB cap: ${bytes}`);
+  const headPaths = new Set(snapshot.headFiles.map(f => f.path));
+  assert.ok(headPaths.has("src/caller.ts"), "nearby source must be kept");
+  assert.ok(headPaths.has("other/deep/helper.ts"), "source file must outrank bun.lock and public/dump.json");
+  assert.ok(!headPaths.has("src/near.png") && !headPaths.has("src/near2.png"), "binaries must be skipped");
+  assert.ok(snapshot.omittedContext.includes("bun.lock") || snapshot.omittedContext.includes("public/dump.json"), "bulk assets omitted once 4 MiB context cap is reached");
+  assert.equal(snapshot.digest, snapshotDigest(snapshot));
+});
+
 test("unsupported raw Git path bytes fail closed without a lossy snapshot", async t => {
   const root = await repository(t);
   // Store a raw index name rather than creating an invalid filesystem name:

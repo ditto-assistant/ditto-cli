@@ -254,9 +254,9 @@ async function pollLocalRun(route: string, signal: AbortSignal): Promise<LocalRu
     try { return await apiFetch<LocalRun>(route, { signal }); }
     catch (error) {
       const transient = error instanceof TypeError || (error instanceof ApiError && (error.status >= 500 || [408, 429].includes(error.status)));
-      if (!transient || signal.aborted || attempt === 2) throw error;
+      if (!transient || signal.aborted || attempt === 5) throw error;
       process.stderr.write("Review status is temporarily unavailable; retrying the read.\n");
-      await delay(500 * (attempt + 1), undefined, { signal });
+      await delay(Math.min(5000, 500 * 2 ** attempt), undefined, { signal });
     }
   }
 }
@@ -346,7 +346,7 @@ export async function cmdReviewLocal(options: LocalOptions): Promise<void> {
     // Complete the admission response even on Ctrl-C so a returned run can be
     // cancelled. An uncertain POST is never retried automatically.
     let run = await apiFetch<LocalRun>(`/api/v5/review/repositories/${encodeURIComponent(repo.id)}/local${scopeQuery(company)}`, {
-      method: "POST", body: { requestId, snapshot, profile, ...(context ? { context } : {}), ...linked }, signal: AbortSignal.timeout(30000),
+      method: "POST", body: { requestId, snapshot, profile, ...(context ? { context } : {}), ...linked }, signal: AbortSignal.timeout(90000),
     });
     try { runPath(run?.runId); } catch { throw new Error("Review API returned no valid run ID"); }
     runId = run.runId;
