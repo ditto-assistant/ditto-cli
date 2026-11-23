@@ -5,8 +5,38 @@ import { lstat, open, realpath } from "node:fs/promises";
 import path from "node:path";
 
 export const LOCAL_REVIEW_MAX_BYTES = 16 * 1024 * 1024;
+/** Unchanged surrounding context stops once decoded snapshot bytes reach 4 MiB
+ * (~5.5 MiB JSON), keeping uploads below the >8 MiB transport hazard zone while
+ * still fitting hundreds of nearby source files. Changed files keep the full
+ * 16 MiB cap. */
+export const LOCAL_REVIEW_CONTEXT_MAX_BYTES = 4 * 1024 * 1024;
 export const LOCAL_REVIEW_MAX_FILES = 4096;
 export const LOCAL_REVIEW_MAX_JSON_BYTES = 24 * 1024 * 1024;
+
+const LOW_VALUE_CONTEXT_FILES = new Set([
+  "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml",
+  "bun.lock", "bun.lockb", "go.sum", "cargo.lock", "poetry.lock", "uv.lock",
+  "gemfile.lock", "composer.lock", "podfile.lock",
+]);
+const LOW_VALUE_CONTEXT_DIRS = new Set([
+  "public", "dist", "build", "vendor", "node_modules", ".agents", ".claude",
+  "third_party", "__snapshots__",
+]);
+const LOW_VALUE_CONTEXT_EXTS = [".min.js", ".min.css", ".map", ".svg", ".snap", ".csv"];
+const LARGE_CONTEXT_FILE_BYTES = 128 * 1024;
+
+/** Deprioritize lockfiles, built/vendored/asset trees and large data dumps
+ * behind source and config files so bounded context keeps real callers first. */
+function contextTier(file: string, size: number): number {
+  if (size > LARGE_CONTEXT_FILE_BYTES) return 2;
+  const parts = file.toLowerCase().split("/");
+  const base = parts[parts.length - 1] ?? "";
+  if (LOW_VALUE_CONTEXT_FILES.has(base)) return 2;
+  if (parts.slice(0, -1).some(dir => LOW_VALUE_CONTEXT_DIRS.has(dir))) return 2;
+  if (LOW_VALUE_CONTEXT_EXTS.some(ext => base.endsWith(ext))) return 2;
+  if ((base.endsWith(".html") || base.endsWith(".htm")) && size > 32 * 1024) return 2;
+  return 1;
+}
 
 export interface SnapshotFile { path: string; contentBase64: string; mode: "100644" | "100755" }
 export interface ReviewSnapshot {
@@ -240,34 +270,83 @@ export async function captureReviewSnapshot(options: SnapshotOptions = {}): Prom
     const parts = file.split("/");
     return Math.min(...changedPaths.map(p => { const target = p.split("/"); let n = 0; while (n < parts.length - 1 && n < target.length - 1 && parts[n] === target[n]) n++; return parts.length + target.length - 2 * n; }), 10000);
   };
-  const prioritized = all.filter(f => metadata.has(f)).sort((a, b) => Number(changed.has(b)) - Number(changed.has(a)) || distance(a) - distance(b) || order(a, b));
+  const changedList = changedPaths.filter(f => metadata.has(f));
+  const unchangedList = all
+    .filter(f => !changed.has(f) && metadata.has(f))
+    .sort((a, b) => contextTier(a, metadata.get(a)!.baseSize) - contextTier(b, metadata.get(b)!.baseSize) || distance(a) - distance(b) || order(a, b));
+
   let total = 0, baseCount = 0, headCount = 0;
-  const selected: string[] = [], omittedContext: string[] = [];
-  for (const file of prioritized) {
+  const baseFiles: SnapshotFile[] = [], headFiles: SnapshotFile[] = [], omittedContext: string[] = [];
+
+  // Phase 1: changed files always come first and get the full 16 MiB cap.
+  for (const file of changedList) {
     const size = metadata.get(file)!;
     const nextBase = baseCount + Number(base.has(file)), nextHead = headCount + Number(headPaths.has(file));
     if (total + size.baseSize + size.headSize > LOCAL_REVIEW_MAX_BYTES || nextBase > LOCAL_REVIEW_MAX_FILES || nextHead > LOCAL_REVIEW_MAX_FILES) {
-      if (changed.has(file)) throw new Error(`changed files exceed local review limits (16 MiB, 4096 files/tree); narrow the diff before reviewing: ${file}`);
-      omittedContext.push(file); continue;
+      throw new Error(`changed files exceed local review limits (16 MiB, 4096 files/tree); narrow the diff before reviewing: ${file}`);
     }
-    selected.push(file); total += size.baseSize + size.headSize; baseCount = nextBase; headCount = nextHead;
+    total += size.baseSize + size.headSize; baseCount = nextBase; headCount = nextHead;
   }
-  const selectedIds = [...new Set(selected.flatMap(file => [base.get(file), ...(options.staged ? [index.get(file)] : [])].filter((e): e is GitEntry => regular(e)).map(e => e.oid)))];
-  const content = await blobs(root, selectedIds, options.signal);
-  const baseFiles: SnapshotFile[] = [], headFiles: SnapshotFile[] = [];
-  for (const file of selected) {
+  const changedIds = [...new Set(changedList.flatMap(file => [base.get(file), ...(options.staged ? [index.get(file)] : [])].filter((e): e is GitEntry => regular(e)).map(e => e.oid)))];
+  const changedContent = await blobs(root, changedIds, options.signal);
+  // Recount actual included text bytes so skipped binary changed files never eat context budget.
+  total = 0; baseCount = 0; headCount = 0;
+  for (const file of changedList) {
     const b = base.get(file), h = index.get(file);
-    const before = b ? content.get(b.oid)! : undefined;
+    const before = b ? changedContent.get(b.oid)! : undefined;
     let after: Buffer | undefined, headMode: SnapshotFile["mode"] = "100644";
     try {
-      if (options.staged) { after = h ? content.get(h.oid) : undefined; headMode = h?.mode as SnapshotFile["mode"] ?? "100644"; }
-      else if (!changed.has(file)) { after = before; headMode = b?.mode as SnapshotFile["mode"] ?? "100644"; }
+      if (options.staged) { after = h ? changedContent.get(h.oid) : undefined; headMode = h?.mode as SnapshotFile["mode"] ?? "100644"; }
       else if (headPaths.has(file)) { const value = await workingFile(root, file, true); after = value?.data; headMode = honorFileMode ? value?.mode ?? "100644" : h?.mode as SnapshotFile["mode"] ?? "100644"; }
     } catch (error) { if (error instanceof SkipFile) { skipped.push({ path: file, reason: error.message }); continue; } throw error; }
     if ((before && !textFile(before)) || (after && !textFile(after))) { skipped.push({ path: file, reason: "binary or non-UTF-8 file" }); continue; }
-    if (before) baseFiles.push({ path: file, contentBase64: before.toString("base64"), mode: b!.mode as SnapshotFile["mode"] });
-    if (after) headFiles.push({ path: file, contentBase64: after.toString("base64"), mode: headMode });
+    if (before) { baseFiles.push({ path: file, contentBase64: before.toString("base64"), mode: b!.mode as SnapshotFile["mode"] }); total += before.length; baseCount++; }
+    if (after) { headFiles.push({ path: file, contentBase64: after.toString("base64"), mode: headMode }); total += after.length; headCount++; }
   }
+
+  // Phase 2: pack unchanged surrounding context in priority batches so skipped
+  // binary files (PNGs, WEBPs, lockb) never consume the context byte budget.
+  const CONTEXT_BATCH_BYTES = 2 * 1024 * 1024;
+  const CONTEXT_BATCH_FILES = 256;
+  let batch: string[] = [], batchBytes = 0;
+  const flushBatch = async () => {
+    if (!batch.length) return;
+    const batchIds = [...new Set(batch.flatMap(file => [base.get(file), ...(options.staged ? [index.get(file)] : [])].filter((e): e is GitEntry => regular(e)).map(e => e.oid)))];
+    const batchContent = await blobs(root, batchIds, options.signal);
+    for (const file of batch) {
+      const b = base.get(file), h = index.get(file);
+      const before = b ? batchContent.get(b.oid)! : undefined;
+      const after = options.staged ? (h ? batchContent.get(h.oid) : undefined) : before;
+      const headMode = (options.staged ? h?.mode : b?.mode) as SnapshotFile["mode"] ?? "100644";
+      if ((before && !textFile(before)) || (after && !textFile(after))) { skipped.push({ path: file, reason: "binary or non-UTF-8 file" }); continue; }
+      const addedBytes = (before?.length ?? 0) + (after?.length ?? 0);
+      const nextBase = baseCount + Number(Boolean(before)), nextHead = headCount + Number(Boolean(after));
+      if (total + addedBytes > LOCAL_REVIEW_CONTEXT_MAX_BYTES || nextBase > LOCAL_REVIEW_MAX_FILES || nextHead > LOCAL_REVIEW_MAX_FILES) {
+        omittedContext.push(file); continue;
+      }
+      const beforeB64 = before ? before.toString("base64") : undefined;
+      const afterB64 = after === before ? beforeB64 : after ? after.toString("base64") : undefined;
+      if (beforeB64 !== undefined) baseFiles.push({ path: file, contentBase64: beforeB64, mode: b!.mode as SnapshotFile["mode"] });
+      if (afterB64 !== undefined) headFiles.push({ path: file, contentBase64: afterB64, mode: headMode });
+      total += addedBytes; baseCount = nextBase; headCount = nextHead;
+    }
+    batch = []; batchBytes = 0;
+  };
+  for (const file of unchangedList) {
+    if (options.signal?.aborted) throw options.signal.reason;
+    const size = metadata.get(file)!;
+    const fileTotal = size.baseSize + size.headSize;
+    if (total + fileTotal > LOCAL_REVIEW_CONTEXT_MAX_BYTES || baseCount + Number(base.has(file)) > LOCAL_REVIEW_MAX_FILES || headCount + Number(headPaths.has(file)) > LOCAL_REVIEW_MAX_FILES) {
+      // Flush pending candidates first so skipped binaries free budget before we omit.
+      if (batch.length) await flushBatch();
+      if (total + fileTotal > LOCAL_REVIEW_CONTEXT_MAX_BYTES || baseCount + Number(base.has(file)) > LOCAL_REVIEW_MAX_FILES || headCount + Number(headPaths.has(file)) > LOCAL_REVIEW_MAX_FILES) {
+        omittedContext.push(file); continue;
+      }
+    }
+    batch.push(file); batchBytes += Math.max(size.baseSize, size.headSize);
+    if (batch.length >= CONTEXT_BATCH_FILES || batchBytes >= CONTEXT_BATCH_BYTES) await flushBatch();
+  }
+  await flushBatch();
   baseFiles.sort((a, b) => order(a.path, b.path)); headFiles.sort((a, b) => order(a.path, b.path)); omittedContext.sort(order);
   skipped.sort((a, b) => order(a.path, b.path) || order(a.reason, b.reason));
   // Git attributes can normalize worktree bytes (for example CRLF) or ignore
