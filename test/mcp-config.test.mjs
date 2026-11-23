@@ -3,13 +3,25 @@ import test from "node:test";
 import { sdkMcpConfig } from "../dist/agents/mcp-config.js";
 
 test("SDK config exports Ditto and project Backroom with concrete credentials and session", () => {
-  const config = sdkMcpConfig({ endpoint: "sn118", approvalMode: "park", clientApprovals: true, servers: [
+  const catalog = { endpoint: "sn118", approvalMode: "park", clientApprovals: true, servers: [
     { name: "ditto", url: "https://router.test/mcp/ditto", tools: [{ name: "search_memories", tier: "read", approval: false }] },
     { name: "backroom", url: "https://router.test/mcp/backroom", tools: [{ name: "list_screenings", tier: "read", approval: true }] },
-  ] }, "fresh-thread", "synthetic-key");
+  ] };
+  const config = sdkMcpConfig(catalog, "fresh-thread", "synthetic-key");
   assert.deepEqual(Object.keys(config.mcpServers), ["ditto", "ditto-backroom"]);
   assert.equal(config.mcpServers["ditto-backroom"].headers.Authorization, "Bearer synthetic-key");
   assert.equal(config.mcpServers.ditto.headers["X-Ditto-Session-Id"], "fresh-thread");
+  assert.equal(config.mcpServers.ditto.type, "http");
+  assert.equal(config.mcpServers.ditto.url, "https://router.test/mcp/ditto");
+
+  const agy = sdkMcpConfig(catalog, "fresh-thread", "synthetic-key", "antigravity");
+  assert.deepEqual(Object.keys(agy.mcpServers), ["ditto", "ditto-backroom"]);
+  assert.equal(agy.mcpServers.ditto.disabled, false);
+  assert.equal(agy.mcpServers.ditto.serverUrl, "https://router.test/mcp/ditto");
+  assert.equal("url" in agy.mcpServers.ditto, false);
+  assert.equal("type" in agy.mcpServers.ditto, false);
+  assert.equal(agy.mcpServers["ditto-backroom"].headers.Authorization, "Bearer synthetic-key");
+  assert.equal(agy.mcpServers.ditto.headers["X-Ditto-Session-Id"], "fresh-thread");
 });
 
 import { spawn } from "node:child_process";
@@ -66,6 +78,20 @@ test("mcp-config selects .ditto Backroom endpoint in cwd, overrides explicitly, 
     const override = await run(["--endpoint","other"]);
     assert.equal(override.code,0,override.stderr);
     assert.ok(requests.some(([method,url])=>method==="POST"&&url==="/api/v5/inference/endpoints/personal/keys"));
+    const agyExport = await run(["--format","antigravity"]);
+    assert.equal(agyExport.code,0,agyExport.stderr);
+    const agyJson = JSON.parse(agyExport.stdout);
+    assert.deepEqual(Object.keys(agyJson.mcpServers),["ditto","ditto-backroom"]);
+    assert.equal(agyJson.mcpServers.ditto.disabled,false);
+    assert.equal(agyJson.mcpServers.ditto.serverUrl,`http://127.0.0.1:${server.address().port}/mcp/ditto`);
+    assert.equal("url" in agyJson.mcpServers.ditto,false);
+    assert.equal("type" in agyJson.mcpServers.ditto,false);
+    assert.equal(agyJson.mcpServers.ditto.headers.Authorization,"Bearer synthetic-key");
+    const createdBeforeBadFormat = requests.filter(([method]) => method === "POST").length;
+    const badFormat = await run(["--format","unknown-host"]);
+    assert.notEqual(badFormat.code,0);
+    assert.equal(badFormat.stdout,"");
+    assert.equal(requests.filter(([method]) => method === "POST").length, createdBeforeBadFormat);
     const createdBeforeUnknown = requests.filter(([method]) => method === "POST").length;
     const unknown = await run(["--endpoint", "missing-endpoint"]);
     assert.notEqual(unknown.code, 0);

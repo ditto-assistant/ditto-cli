@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { accessSync, closeSync, constants, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { accessSync, closeSync, constants, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -84,13 +84,72 @@ function privateDirectory(target: string): void {
   mkdirSync(target, { mode: 0o700 });
 }
 
-function executable(value: string | undefined, name: string): string {
-  const found = value ?? spawnSync("which", [name], { encoding: "utf8" }).stdout?.trim();
-  if (!found || /[\r\n\0]/.test(found)) throw new Error(`Cannot locate ${name}; set --${name === "claude" ? "claude" : "heyditto"}-bin to its executable path`);
-  const resolved = userPath(found);
-  accessSync(resolved, constants.X_OK);
-  if (!statSync(resolved).isFile()) throw new Error(`${name} must be an executable file`);
-  return resolved;
+const TRANSIENT_SHIM_PATTERN = /(?:^|\/)\.cmuxterm\/cmux-cli-shims(?:\/|$)/;
+
+/**
+ * Matches ephemeral per-pane wrappers such as cmux's CLI shims that live on
+ * interactive terminal PATHs and must never be baked into a persistent T3
+ * launcher.
+ */
+export function isTransientCliShim(target: string): boolean {
+  const candidates = [target];
+  try { candidates.push(realpathSync(target)); } catch { /* Missing or unreadable target is checked as given. */ }
+  return candidates.some((candidate) => TRANSIENT_SHIM_PATTERN.test(candidate.replaceAll("\\", "/")));
+}
+
+function isInsideDirectory(target: string, root: string): boolean {
+  const roots = [path.resolve(root)];
+  try { roots.push(realpathSync(root)); } catch { /* Managed root may not exist yet. */ }
+  const targets = [path.resolve(target)];
+  try { targets.push(realpathSync(target)); } catch { /* Target already checked; ignore realpath errors. */ }
+  return roots.some((r) => targets.some((t) => t.startsWith(r + path.sep)));
+}
+
+/**
+ * Finds `name` on `envPath`, skipping transient terminal shims (e.g. cmux) and
+ * existing launchers under `managedRoot`.
+ */
+export function resolveExecutableOnPath(
+  name: string,
+  envPath: string = process.env.PATH ?? "",
+  managedRoot?: string,
+): { path?: string; skippedShim?: string } {
+  let skippedShim: string | undefined;
+  for (const entry of envPath.split(path.delimiter)) {
+    if (!entry) continue;
+    const candidate = path.resolve(entry, name);
+    try {
+      accessSync(candidate, constants.X_OK);
+      if (!statSync(candidate).isFile()) continue;
+    } catch { continue; }
+    if (isTransientCliShim(candidate)) {
+      skippedShim ??= candidate;
+      continue;
+    }
+    if (managedRoot && isInsideDirectory(candidate, managedRoot)) continue;
+    return { path: candidate };
+  }
+  return { skippedShim };
+}
+
+function executable(value: string | undefined, name: string, managedRoot?: string): string {
+  const flag = `--${name === "claude" ? "claude" : "heyditto"}-bin`;
+  if (value !== undefined) {
+    if (!value || /[\r\n\0]/.test(value)) throw new Error(`Cannot locate ${name}; set ${flag} to its executable path`);
+    const resolved = userPath(value);
+    accessSync(resolved, constants.X_OK);
+    if (!statSync(resolved).isFile()) throw new Error(`${name} must be an executable file`);
+    if (isTransientCliShim(resolved)) {
+      throw new Error(`Refusing transient cmux CLI shim for ${name}: ${resolved}; set ${flag} to the real installed executable`);
+    }
+    return resolved;
+  }
+  const found = resolveExecutableOnPath(name, process.env.PATH ?? "", managedRoot);
+  if (found.path) return found.path;
+  if (found.skippedShim) {
+    throw new Error(`Only found transient cmux CLI shim for ${name} (${found.skippedShim}); set ${flag} to the real installed executable`);
+  }
+  throw new Error(`Cannot locate ${name}; set ${flag} to its executable path`);
 }
 
 function parseObject(raw: string, label: string): JsonObject {
@@ -152,8 +211,8 @@ export function planT3Setup(options: T3SetupOptions): T3SetupPlan {
     throw new Error(`T3 provider '${instance}' already exists outside this setup; choose another --instance (no overwrite)`);
   }
   const pin = options.pin ?? instance !== DEFAULT_T3_INSTANCE;
-  const heydittoBin = executable(options.heydittoBin, "heyditto");
-  const claudeBin = executable(options.claudeBin, "claude");
+  const heydittoBin = executable(options.heydittoBin, "heyditto", managedRoot);
+  const claudeBin = executable(options.claudeBin, "claude", managedRoot);
   if (path.basename(claudeBin) !== "claude") throw new Error("--claude-bin must point to an executable named claude (a symlink is supported)");
   const help = spawnSync(heydittoBin, ["claude", "--help"], { encoding: "utf8", timeout: 15_000 });
   const required = inference === "cliproxy" ? ["--cliproxy", "--mcp", "--no-mcp-only", "--no-remote-control"] : ["--no-mcp", "--no-mcp-only", "--no-remote-control"];
