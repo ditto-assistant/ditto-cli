@@ -6,8 +6,10 @@ import {
   createMCPConnection,
   deleteMCPConnection,
   type EndpointTool,
+  type InferenceEndpoint,
   listCompanies,
   listCompanyMembers,
+  listEndpoints,
   setCompanyMemberRole,
   listEndpointTools,
   listMCPConnections,
@@ -20,7 +22,9 @@ import {
   updateMCPConnection,
 } from "./api.js";
 import { openInBrowser } from "./browser.js";
+import { addProfileOption } from "./profiles.js";
 import { readStoredAuth, updateStoredAuth } from "./store.js";
+import { resolveMcpEndpoint } from "./tools-commands.js";
 
 /**
  * Organizations, tool servers and approvals.
@@ -104,15 +108,21 @@ async function resolveScope(options: ScopeOptions): Promise<Company | undefined>
 
 async function requireOrg(options: ScopeOptions): Promise<Company> {
   const company = await resolveScope(options);
-  if (!company) {
-    throw new Error(
-      "this command acts on an organization.\n\n" +
-        "  Pass: --org <slug>\n" +
-        "  Or:   heyditto orgs use <slug>   (remember it)\n" +
-        "  See:  heyditto orgs             (the ones you belong to)\n",
-    );
-  }
-  return company;
+  if (company) return company;
+  const companies = await listCompanies();
+  if (companies.length === 1) return companies[0]!;
+  const header =
+    companies.length > 1
+      ? `this command acts on an organization, and you belong to several (${companies.map((c) => c.slug).join(", ")}).`
+      : "this command acts on an organization, and you are not a member of any organization.";
+  throw new Error(
+    `${header}\n\n` +
+      "  Pass: --org <slug>\n" +
+      "  Or:   heyditto orgs use <slug>   (remember it)\n" +
+      "  See:  heyditto orgs             (the ones you belong to)\n\n" +
+      "Looking for connected-app MCP tools on your endpoint (Google Drive, Gmail, Jira, etc.)?\n" +
+      "  Run:  heyditto tools\n",
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -411,11 +421,79 @@ function toolFlags(tool: EndpointTool, selected: Set<string>): string {
   return flags.join(", ");
 }
 
+async function resolveEndpointForTools(
+  endpointRef: string | undefined,
+  options: ScopeOptions,
+): Promise<InferenceEndpoint> {
+  const ref = endpointRef?.trim();
+  if (!ref) {
+    if (options.org?.trim()) {
+      const company = await resolveCompany(options.org);
+      const { endpoints } = await listEndpoints();
+      const scoped = endpoints.filter((e) => e.companyId === company.id);
+      if (scoped.length === 1) return scoped[0]!;
+      const available = scoped.map((e) => e.slug).join(", ");
+      throw new Error(
+        scoped.length === 0
+          ? `organization "${company.slug}" has no inference endpoints.`
+          : `organization "${company.slug}" has several endpoints (${available}); pass an endpoint slug or id.`,
+      );
+    }
+    return (await resolveMcpEndpoint()).endpoint;
+  }
+
+  const { endpoints } = await listEndpoints();
+  let pool = endpoints;
+  let scopeLabel = "";
+  if (options.org?.trim()) {
+    const company = await resolveCompany(options.org);
+    pool = endpoints.filter((e) => e.companyId === company.id);
+    scopeLabel = ` in organization "${company.slug}"`;
+  }
+
+  // Exact UUID / id match is always unambiguous.
+  const exactId = pool.find((e) => e.id === ref);
+  if (exactId) return exactId;
+
+  const lower = ref.toLowerCase();
+  const findMatches = (list: InferenceEndpoint[]): InferenceEndpoint[] => {
+    const exactSlug = list.filter((e) => e.slug === ref);
+    if (exactSlug.length > 0) return exactSlug;
+    const ciSlugOrId = list.filter(
+      (e) => e.slug.toLowerCase() === lower || e.id.toLowerCase() === lower,
+    );
+    if (ciSlugOrId.length > 0) return ciSlugOrId;
+    return list.filter((e) => (e.name ?? "").trim().toLowerCase() === lower);
+  };
+
+  let matches = findMatches(pool);
+  if (matches.length > 1 && !options.org?.trim()) {
+    const defaultCompany = await resolveScope(options);
+    if (defaultCompany) {
+      const narrowed = matches.filter((e) => e.companyId === defaultCompany.id);
+      if (narrowed.length === 1) matches = narrowed;
+    }
+  }
+  if (matches.length === 1) return matches[0]!;
+  if (matches.length > 1) {
+    const choices = matches.map((e) => `${e.slug} (${e.id})`).join(", ");
+    throw new Error(
+      `endpoint "${ref}" is ambiguous (${choices}); pass --org <slug> or the endpoint id.`,
+    );
+  }
+
+  const available = pool.map((e) => e.slug).join(", ");
+  throw new Error(
+    `no endpoint named "${ref}"${scopeLabel}. Available: ${available || "(none — create one with `heyditto endpoints create`)"}`,
+  );
+}
+
 export async function cmdMCPTools(
-  endpoint: string,
+  endpoint: string | undefined,
   options: ScopeOptions & { all?: boolean },
 ): Promise<void> {
-  const catalog = await listEndpointTools(endpoint);
+  const resolved = await resolveEndpointForTools(endpoint, options);
+  const catalog = await listEndpointTools(resolved.id);
   if (isJSON(options)) {
     writeJSON(catalog);
     return;
@@ -634,6 +712,13 @@ A connection belongs to the organization, not to you: managers administer it
 and the organization's endpoints execute its tools. Personal connections live
 in the Ditto app under Settings -> Agent tools.
 
+To discover, inspect, or call connected-app MCP tools from the shell
+(Google Drive, Gmail, Google Docs, Jira, Backroom, etc.), use \`heyditto tools\`:
+  heyditto tools                        list connected MCP servers on your endpoint
+  heyditto tools list [server]          list tools on a server (or across all)
+  heyditto tools describe <srv> <tool>  inspect a tool's parameters and JSON schema
+  heyditto tools call <srv> <tool> ...  invoke a tool directly (supports --download)
+
 Anything a server marks as destructive is held for an owner or admin instead of
 running. See \`heyditto approvals\`.`,
     );
@@ -706,15 +791,17 @@ running. See \`heyditto approvals\`.`,
       cmdMCPEnable(server, { ...options, enable: false }),
     );
   addExamples(
-    mcp
-      .command("tools")
-      .description("what one endpoint can call, resolved from the endpoint")
-      .argument("<endpoint>", "endpoint id")
-      .option("--all", "include tools the endpoint could reach but has not selected")
-      .addOption(orgOption())
-      .addOption(outputOption())
-      .action(cmdMCPTools),
-    `  heyditto mcp tools 0f1e2d3c-...
+    addProfileOption(
+      mcp
+        .command("tools")
+        .description("what one endpoint can call, resolved from the endpoint")
+        .argument("[endpoint]", "endpoint slug, name, or id (default: active endpoint)")
+        .option("--all", "include tools the endpoint could reach but has not selected")
+        .addOption(orgOption())
+        .addOption(outputOption())
+        .action(cmdMCPTools),
+    ),
+    `  heyditto mcp tools my-endpoint
   heyditto mcp tools 0f1e2d3c-... --all --output json`,
   );
 

@@ -26,6 +26,7 @@ test("global --help prints command list", () => {
   assert.match(result.stdout, /\bsave\b/);
   assert.match(result.stdout, /\bsearch\b/);
   assert.match(result.stdout, /\bgraphs\b/);
+  assert.match(result.stdout, /\btools\b/);
 });
 
 test("global -h prints help", () => {
@@ -216,4 +217,24 @@ test("endpoints set --help documents the enum choices it validates", () => {
   ]) {
     assert.ok(flat.includes(`(choices: ${choices})`), `endpoints set --help does not offer ${choices}`);
   }
+});
+
+test("tools and mcp --help expose connected-app tool discovery, schema, call, and download", () => {
+  const toolsHelp = run(["tools", "--help"]);
+  assert.equal(toolsHelp.status, 0);
+  assert.match(toolsHelp.stdout, /servers/);
+  assert.match(toolsHelp.stdout, /list/);
+  assert.match(toolsHelp.stdout, /describe/);
+  assert.match(toolsHelp.stdout, /call/);
+
+  const callHelp = run(["tools", "call", "--help"]);
+  assert.equal(callHelp.status, 0);
+  assert.match(callHelp.stdout, /--json/);
+  assert.match(callHelp.stdout, /--stdin/);
+  assert.match(callHelp.stdout, /--arg/);
+  assert.match(callHelp.stdout, /--download/);
+
+  const mcpHelp = run(["mcp", "--help"]);
+  assert.equal(mcpHelp.status, 0);
+  assert.match(mcpHelp.stdout, /heyditto tools/);
 });
