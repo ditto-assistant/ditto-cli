@@ -231,6 +231,10 @@ heyditto init [--name <name>] [--subscribe <@graph>]... [<@graph>...] [--json]
 heyditto login [<key>] [--paste] [--stdin] [--keys]
 heyditto keys list|providers|set|enable|disable|remove|validate [<provider>] [--label <name>]
 heyditto endpoints [--set-default <slug>] [--clear-default]
+heyditto tools [--endpoint <slug>] [--json]
+heyditto tools list [server] [--search <query>] [--json]
+heyditto tools describe <server> <tool> [--json]
+heyditto tools call <server> <tool> [--json <payload>|--stdin|@file.json] [--arg key=value]... [--download <path-or-dir>]
 heyditto apps list [--company <id>]
 heyditto apps create <name> [--gh-secret NAME --repo o/r | --gcp-secret NAME | …]
 heyditto apps show|update|oidc|icon set|origins verify|secret rotate|consent set …
@@ -618,6 +622,48 @@ graph. Choose it up front — renaming after init isn't yet supported. See
 ### `config`
 
 Print a Claude Desktop / Cursor / generic-MCP-client config snippet for the Ditto memory server.
+
+### `tools` — connected-app MCP tools from the shell
+
+Discover, inspect, and invoke connected-app MCP tools (Google Drive, Gmail,
+Google Docs, Jira, Backroom, Ditto built-ins, etc.) directly from the shell
+without exporting bearer credentials or hand-crafting JSON-RPC requests.
+
+Each command resolves your active endpoint (via `--endpoint`, `--profile` /
+`DITTO_PROFILE`, repository `.ditto`, saved default, or your sole endpoint),
+mints a short-lived ephemeral key, performs the Streamable HTTP MCP handshake
+internally without ever printing the token, and revokes the key on exit.
+
+```bash
+# List connected MCP servers on the active endpoint
+heyditto tools
+heyditto tools --endpoint my-endpoint --json
+
+# List tools (accepts canonical names like ditto-googledrive or short aliases like googledrive)
+heyditto tools list googledrive
+heyditto tools list googledrive --search download
+heyditto tools list --search gmail --json
+
+# Inspect a tool's parameters and JSON input schema (alias: schema)
+heyditto tools describe googledrive download_file
+heyditto tools schema gmail search_messages --json
+
+# Invoke a tool with --arg, --json, --stdin, or @file.json
+heyditto tools call googledrive list_files --arg page_size=10 --output json
+heyditto tools call gmail search_messages --json '{"query":"from:alice"}' --output json
+echo '{"query":"roadmap"}' | heyditto tools call googledrive search_files --stdin --output json
+heyditto tools call jira create_issue @issue.json --output json
+
+# Stream a returned presigned download payload (e.g. downloaded_file_content.s3url)
+# straight to a file or directory without printing presigned URLs or tokens
+heyditto tools call googledrive download_file --arg file_id=1abc --download ./downloads/
+heyditto tools call googledrive download_file --arg file_id=1abc --download ./report.pdf --output json
+```
+
+`heyditto mcp` manages organization-owned MCP server connections (`heyditto mcp
+list`, `add`, `connect`, `remove`, `enable`, `disable`, `tools [endpoint]`). When
+you belong to a single organization, `--org` is selected automatically. `heyditto
+mcp tools [endpoint]` accepts an endpoint slug, display name, or UUID.
 
 ## Coding agents
 

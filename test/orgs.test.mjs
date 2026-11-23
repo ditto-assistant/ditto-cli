@@ -116,7 +116,27 @@ function bearerKeyAccepted(method, url) {
   });
 }
 
-function startStub({ companies = [OMNI, KLYRO], canManage = true, canDecide = true, directorySize = 1, allowanceError = false } = {}) {
+const ENDPOINTS = [
+  {
+    id: "11111111-1111-4111-8111-111111111111",
+    slug: "endpoint-1",
+    name: "Endpoint One",
+    model: "native",
+    status: "active",
+  },
+  {
+    id: "22222222-2222-4222-8222-222222222222",
+    slug: "org-ep",
+    name: "Org Endpoint",
+    companyId: OMNI.id,
+    model: "native",
+    status: "active",
+  },
+];
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function startStub({ companies = [OMNI, KLYRO], endpoints = ENDPOINTS, canManage = true, canDecide = true, directorySize = 1, allowanceError = false } = {}) {
   const calls = [];
   const connections = [structuredClone(LINEAR), structuredClone(INTERNAL)];
   const approvals = structuredClone(APPROVALS);
@@ -163,6 +183,28 @@ function startStub({ companies = [OMNI, KLYRO], canManage = true, canDecide = tr
       }
       if (req.url === "/api/v5/companies" && req.method === "GET") {
         return json(200, { companies });
+      }
+      if (req.url === "/api/v5/inference/endpoints" && req.method === "GET") {
+        return json(200, { baseUrl: "http://127.0.0.1/v1", endpoints: endpoints.filter((e) => !e.companyId) });
+      }
+      const orgEps = req.url.match(/^\/api\/v5\/inference\/endpoints\?company=([^&]+)$/);
+      if (orgEps && req.method === "GET") {
+        return json(200, { baseUrl: "http://127.0.0.1/v1", endpoints: endpoints.filter((e) => e.companyId === orgEps[1]) });
+      }
+      const epTools = req.url.match(/^\/api\/v5\/inference\/endpoints\/([^/]+)\/tools$/);
+      if (epTools && req.method === "GET") {
+        if (!UUID_RE.test(epTools[1])) {
+          return json(400, { message: "invalid inference endpoint request" });
+        }
+        return json(200, {
+          tools: [
+            { name: "googledrive__download_file", group: "Google Drive", enabled: true, requiresApproval: false },
+            { name: "gmail__send_email", group: "Gmail", enabled: true, requiresApproval: true },
+          ],
+          selected: ["googledrive__download_file"],
+          toolApprovalMode: "park",
+          autoApproveTools: [],
+        });
       }
       const list = req.url.match(/^\/api\/v5\/companies\/([^/]+)\/mcp-servers$/);
       if (list && req.method === "GET") return json(200, { servers: connections, canManage });
@@ -646,4 +688,61 @@ test("orgs allowance refuses an unresolved member before calling MCP", async () 
     assert.equal(r.status, 1);
     assert(!stub.calls.some(c => c.url === "/mcp"));
   } finally { stub.close(); }
+});
+
+test("mcp list auto-selects the only organization when --org is omitted", async () => {
+  const stub = await startStub({ companies: [OMNI] });
+  try {
+    const result = await run(stub.base, ["mcp", "list"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Linear/);
+  } finally {
+    stub.close();
+  }
+});
+
+test("mcp list with no organizations points users to heyditto tools", async () => {
+  const stub = await startStub({ companies: [] });
+  try {
+    const result = await run(stub.base, ["mcp", "list"]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /not a member of any organization/);
+    assert.match(result.stderr, /heyditto tools/);
+  } finally {
+    stub.close();
+  }
+});
+
+test("mcp tools resolves endpoint slugs, display names, and --org instead of sending raw slugs to /tools", async () => {
+  const stub = await startStub();
+  try {
+    const bySlug = await run(stub.base, ["mcp", "tools", "endpoint-1"]);
+    assert.equal(bySlug.status, 0, bySlug.stderr);
+    assert.match(bySlug.stdout, /googledrive__download_file/);
+    assert.ok(
+      stub.calls.some((c) => c.url === `/api/v5/inference/endpoints/${ENDPOINTS[0].id}/tools`),
+      "expected resolved UUID in /tools request",
+    );
+
+    const byName = await run(stub.base, ["mcp", "tools", "Endpoint One", "--all", "--output", "json"]);
+    assert.equal(byName.status, 0, byName.stderr);
+    assert.equal(JSON.parse(byName.stdout).tools.length, 2);
+
+    const byOrgSlug = await run(stub.base, ["mcp", "tools", "org-ep", "--org", "omni-aura"]);
+    assert.equal(byOrgSlug.status, 0, byOrgSlug.stderr);
+    assert.ok(
+      stub.calls.some((c) => c.url === `/api/v5/inference/endpoints/${ENDPOINTS[1].id}/tools`),
+    );
+
+    const unknown = await run(stub.base, ["mcp", "tools", "does-not-exist"]);
+    assert.notEqual(unknown.status, 0);
+    assert.match(unknown.stderr, /no endpoint named "does-not-exist"/);
+    assert.match(unknown.stderr, /endpoint-1/);
+    assert.ok(
+      !stub.calls.some((c) => c.url.includes("does-not-exist/tools")),
+      "must not send unresolved slug to /tools",
+    );
+  } finally {
+    stub.close();
+  }
 });

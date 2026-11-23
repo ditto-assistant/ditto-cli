@@ -373,10 +373,18 @@ export async function unarchiveEndpoint(id: string): Promise<InferenceEndpoint> 
   return apiFetch<InferenceEndpoint>(`${endpointPath(id)}/unarchive`, { method: "POST" });
 }
 
-/** Finds one endpoint by slug or id from the catalog (there is no GET-by-id route). */
+/** Finds one endpoint by slug, id, or unique display name from the catalog (there is no GET-by-id route). */
 export function findEndpoint(endpoints: InferenceEndpoint[], ref: string): InferenceEndpoint | undefined {
   const wanted = ref.trim();
-  return endpoints.find((e) => e.slug === wanted || e.id === wanted);
+  if (!wanted) return undefined;
+  const exact = endpoints.find((e) => e.slug === wanted || e.id === wanted);
+  if (exact) return exact;
+  const lower = wanted.toLowerCase();
+  const bySlugOrId = endpoints.filter((e) => e.slug.toLowerCase() === lower || e.id.toLowerCase() === lower);
+  if (bySlugOrId.length === 1) return bySlugOrId[0];
+  const byName = endpoints.filter((e) => (e.name ?? "").trim().toLowerCase() === lower);
+  if (byName.length === 1) return byName[0];
+  return undefined;
 }
 
 export async function getEndpoint(ref: string): Promise<{ endpoint: InferenceEndpoint; catalog: InferenceEndpointsResponse }> {

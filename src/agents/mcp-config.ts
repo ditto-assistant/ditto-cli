@@ -1,8 +1,7 @@
 import { type Command, Option } from "commander";
-import { createKey, findEndpoint, listEndpoints, revokeKey, type InferenceEndpoint } from "../api.js";
-import { explicitProfileEndpoint, readDefaultEndpoint } from "../profiles.js";
-import { findProfileEndpoint, repoDefaultProfile } from "../dittoconfig/profiles.js";
+import { createKey, revokeKey } from "../api.js";
 import { SESSION_ID_PATTERN } from "../mcp-session.js";
+import { resolveMcpEndpoint } from "../tools-commands.js";
 import { claudeMcpAttachment, fetchMcpCatalog, mcpUnavailableLines, type McpCatalog } from "./claude-mcp.js";
 
 export type McpConfigFormat = "sdk" | "antigravity";
@@ -27,23 +26,7 @@ export async function exportMcpConfig(options: { endpoint?: string; session?: st
   if (format !== "sdk" && format !== "antigravity") throw new Error("--format must be sdk or antigravity");
   const sessionId = options.session ?? process.env.T3CODE_THREAD_ID;
   if (!sessionId || !SESSION_ID_PATTERN.test(sessionId)) throw new Error("mcp-config needs --session or T3CODE_THREAD_ID");
-  const { endpoints, baseUrl } = await listEndpoints();
-  const explicit = options.endpoint?.trim() || (await explicitProfileEndpoint())?.endpoint;
-  let endpoint: InferenceEndpoint | undefined;
-  if (explicit) {
-    endpoint = findEndpoint(endpoints, explicit);
-    if (!endpoint) throw new Error(`No endpoint named "${explicit}"`);
-  } else {
-    const profile = await repoDefaultProfile(process.cwd());
-    if (profile) {
-      endpoint = await findProfileEndpoint(profile, endpoints);
-      if (!endpoint) throw new Error("Repository .ditto profile has no applied endpoint; run heyditto repo apply");
-    } else {
-      const saved = await readDefaultEndpoint();
-      endpoint = saved ? findEndpoint(endpoints, saved) : endpoints.length === 1 ? endpoints[0] : undefined;
-    }
-  }
-  if (!endpoint) throw new Error("No unambiguous MCP endpoint; select one with --endpoint or heyditto endpoints use");
+  const { endpoint, baseUrl } = await resolveMcpEndpoint({ endpoint: options.endpoint });
   const key = await createKey(endpoint.id, { name: `sdk-mcp:${sessionId}`, expiresIn: "1h" });
   if (!key.key) throw new Error("MCP key response did not contain a key");
   try {

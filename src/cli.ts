@@ -45,6 +45,7 @@ import { registerSelfUpdateCommands } from "./self-update.js";
 import { registerRelayCommands } from "./relay/commands.js";
 import { registerMcpConfigCommand } from "./agents/mcp-config.js";
 import { registerT3Commands } from "./t3/setup.js";
+import { registerToolsCommands } from "./tools-commands.js";
 import { addProfileOption, installProfileHook, registerProfileCommands, selectedProfile } from "./profiles.js";
 
 type OutputFormat = "json" | "text" | "markdown" | "raw";
@@ -1385,6 +1386,7 @@ your own workspace or an app workspace.`,
   registerRelayCommands(program);
   registerT3Commands(program);
   registerMcpConfigCommand(program);
+  registerToolsCommands(program, addExamples, outputOption);
   registerCodexAppCommand(program, addExamples);
   registerSessionCommands(program, addExamples);
   registerTeleportCommands(program, addExamples);
