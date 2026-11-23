@@ -137,6 +137,6 @@ export function planOpencode(input: PlanInput): HarnessPlan {
       ...(input.mcp ? { [MCP_KEY_ENV]: input.mcpApiKey ?? input.apiKey } : {}),
     },
     envUnset: [],
-    installHint: "install OpenCode: npm i -g opencode-ai (or brew install sst/tap/opencode)",
+    installHint: "install OpenCode: npm i -g @opencode/cli (or brew install sst/tap/opencode)",
   };
 }

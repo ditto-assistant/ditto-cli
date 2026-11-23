@@ -110,7 +110,9 @@ stays the same, and its old launcher is kept intact.
 `--base-dir` selects a local T3 installation, defaulting to `T3CODE_HOME` or
 `~/.t3`. Pass the base directory, not its `userdata` child. T3 must already have
 been initialized there. `--heyditto-bin` and `--claude-bin` override executable
-detection. `--json` prints a summary with paths and route choices, never the
+detection; automatic detection skips transient cmux CLI shims
+(`~/.cmuxterm/cmux-cli-shims/`) so per-pane wrappers are never baked into a
+persistent launcher. `--json` prints a summary with paths and route choices, never the
 existing settings or their secrets.
 
 T3 CLI v0.1.7 has no provider-settings command. This shortcut updates its local
@@ -257,6 +259,11 @@ retains the original Router-inference behavior described above.
   executable, refresh T3's provider, and recheck its help with that installation.
 - **Missing Claude:** set `DITTO_T3_CLAUDE_BIN` to its absolute `claude` executable
   or symlink. Both binary overrides must resolve to executable absolute paths.
+- **T3 built-in CLI updates:** because this setup points T3's `binaryPath` at a
+  wrapper script rather than a package-managed binary, T3 reports manual updates
+  for the launcher-backed Claude instance. Update Claude directly (for example
+  `npm i -g @anthropic-ai/claude-code` or `claude update`); the launcher keeps
+  pointing at the installed executable.
 - **Endpoint not found or unavailable:** check the exact endpoint slug and its
   activation/access with the CLI. The launcher does not fall back to a native
   subscription when Router setup or inference fails.

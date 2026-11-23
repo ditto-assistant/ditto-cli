@@ -1673,7 +1673,9 @@ steering is not automatically replayed offline.
 ### SDK MCP configuration
 
 `heyditto mcp-config --session <id>` emits HTTP MCP server JSON for a trusted
-SDK host. It selects the repository's `.ditto/` default endpoint, including its
+SDK host. Pass `--format antigravity` when targeting Antigravity (`agy`), which
+reads `serverUrl` and `disabled` instead of `type` and `url` and requires
+concrete bearer headers. It selects the repository's `.ditto/` default endpoint, including its
 Backroom tools, before the personal default; `--endpoint` overrides both.
 It requires an existing CLI login and never opens an interactive picker.
 The JSON contains an endpoint key that expires in one hour: pipe it directly

@@ -8,7 +8,7 @@ import { createServer } from "node:http";
 import { Command } from "commander";
 import { chooseEndpoint } from "../dist/agents/launch.js";
 import { saveLogin } from "../dist/store.js";
-import { applyT3Setup, planT3Setup, registerT3Commands } from "../dist/t3/setup.js";
+import { applyT3Setup, isTransientCliShim, planT3Setup, registerT3Commands, resolveExecutableOnPath } from "../dist/t3/setup.js";
 
 function fixture(t) {
   const root = mkdtempSync(path.join(os.tmpdir(), "ditto t3's setup "));
@@ -283,4 +283,79 @@ test("--auto-mode-classifier needs a heyditto that knows the option, or the laun
   writeFileSync(f.options.heydittoBin, `#!${process.execPath}\nif(process.argv.includes('--help'))process.stdout.write('--cliproxy --mcp --no-mcp --no-mcp-only --no-remote-control\\n');\n`, { mode: 0o700 });
   assert.doesNotThrow(() => f.plan(), "setup without the option still works with an older heyditto");
   assert.throws(() => f.plan({ autoModeClassifier: "ditto-auto-mode-classifier" }), /does not support --auto-mode-classifier/);
+});
+
+test("T3 setup skips transient cmux CLI shims on PATH and refuses explicit cmux shim paths", (t) => {
+  const f = fixture(t);
+  const shimDir = path.join(f.root, ".cmuxterm", "cmux-cli-shims", "46599E62-E222-447B-9FA2-9D5FB8C31CC5");
+  const realDir = path.join(f.root, "real-bin");
+  mkdirSync(shimDir, { recursive: true });
+  mkdirSync(realDir, { recursive: true });
+  const shimClaude = path.join(shimDir, "claude");
+  const realClaude = path.join(realDir, "claude");
+  const symlinkToShim = path.join(f.root, "link-bin", "claude");
+  mkdirSync(path.dirname(symlinkToShim), { recursive: true });
+  writeFileSync(shimClaude, `#!${process.execPath}\nprocess.stdout.write("shim\\n");\n`, { mode: 0o700 });
+  writeFileSync(realClaude, `#!${process.execPath}\nprocess.stdout.write("real\\n");\n`, { mode: 0o700 });
+  symlinkSync(shimClaude, symlinkToShim);
+
+  assert.equal(isTransientCliShim(shimClaude), true);
+  assert.equal(isTransientCliShim(symlinkToShim), true);
+  assert.equal(isTransientCliShim(realClaude), false);
+
+  const resolved = resolveExecutableOnPath("claude", `${shimDir}${path.delimiter}${path.dirname(symlinkToShim)}${path.delimiter}${realDir}`);
+  assert.equal(resolved.path, realClaude);
+
+  const onlyShim = resolveExecutableOnPath("claude", shimDir);
+  assert.equal(onlyShim.path, undefined);
+  assert.equal(onlyShim.skippedShim, shimClaude);
+
+  // End-to-end planT3Setup skips the cmux shim ahead of the real binary on PATH.
+  const prevPath = process.env.PATH;
+  t.after(() => { process.env.PATH = prevPath; });
+  process.env.PATH = `${shimDir}${path.delimiter}${realDir}${path.delimiter}${prevPath ?? ""}`;
+  const plan = planT3Setup({ endpoint: "ditto-dev", baseDir: f.base, heydittoBin: f.options.heydittoBin });
+  const wrapper = plan.files.find((file) => file.path === plan.launcherPath).content;
+  const quotedRealClaude = `'${realClaude.replaceAll("'", "'\\''")}'`;
+  assert.ok(wrapper.includes(`export DITTO_T3_CLAUDE_BIN=${quotedRealClaude}\n`), wrapper);
+  assert.doesNotMatch(wrapper, /cmux-cli-shims/);
+
+  // Only a cmux shim on PATH fails with an actionable error instead of baking the shim in.
+  process.env.PATH = shimDir;
+  assert.throws(() => planT3Setup({ endpoint: "ditto-dev", baseDir: f.base, heydittoBin: f.options.heydittoBin }), /Only found transient cmux CLI shim for claude/);
+
+  // Explicit --claude-bin pointing at a cmux shim (or a symlink to one) is also refused.
+  assert.throws(() => f.plan({ claudeBin: shimClaude }), /Refusing transient cmux CLI shim for claude/);
+  assert.throws(() => f.plan({ claudeBin: symlinkToShim }), /Refusing transient cmux CLI shim for claude/);
+
+  // On POSIX, literal backslashes in a directory name are filename characters, not separators.
+  if (path.sep === "/") {
+    const literalBackslashDir = path.join(f.root, ".cmuxterm\\cmux-cli-shims");
+    mkdirSync(literalBackslashDir, { recursive: true });
+    const literalBackslashClaude = path.join(literalBackslashDir, "claude");
+    writeFileSync(literalBackslashClaude, `#!${process.execPath}\nprocess.stdout.write("literal\\n");\n`, { mode: 0o700 });
+    assert.equal(isTransientCliShim(literalBackslashClaude), false);
+    assert.doesNotThrow(() => f.plan({ claudeBin: literalBackslashClaude }));
+  }
+});
+
+test("T3 setup excludes existing managed launchers from PATH detection and explicit overrides", (t) => {
+  const f = fixture(t);
+  const first = f.plan();
+  applyT3Setup(first);
+  const launcherDir = path.dirname(first.launcherPath);
+  // Explicit override pointing at a previously installed launcher under managedRoot is refused.
+  assert.throws(() => f.plan({ heydittoBin: first.launcherPath }), /Refusing a previously installed T3 launcher for heyditto/);
+  // A managed launcher dir on PATH is skipped in favor of the real executable.
+  const managedClaude = path.join(launcherDir, "claude");
+  writeFileSync(managedClaude, `#!${process.execPath}\nprocess.stdout.write("managed\\n");\n`, { mode: 0o700 });
+  const realDir = path.dirname(f.options.claudeBin);
+  const found = resolveExecutableOnPath("claude", `${launcherDir}${path.delimiter}${realDir}`, first.managedRoot);
+  assert.equal(found.path, f.options.claudeBin);
+  // On case-insensitive filesystems (e.g. macOS APFS), differently cased managedRoot paths are still excluded.
+  const upperLauncherDir = launcherDir.replace("ditto-providers", "DITTO-PROVIDERS");
+  if (existsSync(path.join(upperLauncherDir, "claude"))) {
+    const foundUpper = resolveExecutableOnPath("claude", `${upperLauncherDir}${path.delimiter}${realDir}`, first.managedRoot);
+    assert.equal(foundUpper.path, f.options.claudeBin);
+  }
 });
