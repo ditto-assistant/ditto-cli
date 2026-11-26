@@ -2,15 +2,17 @@
  * The local review recommendation: the one place that decides whether a
  * local review run may be read as approval.
  *
- * Fail closed. Only a completed run in which every changed file was fully
- * reviewed on every lens, with a well-formed result, a verified current
- * working tree, no blocking finding, no unverified candidate, and no
- * unresolved reuse or PR-inheritance claim yields "approve". Bounded
- * surrounding context is reported but does not block (DITTO-2455). A run with
+ * Fail closed. Only a clean, converged run in which every changed file was
+ * reviewed on every lens with zero lens failures (including lenses that closed
+ * cleanly in a findings-only final turn on wrap_up or max_rounds, DITTO-3103),
+ * with a well-formed result, a verified current working tree, no blocking
+ * finding, no unverified candidate, and no unresolved reuse or PR-inheritance
+ * claim yields "approve". Bounded surrounding context and converged wrap_up /
+ * max_rounds final turns are reported in reasons but do not block. A run with
  * blocking findings yields "changes" (findings are evidence even from a
- * partial run). Everything else, including failed, partial, cancelled,
- * timed-out, malformed or budget-exhausted runs, yields "none": no
- * recommendation, and never approval.
+ * partial run). Everything else, including failed, cancelled, timed-out,
+ * malformed, lens-failed, budget/compression-abbreviated or undecided runs,
+ * yields "none": no recommendation, and never approval.
  */
 
 export type Verdict = "approve" | "changes" | "none";
@@ -155,7 +157,96 @@ export function scopeOutcome(result: unknown): { kind: "changes" | "unchecked" |
   return { kind: "none", unmet: 0 };
 }
 
-export function recommendLocalReview(run: LocalRunLike): Recommendation {
+/** Abbreviated stop reasons where a lens ran its allotted window/round budget
+ * and closed cleanly in its findings-only final turn (DITTO-3103). Any other
+ * stop reason (budget, compression, empty_rounds, or a secondary lens failure)
+ * remains incomplete and blocks approval. */
+const CONVERGED_ABBREVIATED_REASONS = new Set(["wrap_up", "max_rounds"]);
+
+export interface RecommendOptions {
+  /** Whether the local snapshot skipped any changed path (computed by the CLI
+   * from the captured snapshot). Used to fail closed when evaluating a legacy
+   * partial receipt whose server did not yet distinguish converged wrap_up /
+   * max_rounds runs from skipped changed files. */
+  skippedChanged?: boolean;
+}
+
+function asList(v: unknown): unknown[] | undefined {
+  return v === null ? [] : Array.isArray(v) ? v : undefined;
+}
+
+/** Verify per-file coverage across every lens. Returns ok=true only when every
+ * lens finished with zero failed files and any abbreviated file closed via a
+ * converged wrap_up or max_rounds final turn (never budget/compression/error). */
+function checkCoverage(files: Obj | undefined): { ok: boolean; abbreviatedCount: number; reason?: string } {
+  const abbreviated = files && "abbreviated" in files ? asList(files.abbreviated) : undefined;
+  const failed = files && "failed" in files ? asList(files.failed) : undefined;
+  if (!abbreviated || !failed) return { ok: false, abbreviatedCount: 0, reason: "the result has no per-file coverage report" };
+  if (failed.length) return { ok: false, abbreviatedCount: abbreviated.length, reason: `${failed.length} changed file(s) were not reviewed by the primary lens` };
+  const lenses = files && "lenses" in files ? asList(files.lenses) : undefined;
+  if (lenses) {
+    if (!lenses.every(isObj)) return { ok: false, abbreviatedCount: abbreviated.length, reason: "per-lens coverage report is malformed" };
+    for (const lf of lenses) {
+      const lfFailed = "failed" in lf ? asList(lf.failed) : undefined;
+      if (!lfFailed) return { ok: false, abbreviatedCount: abbreviated.length, reason: "per-lens coverage report is missing failed files" };
+      if (lfFailed.length) return { ok: false, abbreviatedCount: abbreviated.length, reason: `lens ${typeof lf.lens === "string" ? lf.lens : "unknown"} failed to review ${lfFailed.length} changed file(s)` };
+    }
+  }
+  if (!abbreviated.length) return { ok: true, abbreviatedCount: 0 };
+  if (!lenses || !lenses.length) return { ok: false, abbreviatedCount: abbreviated.length, reason: `${abbreviated.length} changed file(s) were reviewed briefly without per-lens coverage details` };
+  const convergedPaths = new Set<string>();
+  for (const lf of lenses as Obj[]) {
+    const lfAbbr = "abbreviated" in lf ? asList(lf.abbreviated) : undefined;
+    if (!lfAbbr) return { ok: false, abbreviatedCount: abbreviated.length, reason: "per-lens coverage report is missing abbreviated files" };
+    for (const entry of lfAbbr) {
+      if (!isObj(entry) || typeof entry.path !== "string" || typeof entry.reason !== "string" || !CONVERGED_ABBREVIATED_REASONS.has(entry.reason)) {
+        return { ok: false, abbreviatedCount: abbreviated.length, reason: `${abbreviated.length} changed file(s) stopped before converging (${isObj(entry) && typeof entry.reason === "string" ? entry.reason : "unknown"})` };
+      }
+      convergedPaths.add(entry.path);
+    }
+  }
+  for (const entry of abbreviated) {
+    if (!isObj(entry) || typeof entry.path !== "string" || !convergedPaths.has(entry.path)) {
+      return { ok: false, abbreviatedCount: abbreviated.length, reason: `${abbreviated.length} changed file(s) were abbreviated for an unverified reason` };
+    }
+  }
+  return { ok: true, abbreviatedCount: abbreviated.length };
+}
+
+/** Check whether a legacy partial receipt (from an engine before DITTO-3103)
+ * represents a clean, converged wrap_up/max_rounds run where every other
+ * completeness invariant holds. */
+function convergedLegacyPartialReasons(run: LocalRunLike, result: Obj, cov: { ok: boolean; abbreviatedCount: number }, opts?: RecommendOptions): string[] {
+  if (!Array.isArray(result.findings)) return ["run status is partial; only a completed run can approve"];
+  if (result.tokenLimitReached === true) return ["token limit was reached before the review finished"];
+  const manifest = isObj(result.coverage) ? result.coverage : undefined;
+  if (!manifest || manifest.terminal_state !== "complete") return ["run status is partial; coverage did not reach terminal_state=complete"];
+  const skipped = "skipped" in result && result.skipped !== undefined ? asList(result.skipped) : [];
+  if (!skipped) return ["run status is partial; skipped file list is malformed"];
+  const generated = new Set<string>();
+  let nonGeneratedSkipped = 0;
+  for (const s of skipped) {
+    if (!isObj(s)) return ["run status is partial; skipped file list is malformed"];
+    if (s.reason === "generated" && typeof s.path === "string") generated.add(s.path);
+    else nonGeneratedSkipped++;
+  }
+  const innerCov = isObj(manifest.coverage) ? manifest.coverage : undefined;
+  const waived = innerCov && "waived" in innerCov ? asList(innerCov.waived) : [];
+  if (!waived) return ["run status is partial; waived file list is malformed"];
+  for (const w of waived) {
+    if (!isObj(w) || typeof w.path !== "string" || !generated.has(w.path)) {
+      return ["run status is partial; non-generated file(s) were waived"];
+    }
+  }
+  if (opts?.skippedChanged === true) return ["changed file(s) were skipped; cannot approve"];
+  if (nonGeneratedSkipped > 0 && opts?.skippedChanged !== false) {
+    return ["run status is partial; skipped files could not be verified as unchanged"];
+  }
+  if (!cov.ok || cov.abbreviatedCount === 0) return ["run status is partial; only a completed run can approve"];
+  return [];
+}
+
+export function recommendLocalReview(run: LocalRunLike, opts?: RecommendOptions): Recommendation {
   const reasons: string[] = [];
   let nitCount = 0;
   const none = (extra: string[] = []): Recommendation => ({ verdict: "none", approved: false, reasons: [...reasons, ...extra], blocking: 0, nits: nitCount });
@@ -184,32 +275,30 @@ export function recommendLocalReview(run: LocalRunLike): Recommendation {
     if (scoped.kind === "changes") return { verdict: "changes", approved: false, reasons: [scoped.reason!], blocking: scoped.unmet, nits: nitCount };
     if (scoped.kind === "unchecked") return none([scoped.reason!]);
   }
-  if (status !== "completed") return none([`run status is ${status}; only a completed run can approve`]);
+  if (status !== "completed" && status !== "partial") return none([`run status is ${status}; only a completed run can approve`]);
   if (!result) return none(["no review result is available"]);
-  if (result.complete !== true) return none(["review coverage is incomplete (result.complete is not true)"]);
   if (!findingsList(result)) return none(["result has no findings list; an absent list is not a clean review"]);
   const present = (v: unknown) => v !== undefined && v !== null && v !== "";
   if (present(run.error)) return none([`run error: ${typeof run.error === "string" ? run.error : JSON.stringify(run.error)}`]);
   if (present(result.error)) return none([`result error: ${typeof result.error === "string" ? result.error : JSON.stringify(result.error)}`]);
-  // Every lens must finish every changed file. Local reviews only review the
-  // changed paths, so any abbreviated or failed entry is unfinished changed
-  // work (production run b14c5978 abbreviated its main file yet reported
-  // changed coverage complete). A missing coverage report is not complete.
-  // A present null is Go's nil-slice encoding of an empty list.
   const files = isObj(result.files) ? result.files : undefined;
-  const list = (v: unknown): unknown[] | undefined => (v === null ? [] : Array.isArray(v) ? v : undefined);
-  const abbreviated = files && "abbreviated" in files ? list(files.abbreviated) : undefined;
-  const failed = files && "failed" in files ? list(files.failed) : undefined;
-  if (!abbreviated || !failed) return none(["the result has no per-file coverage report"]);
-  if (abbreviated.length || failed.length) return none([`${abbreviated.length + failed.length} changed file(s) were reviewed briefly or not reviewed by every lens`]);
-  // Local receipts always carry both flags; anything but true is incomplete.
-  const local = isObj(result.local) ? result.local : {};
-  if (local.changedCoverageComplete !== true) return none(["changed paths were not fully reviewed"]);
+  const cov = checkCoverage(files);
+  const local = isObj(result.local) ? result.local : undefined;
+  if (status === "partial") {
+    if (!local || typeof local.changedCoverageComplete !== "boolean") return none(["run status is partial; only a completed run can approve"]);
+    const legacyProblems = convergedLegacyPartialReasons(run, result, cov, opts);
+    if (legacyProblems.length) return none(legacyProblems);
+  } else {
+    if (result.complete !== true) return none(["review coverage is incomplete (result.complete is not true)"]);
+    if (!cov.ok) return none([cov.reason!]);
+    if (!local || local.changedCoverageComplete !== true) return none(["changed paths were not fully reviewed"]);
+  }
   // An undecided withheld candidate means a change was not fully judged. The
   // engine clears changedCoverageComplete for some (ditto-review#96); this
   // check is independent and allowlist-based.
   const held = (findingsList(result) ?? []).filter(f => f.status === "withheld" && !(typeof f.withheldReason === "string" && DECIDED_WITHHELD.has(f.withheldReason))).length;
   if (held) return none([`${held} withheld candidate finding(s) were not decided (unverified, over a limit, or an unknown reason)`]);
+  if (cov.abbreviatedCount > 0) reasons.push(`${cov.abbreviatedCount} changed file(s) finished via wrap_up/max_rounds final turn`);
   // DITTO-2455 (owner decision): a local review is complete once every change
   // is fully reviewed, even when surrounding context is bounded. Bounded
   // context is reported, never treated as approval-blocking.

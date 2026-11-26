@@ -8,7 +8,7 @@ import { cmdReviewAccess, diagnoseLinkRefusal, guideAccessForAdd } from "./githu
 import { registerReviewFindingCommands } from "./review-findings.js";
 import { readStoredAuth } from "./store.js";
 import { captureReviewSnapshot, reviewGit } from "./review-snapshot.js";
-import { findingsList, formatRecommendation, isVisibleFinding, gateExitCode, malformedLocalRun, recommendLocalReview, scopeOutcome, type Recommendation } from "./review-recommendation.js";
+import { findingsList, formatRecommendation, isVisibleFinding, gateExitCode, malformedLocalRun, recommendLocalReview, scopeOutcome, type Recommendation, type RecommendOptions } from "./review-recommendation.js";
 import { freezeAgentTrace, readAgentTrace, type AgentTrace } from "./review-trace.js";
 
 /**
@@ -190,8 +190,8 @@ function repositoryFromRemote(remote: string): string {
   return match[1];
 }
 
-function printLocalRun(run: LocalRun, options: LocalOptions): Recommendation {
-  const recommendation = recommendLocalReview(run);
+function printLocalRun(run: LocalRun, options: LocalOptions, recommendOpts?: RecommendOptions): Recommendation {
+  const recommendation = recommendLocalReview(run, recommendOpts);
   run.recommendation = recommendation;
   if (isJSON(options)) { writeJSON(run); return recommendation; }
   const result = run.result;
@@ -206,7 +206,7 @@ function printLocalRun(run: LocalRun, options: LocalOptions): Recommendation {
   } else process.stdout.write("No review result is available for this run.\n");
   printScope(result?.scope);
   if (result?.verdict) printVerdict(result.verdict);
-  if (!result?.complete || run.status !== "completed") process.stdout.write("Review incomplete; check coverage and errors before relying on this result.\n");
+  if (recommendation.verdict !== "approve" && (!result?.complete || run.status !== "completed")) process.stdout.write("Review incomplete; check coverage and errors before relying on this result.\n");
   if (result?.local?.contextComplete === false) process.stdout.write("Surrounding context was bounded; omitted files were not reviewed.\n");
   if (run.workspaceCurrent === false) process.stdout.write("The working tree changed after capture; these findings describe the saved snapshot.\n");
   if (run.workspaceCurrent === null) process.stdout.write("Current working-tree identity could not be checked; these findings describe the saved snapshot.\n");
@@ -364,10 +364,12 @@ export async function cmdReviewLocal(options: LocalOptions): Promise<void> {
           const current = await captureReviewSnapshot({ staged: options.staged, base: options.base, cwd: captured.root, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(10000)]) });
           run.workspaceCurrent = current.snapshot.digest === snapshot.digest;
         } catch { run.workspaceCurrent = null; run.workspaceCurrentReason = "Snapshot could not be recaptured"; }
-        const recommendation = printLocalRun(run, options);
+        const changedSet = new Set(snapshot.changedPaths);
+        const skippedChanged = snapshot.skipped.some(f => changedSet.has(f.path));
+        const recommendation = printLocalRun(run, options, { skippedChanged });
         if (interrupted) process.exitCode = interrupted;
         else if (options.gate) process.exitCode = gateExitCode(recommendation);
-        else if (["failed", "cancelled", "partial"].includes(run.status) || (run.status === "completed" && run.result?.complete !== true) || malformedLocalRun(run).length) process.exitCode = 1;
+        else if (recommendation.verdict !== "approve" && (["failed", "cancelled", "partial"].includes(run.status) || (run.status === "completed" && run.result?.complete !== true) || malformedLocalRun(run).length)) process.exitCode = 1;
         // Without --gate only completeness and the linked issue's written scope
         // set the exit status (findings alone keep 0, as before), by the rule
         // --gate uses: 2 for an unmet requirement, 1 for a scope not fully checked.

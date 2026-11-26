@@ -389,3 +389,103 @@ test("DITTO-2434: an unmet written requirement requests changes; an unchecked sc
     assert.equal(rec.verdict, "none", String(status)); assert.match(rec.reasons.join(), /written scope could not be checked/);
   }
 });
+
+test("DITTO-3103: converged wrap_up/max_rounds final turn with zero lens failures approves, while real failures stay none", () => {
+  const convergedFiles = (reason = "wrap_up") => ({
+    completed: [],
+    abbreviated: [{ path: "app.ts", reason: `lens security, data and concurrency: ${reason}` }],
+    failed: [],
+    lenses: [
+      { lens: "correctness", completed: ["app.ts"], abbreviated: [], failed: [] },
+      { lens: "security, data and concurrency", completed: [], abbreviated: [{ path: "app.ts", reason }], failed: [] },
+      { lens: "contracts across files", completed: ["app.ts"], abbreviated: [], failed: [] },
+    ],
+  });
+  // New engine: status=completed, complete=true, changedCoverageComplete=true, with converged wrap_up/max_rounds.
+  for (const reason of ["wrap_up", "max_rounds"]) {
+    const rec = recommendLocalReview(withResult({ files: convergedFiles(reason) }));
+    assert.equal(rec.verdict, "approve", reason);
+    assert.equal(rec.approved, true);
+    assert.equal(gateExitCode(rec), 0);
+    assert.match(rec.reasons.join("; "), /wrap_up\/max_rounds final turn/);
+  }
+  // Legacy engine (pre-rollout): status=partial solely because of wrap_up/max_rounds, with terminal_state=complete.
+  const legacyPartial = (overrides = {}) => ({
+    status: "partial",
+    workspaceCurrent: true,
+    result: {
+      complete: false,
+      findings: [],
+      files: convergedFiles("wrap_up"),
+      coverage: { terminal_state: "complete", coverage: { waived: [] } },
+      local: { contextComplete: false, changedCoverageComplete: false },
+      ...overrides,
+    },
+  });
+  const okLegacy = recommendLocalReview(legacyPartial());
+  assert.equal(okLegacy.verdict, "approve");
+  assert.equal(gateExitCode(okLegacy), 0);
+  // With unchanged skipped binaries: requires skippedChanged=false from CLI snapshot; skippedChanged=true or unknown fails closed.
+  const withBinary = legacyPartial({ skipped: [{ path: "logo.png", reason: "binary" }] });
+  assert.equal(recommendLocalReview(withBinary).verdict, "none");
+  assert.equal(recommendLocalReview(withBinary, { skippedChanged: true }).verdict, "none");
+  assert.equal(recommendLocalReview(withBinary, { skippedChanged: false }).verdict, "approve");
+  // Secondary lens failure still fails closed, even if files.failed is empty.
+  const secondaryFail = withResult({
+    files: {
+      completed: [],
+      abbreviated: [{ path: "app.ts", reason: "lens security, data and concurrency did not finish: provider error" }],
+      failed: [],
+      lenses: [
+        { lens: "correctness", completed: ["app.ts"], abbreviated: [], failed: [] },
+        { lens: "security, data and concurrency", completed: [], abbreviated: [], failed: [{ path: "app.ts", reason: "provider error" }] },
+      ],
+    },
+  });
+  assert.equal(recommendLocalReview(secondaryFail).verdict, "none");
+  assert.match(recommendLocalReview(secondaryFail).reasons.join("; "), /failed to review/);
+  // Non-converged abbreviated stops (budget, compression, empty_rounds) stay none.
+  for (const bad of ["budget", "compression", "empty_rounds"]) {
+    assert.equal(recommendLocalReview(withResult({ files: convergedFiles(bad) })).verdict, "none", bad);
+    assert.equal(recommendLocalReview(legacyPartial({ files: convergedFiles(bad) })).verdict, "none", `legacy ${bad}`);
+  }
+  // Legacy partial with undecided withheld candidate or non-complete manifest stays none.
+  assert.equal(recommendLocalReview(legacyPartial({ findings: [finding("high", { status: "withheld", withheldReason: "verification_unavailable" })] })).verdict, "none");
+  assert.equal(recommendLocalReview(legacyPartial({ coverage: { terminal_state: "partial", coverage: { waived: [] } } })).verdict, "none");
+  assert.equal(recommendLocalReview(legacyPartial({ tokenLimitReached: true })).verdict, "none");
+  // Legacy partial with blocking finding still returns changes (exit 2).
+  assert.equal(recommendLocalReview(legacyPartial({ findings: [finding("high")] })).verdict, "changes");
+});
+
+test("DITTO-3103 CLI end-to-end: converged wrap_up partial receipt with unchanged skipped binary approves under --gate", async t => {
+  const root = await repository(t);
+  await writeFile(path.join(root, "app.ts"), "export const a = 2;\n");
+  await writeFile(path.join(root, "logo.bin"), Buffer.from([0, 1, 2, 3]));
+  git(root, "add", "logo.bin"); git(root, "commit", "-m", "add unchanged binary");
+  const svc = await server(t, {
+    terminal: () => ({
+      status: "partial",
+      result: {
+        complete: false,
+        findings: [],
+        skipped: [{ path: "logo.bin", reason: "binary" }],
+        files: {
+          completed: [],
+          abbreviated: [{ path: "app.ts", reason: "lens security, data and concurrency: wrap_up" }],
+          failed: [],
+          lenses: [
+            { lens: "correctness", completed: ["app.ts"], abbreviated: [], failed: [] },
+            { lens: "security, data and concurrency", completed: [], abbreviated: [{ path: "app.ts", reason: "wrap_up" }], failed: [] },
+          ],
+        },
+        coverage: { terminal_state: "complete", coverage: { waived: [] } },
+        local: { contextComplete: false, changedCoverageComplete: false },
+      },
+    }),
+  });
+  const out = await run(root, svc.base, ["local", "--gate", "--output", "json"]);
+  assert.equal(out.code, 0, out.stderr);
+  const data = JSON.parse(out.stdout);
+  assert.equal(data.recommendation.verdict, "approve");
+  assert.equal(data.recommendation.approved, true);
+});
