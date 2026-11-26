@@ -1066,3 +1066,118 @@ test("teleport archive rejects malformed sources, repo capsules and bad generati
     stub.close();
   }
 });
+
+test("push succeeds with deleted tracked files (staged & unstaged) and paths with spaces/unicode", async () => {
+  const stub = await startTeleportStub();
+  const cfg = tmp("teleport-del-cfg-");
+  const src = makeRepo();
+  writeFileSync(path.join(src, "gone-unstaged.txt"), "remove me\n");
+  writeFileSync(path.join(src, "gone-staged.txt"), "git rm me\n");
+  writeFileSync(path.join(src, "dir with spaces.txt"), "hello spaces\n");
+  writeFileSync(path.join(src, "café.txt"), "hello unicode\n");
+  git(["add", "."], src);
+  git(["commit", "-m", "add extra files"], src);
+  // Delete one tracked file unstaged and one staged, and edit unicode/space files.
+  const { unlinkSync } = await import("node:fs");
+  unlinkSync(path.join(src, "gone-unstaged.txt"));
+  git(["rm", "-q", "gone-staged.txt"], src);
+  writeFileSync(path.join(src, "dir with spaces.txt"), "edited spaces\n");
+  writeFileSync(path.join(src, "café.txt"), "edited unicode\n");
+  writeFileSync(path.join(src, "untracked résumé.txt"), "new unicode\n");
+  try {
+    const dirty = dirtyPaths(src);
+    assert.ok(!dirty.includes("gone-unstaged.txt"), "deleted unstaged file must not enter tar list");
+    assert.ok(!dirty.includes("gone-staged.txt"), "deleted staged file must not enter tar list");
+    assert.ok(dirty.includes("dir with spaces.txt"), "modified spaced path captured");
+    assert.ok(dirty.includes("café.txt"), "modified unicode path captured");
+    assert.ok(dirty.includes("untracked résumé.txt"), "untracked unicode path captured");
+
+    const r = await cli(stub, cfg, ["teleport", "push", src, "--name", "deleted-ok", "--json"]);
+    assert.equal(r.status, 0, r.stderr);
+    // Push must not call /resolve (which would presign every chunk and stamp last_pulled_at).
+    assert.equal(stub.calls.filter((c) => c.path.endsWith("/resolve")).length, 0, "push must not hit /resolve");
+
+    const dest = path.join(tmp("teleport-del-dest-"), "restored");
+    const pull = await cli(stub, cfg, ["teleport", "pull", "deleted-ok", dest, "--json"]);
+    assert.equal(pull.status, 0, pull.stderr);
+    assert.equal(stub.calls.filter((c) => c.path.endsWith("/resolve")).length, 1, "pull must hit /resolve once");
+    assert.equal(readFileSync(path.join(dest, "dir with spaces.txt"), "utf8"), "edited spaces\n");
+    assert.equal(readFileSync(path.join(dest, "café.txt"), "utf8"), "edited unicode\n");
+    assert.equal(readFileSync(path.join(dest, "untracked résumé.txt"), "utf8"), "new unicode\n");
+
+    const badGen = await cli(stub, cfg, ["teleport", "pull", "deleted-ok", path.join(tmp("teleport-badgen-"), "out"), "--generation", "0"]);
+    assert.notEqual(badGen.status, 0);
+    assert.match(badGen.stderr, /positive integer/);
+  } finally {
+    stub.close();
+  }
+});
+
+test("same-machine Claude transcript restore preserves source file and handles prefix-overlapping target cwd", async () => {
+  const stub = await startTeleportStub();
+  const cfg = tmp("teleport-claude-safe-cfg-");
+  const home = tmp("teleport-claude-safe-home-");
+  const parent = tmp("teleport-claude-safe-root-");
+  const src = path.join(parent, "proj");
+  mkdirSync(src, { recursive: true });
+  git(["init", "-b", "main"], src);
+  git(["config", "user.email", "t@example.test"], src);
+  git(["config", "user.name", "Teleport Test"], src);
+  writeFileSync(path.join(src, "a.txt"), "one\n");
+  git(["add", "."], src);
+  git(["commit", "-m", "init"], src);
+  try {
+    const sid = "22222222-3333-4444-8555-666666666666";
+    const srcReal = realpathSync(src);
+    const srcProjDir = path.join(home, ".claude", "projects", cwdSlug(srcReal));
+    mkdirSync(srcProjDir, { recursive: true });
+    const srcJsonl = path.join(srcProjDir, `${sid}.jsonl`);
+    writeFileSync(srcJsonl, `{"type":"user","cwd":"${srcReal}"}\n`);
+
+    let r = await cliEnv(stub, cfg, { HOME: home }, ["teleport", "push", src, "--name", "claudesafe", "--harness", "claude", "--session", sid]);
+    assert.equal(r.status, 0, r.stderr);
+
+    // Mutate the local source transcript after push; pulling into a new path must NOT clobber it!
+    writeFileSync(srcJsonl, `{"type":"user","cwd":"${srcReal}","localOnly":true}\n`);
+
+    // Target cwd starts with source cwd prefix (".../proj" -> ".../proj-copy") to guard against double rewrite.
+    const dest = path.join(parent, "proj-copy");
+    r = await cliEnv(stub, cfg, { HOME: home }, ["teleport", "pull", "claudesafe", dest, "--restore-harness", "--json"]);
+    assert.equal(r.status, 0, r.stderr);
+
+    assert.equal(readFileSync(srcJsonl, "utf8"), `{"type":"user","cwd":"${srcReal}","localOnly":true}\n`, "source transcript must remain untouched");
+    const destReal = realpathSync(dest);
+    const restoredJsonl = readFileSync(path.join(home, ".claude", "projects", cwdSlug(destReal), `${sid}.jsonl`), "utf8");
+    assert.equal(restoredJsonl, `{"type":"user","cwd":"${destReal}"}\n`, "target transcript must rewrite cwd once without double-prefix corruption");
+  } finally {
+    stub.close();
+  }
+});
+
+test("archive restore cleans up destination directory on checksum failure so retry works", async () => {
+  const stub = await startTeleportStub();
+  const cfg = tmp("teleport-archive-retry-cfg-");
+  const src = tmp("teleport-archive-retry-src-");
+  writeFileSync(path.join(src, "note.txt"), "hello archive\n");
+  try {
+    let r = await cli(stub, cfg, ["teleport", "archive", "--source", `notes=${src}`, "--json"]);
+    assert.equal(r.status, 0, r.stderr);
+    const cap = stub.capsules.get("cap-1");
+    const manifest = cap.generations.get(1).manifest;
+    const chunkSha = manifest.archives[0].chunks[0].sha256;
+    const goodBytes = stub.chunks.get(chunkSha);
+    // Corrupt chunk bytes on server to trigger checksum failure.
+    stub.chunks.set(chunkSha, Buffer.from("corrupted"));
+    const dest = path.join(tmp("teleport-archive-retry-dest-"), "restored");
+    r = await cli(stub, cfg, ["teleport", "archive-restore", "notes", dest]);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /checksum/);
+    // Repair chunk bytes and retry into the same dest: must succeed (no leftover empty dir).
+    stub.chunks.set(chunkSha, goodBytes);
+    r = await cli(stub, cfg, ["teleport", "archive-restore", "notes", dest]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(readFileSync(path.join(dest, "note.txt"), "utf8"), "hello archive\n");
+  } finally {
+    stub.close();
+  }
+});

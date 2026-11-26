@@ -55,6 +55,8 @@ export interface PushOutput {
   reusedBytes: number;
   /** reusedBytes / logicalBytes, 0 when nothing was referenced. */
   savingsRatio: number;
+  /** The committed manifest (for local thin-push caching without an extra resolve). */
+  manifest: Manifest;
 }
 
 /** Maps a chunk sha256 to the local file + window it came from, for upload. */
@@ -90,7 +92,13 @@ export async function pushCapsule(input: PushInput, forceFull: Set<string> = new
     // plan failure never blocks a push; the built-in rules still apply.
     const plan = await planCapture(discovery.root, { estimate: false }).catch(() => undefined);
     const prevByRel = new Map<string, RepoManifest>();
-    for (const r of input.previousManifest?.repos ?? []) prevByRel.set(r.relPath, r);
+    const validPrevious =
+      input.previousManifest &&
+      input.previousManifest.generation > 0 &&
+      input.previousManifest.generation <= (input.parentGeneration ?? 0)
+        ? input.previousManifest
+        : undefined;
+    for (const r of validPrevious?.repos ?? []) prevByRel.set(r.relPath, r);
 
     const repos: RepoManifest[] = [];
     for (const rel of discovery.repos) {
@@ -130,7 +138,7 @@ export async function pushCapsule(input: PushInput, forceFull: Set<string> = new
       const wtChunks = capture ? await addFileChunks(capture.file, sources, allChunks) : [];
       if (bundle) {
         const pack: RepoPack = { kind: bundle.kind, chunks: packChunks };
-        if (bundle.kind === "thin" && input.parentGeneration) pack.basisGeneration = input.parentGeneration;
+        if (bundle.kind === "thin" && validPrevious) pack.basisGeneration = validPrevious.generation;
         packs.push(pack);
       }
       const repo: RepoManifest = {
@@ -266,6 +274,7 @@ export async function pushCapsule(input: PushInput, forceFull: Set<string> = new
       logicalBytes,
       reusedBytes,
       savingsRatio: logicalBytes > 0 ? reusedBytes / logicalBytes : 0,
+      manifest,
     };
   } finally {
     await rm(tmp, { recursive: true, force: true });

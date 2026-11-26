@@ -19,30 +19,30 @@ export interface WorktreeCapture {
  * state a plain clone would not reproduce.
  */
 export function dirtyPaths(repoDir: string, ignoredIncludes: string[] = [], excludes: readonly string[] = DEFAULT_EXCLUDES): string[] {
-  const modified = git(["diff", "--name-only", "HEAD"], repoDir);
-  const untracked = git(["ls-files", "--others", "--exclude-standard"], repoDir);
+  // Exclude deleted tracked files (--diff-filter=d) so tar never tries to stat
+  // a removed path, and use -z so paths with spaces or non-ASCII characters are
+  // never C-quoted by git.
+  const modified = git(["diff", "--name-only", "--diff-filter=d", "-z", "HEAD"], repoDir);
+  const untracked = git(["ls-files", "--others", "--exclude-standard", "-z"], repoDir);
   const set = new Set<string>();
-  for (const out of [modified, untracked]) {
-    if (!out.ok) continue;
-    for (const raw of out.stdout.split("\n")) {
-      const p = raw.trim();
-      if (p && !isExcluded(p, excludes)) set.add(p);
+  const addNulList = (res: ReturnType<typeof git>, filter: (p: string) => boolean) => {
+    if (!res.ok) return;
+    for (const p of res.stdout.split("\0")) {
+      if (p && filter(p)) set.add(p);
     }
+  };
+  for (const out of [modified, untracked]) {
+    addNulList(out, (p) => !isExcluded(p, excludes));
   }
   // A repo with no commits yet: capture everything git would track.
   if (!git(["rev-parse", "--verify", "HEAD"], repoDir).ok) {
-    const all = git(["ls-files", "--others", "--exclude-standard", "--cached"], repoDir);
-    if (all.ok) for (const raw of all.stdout.split("\n")) {
-      const p = raw.trim();
-      if (p && !isExcluded(p, excludes)) set.add(p);
-    }
+    const all = git(["ls-files", "--others", "--exclude-standard", "--cached", "-z"], repoDir);
+    addNulList(all, (p) => !isExcluded(p, excludes));
   }
   for (const pattern of ignoredIncludes) {
-    const forced = git(["ls-files", "--others", "--ignored", "--exclude-standard", "--", pattern], repoDir);
-    if (forced.ok) for (const raw of forced.stdout.split("\n")) {
-      const p = raw.trim();
-      if (p && !isExcluded(p, excludes.filter((e) => !matchesForce(pattern, e)))) set.add(p);
-    }
+    const forced = git(["ls-files", "--others", "--ignored", "--exclude-standard", "-z", "--", pattern], repoDir);
+    const effective = excludes.filter((e) => !matchesForce(pattern, e));
+    addNulList(forced, (p) => !isExcluded(p, effective));
   }
   return [...set].sort();
 }

@@ -1,10 +1,11 @@
 import { spawnSync } from "node:child_process";
 import { realpathSync } from "node:fs";
-import { access, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { binaryAvailable } from "./git.js";
 import { type Compression, type HarnessKind, cwdSlug } from "./types.js";
+import { extractWorktree } from "./worktree.js";
 
 /** Where a harness stores the session's transcript, relative to $HOME. */
 export interface HarnessLocation {
@@ -115,7 +116,7 @@ export async function captureHarness(
  * Restores a Claude transcript under a (possibly different) target cwd: extract
  * to a temp home, then rewrite the project-dir slug and any embedded absolute
  * cwd inside the jsonl so `claude --resume <id>` finds the session at the new
- * path. Returns the restored session id.
+ * path without clobbering the source transcript on the same machine.
  */
 export async function restoreClaudeTranscript(
   tarFile: string,
@@ -124,31 +125,46 @@ export async function restoreClaudeTranscript(
   originalCwd: string,
   targetCwd: string,
 ): Promise<void> {
-  const home = os.homedir();
-  const flag = compression === "zstd" ? "--zstd" : "--gzip";
-  const res = spawnSync("tar", ["-x", flag, "-f", tarFile, "-C", home], { maxBuffer: 64 * 1024 * 1024 });
-  if (res.status !== 0) throw new Error(`tar extract failed: ${res.stderr?.toString().trim()}`);
-  const fromCwd = canonicalCwd(originalCwd);
-  const toCwd = canonicalCwd(targetCwd);
-  if (fromCwd === toCwd) return;
-  const fromDir = path.join(claudeHome(), "projects", cwdSlug(fromCwd));
-  const toDir = path.join(claudeHome(), "projects", cwdSlug(toCwd));
-  await mkdir(toDir, { recursive: true });
-  const fromJsonl = path.join(fromDir, `${sessionId}.jsonl`);
-  if (await exists(fromJsonl)) {
-    // Rewrite both the recorded and the canonical spelling of the source path.
-    const rewritten = (await readFile(fromJsonl, "utf8")).split(fromCwd).join(toCwd).split(originalCwd).join(toCwd);
-    await writeFile(path.join(toDir, `${sessionId}.jsonl`), rewritten);
-  }
-  const fromSub = path.join(fromDir, sessionId);
-  if (await exists(fromSub)) {
-    for (const f of await walkFiles(fromSub)) {
-      const relFromSub = path.relative(fromSub, f);
-      const dest = path.join(toDir, sessionId, relFromSub);
-      await mkdir(path.dirname(dest), { recursive: true });
-      await writeFile(dest, await readFile(f));
+  const tmpHome = await mkdtemp(path.join(os.tmpdir(), "teleport-claude-"));
+  try {
+    extractWorktree(tarFile, tmpHome, compression);
+    const fromCwd = canonicalCwd(originalCwd);
+    const toCwd = canonicalCwd(targetCwd);
+    const extractedJsonl = await findExtractedFile(tmpHome, `${sessionId}.jsonl`);
+    if (!extractedJsonl) return;
+    const extractedDir = path.dirname(extractedJsonl);
+    const toDir = path.join(claudeHome(), "projects", cwdSlug(toCwd));
+    await mkdir(toDir, { recursive: true });
+    let content = await readFile(extractedJsonl, "utf8");
+    if (fromCwd !== toCwd || originalCwd !== toCwd) {
+      content = rewritePathsOnce(content, [fromCwd, originalCwd], toCwd);
     }
+    await writeFile(path.join(toDir, `${sessionId}.jsonl`), content);
+    const extractedSub = path.join(extractedDir, sessionId);
+    if (await exists(extractedSub)) {
+      for (const f of await walkFiles(extractedSub)) {
+        const relFromSub = path.relative(extractedSub, f);
+        const dest = path.join(toDir, sessionId, relFromSub);
+        await mkdir(path.dirname(dest), { recursive: true });
+        await writeFile(dest, await readFile(f));
+      }
+    }
+  } finally {
+    await rm(tmpHome, { recursive: true, force: true });
   }
+}
+
+/** Replaces any of `needles` with `replacement` in a single pass so a target that contains a source prefix is never double-rewritten. */
+function rewritePathsOnce(text: string, needles: string[], replacement: string): string {
+  const unique = [...new Set(needles.filter((n) => n.length > 0 && n !== replacement))].sort((a, b) => b.length - a.length);
+  if (unique.length === 0) return text;
+  const escaped = unique.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  return text.replace(new RegExp(escaped.join("|"), "g"), () => replacement);
+}
+
+async function findExtractedFile(root: string, filename: string): Promise<string | null> {
+  const files = await walkFiles(root);
+  return files.find((f) => path.basename(f) === filename) ?? null;
 }
 
 async function exists(p: string): Promise<boolean> {

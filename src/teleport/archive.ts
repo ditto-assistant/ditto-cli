@@ -28,7 +28,7 @@ export interface ArchiveSource {
 export interface ArchiveEntry {
   name: string;
   format: "tar";
-  chunkCompression: "zstd";
+  chunkCompression: "zstd" | "none";
   chunks: ChunkRef[];
   entries: number;
   bytes: number;
@@ -242,6 +242,7 @@ export async function restoreArchive(capsuleId: string, name: string, dest: stri
     throw e;
   }
   const tmp = await mkdtemp(path.join(os.tmpdir(), "teleport-archive-restore-"));
+  let extracted = false;
   try {
     const tarFile = path.join(tmp, "archive.tar");
     const out = createWriteStream(tarFile);
@@ -256,7 +257,7 @@ export async function restoreArchive(capsuleId: string, name: string, dest: stri
       if (!url) throw new Error(`no download URL for chunk ${c.sha256.slice(0, 12)}`);
       const body = Buffer.from(await (await fetchOk(url)).arrayBuffer());
       if (createHash("sha256").update(body).digest("hex") !== c.sha256) throw new Error(`chunk ${c.sha256.slice(0, 12)} failed its checksum`);
-      const plain = zstdDecompressSync(body);
+      const plain = archive.chunkCompression === "none" ? body : zstdDecompressSync(body);
       bytes += plain.length;
       if (!out.write(plain)) await Promise.race([new Promise((r) => out.once("drain", r)), finished]);
     }
@@ -264,8 +265,10 @@ export async function restoreArchive(capsuleId: string, name: string, dest: stri
     await finished;
     const x = await run("tar", ["-x", "-k", "-f", tarFile, "-C", dest]);
     if (x.code !== 0) throw new Error(`tar extract failed: ${x.stderr.trim()}`);
+    extracted = true;
     return { entries: archive.entries, bytes };
   } finally {
+    if (!extracted) await rm(dest, { recursive: true, force: true }).catch(() => undefined);
     await rm(tmp, { recursive: true, force: true });
   }
 }
@@ -293,10 +296,18 @@ async function uploadAll(missing: tapi.NegotiateResponse["missing"], files: Map<
   await Promise.all(workers);
 }
 
-async function fetchOk(url: string): Promise<Response> {
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`chunk download failed: HTTP ${r.status}`);
-  return r;
+async function fetchOk(url: string, attempts = 4): Promise<Response> {
+  let delay = 400;
+  for (let attempt = 1; ; attempt++) {
+    const r = await fetch(url);
+    if (r.ok) return r;
+    await r.body?.cancel().catch(() => undefined);
+    if (attempt >= attempts || (r.status < 500 && r.status !== 429)) {
+      throw new Error(`chunk download failed: HTTP ${r.status}`);
+    }
+    await new Promise((s) => setTimeout(s, delay));
+    delay *= 2;
+  }
 }
 
 function run(cmd: string, args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {

@@ -6,6 +6,11 @@ import { restoreCapsule, type RestoreResult } from "./restore.js";
 
 const GET_CONCURRENCY = 4;
 
+export interface PullResult extends RestoreResult {
+  generation: number;
+  manifest: import("./types.js").Manifest;
+}
+
 /**
  * Downloads a generation's chunks and rebuilds the capsule into `destRoot`.
  * Chunks are verified by sha256 as they land; a mismatch aborts the pull.
@@ -15,7 +20,7 @@ export async function pullCapsule(
   generation: number | undefined,
   destRoot: string,
   opts: { restoreHarness?: boolean } = {},
-): Promise<RestoreResult> {
+): Promise<PullResult> {
   const resolved = await tapi.resolveGeneration(capsuleId, generation);
   const { manifest } = resolved;
   const chunks = [...resolved.chunks];
@@ -23,7 +28,8 @@ export async function pullCapsule(
   const chunkDir = await mkdtemp(path.join(os.tmpdir(), "teleport-chunks-"));
   try {
     await downloadChunks(chunks, chunkDir);
-    return await restoreCapsule(manifest, (sha) => path.join(chunkDir, sha), destRoot, opts);
+    const restored = await restoreCapsule(manifest, (sha) => path.join(chunkDir, sha), destRoot, opts);
+    return { ...restored, generation: resolved.generation, manifest };
   } finally {
     await rm(chunkDir, { recursive: true, force: true });
   }

@@ -110,7 +110,7 @@ export async function cmdTeleportPush(pathArg: string | undefined, options: Push
 }
 
 /** The JSON shape of a push: capsule identity plus the PushOutput fields. */
-export type PushSummary = { capsuleId: string; name: string } & Awaited<ReturnType<typeof pushCapsule>>;
+export type PushSummary = { capsuleId: string; name: string } & Omit<Awaited<ReturnType<typeof pushCapsule>>, "manifest">;
 
 /**
  * Discovers, pushes and caches the manifest. Prints the dry-run plan itself
@@ -131,7 +131,7 @@ async function runPush(pathArg: string | undefined, options: PushOptions): Promi
   if (options.mirror) await tapi.setMirrorPolicy(capsule.id, parsePolicy(options.mirror));
 
   if (!options.quiet) err(`Teleporting ${discovery.repos.length} repo(s) from ${root} → capsule ${capsule.name}…`);
-  const result = await pushCapsule({
+  const { manifest, ...result } = await pushCapsule({
     root,
     capsuleId: capsule.id,
     parentGeneration: capsule.headGeneration || null,
@@ -143,9 +143,9 @@ async function runPush(pathArg: string | undefined, options: PushOptions): Promi
     committedBy: detectCommitter(),
   });
 
-  // Cache the committed manifest for the next thin push.
-  const resolved = await tapi.resolveGeneration(capsule.id, result.generation);
-  await writeCachedManifest(configDir(), capsule.id, resolved.manifest);
+  // Cache the committed manifest directly for the next thin push — do not call
+  // /resolve here, which would presign every chunk and stamp last_pulled_at.
+  await writeCachedManifest(configDir(), capsule.id, manifest);
   return { capsuleId: capsule.id, name: capsule.name, ...result };
 }
 
@@ -177,21 +177,23 @@ interface PullOptions extends OutputOptions {
 export async function cmdTeleportPull(nameArg: string | undefined, pathArg: string | undefined, options: PullOptions): Promise<void> {
   const ref = options.capsule ?? nameArg;
   if (!ref) throw new Error("which capsule? pass a name/id argument or --capsule");
+  const generation = options.generation === undefined ? undefined : Number(options.generation);
+  if (generation !== undefined && (!Number.isInteger(generation) || generation < 1)) {
+    throw new Error("--generation must be a positive integer");
+  }
   const capsule = await tapi.getCapsule(ref);
   requireGenerations(capsule);
   const dest = path.resolve(options.into ?? pathArg ?? path.join(process.cwd(), capsule.name));
-  const generation = options.generation ? Number(options.generation) : undefined;
   err(`Pulling capsule ${capsule.name}${generation ? ` @${generation}` : ""} → ${dest}…`);
   const result = await pullCapsule(capsule.id, generation, dest, { restoreHarness: options.restoreHarness });
-  const resolved = await tapi.resolveGeneration(capsule.id, generation);
-  await writeCachedManifest(configDir(), capsule.id, resolved.manifest);
-  const harnessKind = resolved.manifest.harness.kind;
+  await writeCachedManifest(configDir(), capsule.id, result.manifest);
+  const harnessKind = result.manifest.harness.kind;
 
   if (json(options)) {
     // Runner contract: the entrypoint reads cwd + harness ids from this line.
-    out(JSON.stringify({ cwd: result.harnessCwd ?? result.root, harnessSessionId: result.harnessSessionId, harnessKind, root: result.root, repos: result.repos, generation: resolved.generation }));
+    out(JSON.stringify({ cwd: result.harnessCwd ?? result.root, harnessSessionId: result.harnessSessionId, harnessKind, root: result.root, repos: result.repos, generation: result.generation }));
   } else {
-    out(`Restored ${result.repos.length} repo(s) into ${result.root} (generation ${resolved.generation}).`);
+    out(`Restored ${result.repos.length} repo(s) into ${result.root} (generation ${result.generation}).`);
     if (result.harnessSessionId) out(`Harness session ${result.harnessSessionId} restored under ${result.harnessCwd}.`);
   }
   if (options.resume && result.harnessSessionId && harnessKind !== "none") {
@@ -288,14 +290,12 @@ export async function cmdTeleport(pathArg: string | undefined, options: Teleport
   }
   if (!json(options)) printPushSummary(push);
 
-  const name = options.name?.trim() || path.basename(root);
-  requireGenerations(await tapi.getCapsule(name));
   const harnessKind = harnessKindOf(match?.harness ?? options.harness);
   const endpoint = await resolveEndpoint(options.endpoint);
   if (endpoint) err(`Using inference endpoint ${endpoint.slug} (${endpoint.name}).`);
   let session: tapi.CloudSessionResponse;
   try {
-    session = await tapi.launchCloudSession(name, {
+    session = await tapi.launchCloudSession(push.capsuleId, {
       prompt: options.prompt?.trim() || "Resume the teleported session and continue where it left off.",
       harness: harnessKind === "codex" ? "codex" : harnessKind === "grok" ? "grok" : "claude-code",
       endpointId: endpoint?.id,
@@ -368,12 +368,12 @@ export async function cmdOffload(pathArg: string | undefined, options: { yes?: b
   }
 
   err("Pushing before offload…");
-  await cmdTeleportPush(root, { name: options.name });
-  const name = options.name?.trim() || path.basename(root);
-  const capsule = await tapi.getCapsule(name);
+  const pushed = await runPush(root, { name: options.name });
+  if (!pushed) return;
+  printPushSummary(pushed);
 
   err("Waiting for redundant mirrors to verify…");
-  const readiness = await waitForOffloadReady(capsule.id, {
+  const readiness = await waitForOffloadReady(pushed.capsuleId, {
     onPoll: (s) => err(`  mirrors: ${s.mirrors.map((m) => `${m.target}=${m.status}`).join(", ") || "(none)"}`),
   });
   if (!readiness.ready) {
@@ -390,11 +390,11 @@ export async function cmdOffload(pathArg: string | undefined, options: { yes?: b
     if (answer.toLowerCase() !== "y") return err("Aborted; capsule kept, local files untouched.");
   }
   const del = await deleteLocalRoot(root, dependencies);
-  await tapi.updateCapsule(capsule.id, { status: "offloaded" });
+  await tapi.updateCapsule(pushed.capsuleId, { status: "offloaded" });
   out(`Offloaded ${root}.${del.location ? ` Moved to ${del.location}.` : ""}`);
   if (del.deletedDependencies.length > 0) out(`Deleted ${del.deletedDependencies.length} node_modules director${del.deletedDependencies.length === 1 ? "y" : "ies"} from Trash.`);
   if (del.retainedDependencies.length > 0) err(`Could not delete ${del.retainedDependencies.join(", ")} from Trash; project files remain recoverable there.`);
-  out(`Recover it with: heyditto teleport pull ${capsule.name} ${root}`);
+  out(`Recover it with: heyditto teleport pull ${pushed.name} ${root}`);
   if (del.deletedDependencies.length > 0) out("Reinstall Node dependencies after pulling; they are not stored in the capsule.");
 }
 
