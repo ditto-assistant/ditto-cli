@@ -478,6 +478,27 @@ test("DITTO-3103: converged wrap_up/max_rounds final turn with zero lens failure
   }));
   assert.equal(legacySecondaryFail.verdict, "none");
   assert.match(legacySecondaryFail.reasons.join("; "), /failed to review/);
+  // Contradictory or missing top-level abbreviated reason fails closed even when per-lens is wrap_up.
+  for (const badTopReason of ["budget", "lens security did not finish: wrap_up", undefined]) {
+    const contradictory = withResult({
+      files: {
+        completed: [],
+        abbreviated: [{ path: "app.ts", ...(badTopReason !== undefined ? { reason: badTopReason } : {}) }],
+        failed: [],
+        lenses: [
+          { lens: "correctness", completed: ["app.ts"], abbreviated: [], failed: [] },
+          { lens: "security, data and concurrency", completed: [], abbreviated: [{ path: "app.ts", reason: "wrap_up" }], failed: [] },
+        ],
+      },
+    });
+    assert.equal(recommendLocalReview(contradictory).verdict, "none", String(badTopReason));
+  }
+  // Legacy partial receipt that omits a captured changed path fails closed; accounted paths approve.
+  assert.equal(recommendLocalReview(legacyPartial(), { changedPaths: ["app.ts", "other.ts"] }).verdict, "none");
+  assert.match(recommendLocalReview(legacyPartial(), { changedPaths: ["app.ts", "other.ts"] }).reasons.join("; "), /not accounted for in coverage/);
+  assert.equal(recommendLocalReview(legacyPartial(), { changedPaths: ["app.ts"] }).verdict, "approve");
+  // Engine-skipped generated changed paths are accounted for.
+  assert.equal(recommendLocalReview(legacyPartial({ skipped: [{ path: "gen.ts", reason: "generated" }] }), { changedPaths: ["app.ts", "gen.ts"] }).verdict, "approve");
   // Legacy partial with undecided withheld candidate or non-complete manifest stays none.
   assert.equal(recommendLocalReview(legacyPartial({ findings: [finding("high", { status: "withheld", withheldReason: "verification_unavailable" })] })).verdict, "none");
   assert.equal(recommendLocalReview(legacyPartial({ coverage: { terminal_state: "partial", coverage: { waived: [] } } })).verdict, "none");

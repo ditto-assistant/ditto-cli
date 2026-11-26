@@ -366,7 +366,7 @@ export async function cmdReviewLocal(options: LocalOptions): Promise<void> {
         } catch { run.workspaceCurrent = null; run.workspaceCurrentReason = "Snapshot could not be recaptured"; }
         const changedSet = new Set(snapshot.changedPaths);
         const skippedChanged = snapshot.skipped.some(f => changedSet.has(f.path));
-        const recommendation = printLocalRun(run, options, { skippedChanged });
+        const recommendation = printLocalRun(run, options, { skippedChanged, changedPaths: snapshot.changedPaths });
         if (interrupted) process.exitCode = interrupted;
         else if (options.gate) process.exitCode = gateExitCode(recommendation);
         else if (recommendation.verdict !== "approve" && (["failed", "cancelled", "partial"].includes(run.status) || (run.status === "completed" && run.result?.complete !== true) || malformedLocalRun(run).length)) process.exitCode = 1;

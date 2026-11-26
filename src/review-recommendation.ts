@@ -169,6 +169,10 @@ export interface RecommendOptions {
    * partial receipt whose server did not yet distinguish converged wrap_up /
    * max_rounds runs from skipped changed files. */
   skippedChanged?: boolean;
+  /** Changed paths captured in the local snapshot. When supplied, a legacy
+   * partial receipt must account for every changed path in completed,
+   * converged abbreviated, or engine-skipped generated coverage. */
+  changedPaths?: string[];
 }
 
 function asList(v: unknown): unknown[] | undefined {
@@ -196,7 +200,7 @@ function checkCoverage(files: Obj | undefined): { ok: boolean; abbreviatedCount:
     if (!abbreviated.length) return { ok: true, abbreviatedCount: 0 };
     return { ok: false, abbreviatedCount: abbreviated.length, reason: `${abbreviated.length} changed file(s) were reviewed briefly without per-lens coverage details` };
   }
-  const convergedPaths = new Set<string>();
+  const convergedReasonsByPath = new Map<string, Set<string>>();
   for (const lf of lenses as Obj[]) {
     const lfAbbr = "abbreviated" in lf ? asList(lf.abbreviated) : undefined;
     if (!lfAbbr) return { ok: false, abbreviatedCount: abbreviated.length, reason: "per-lens coverage report is missing abbreviated files" };
@@ -204,12 +208,15 @@ function checkCoverage(files: Obj | undefined): { ok: boolean; abbreviatedCount:
       if (!isObj(entry) || typeof entry.path !== "string" || typeof entry.reason !== "string" || !CONVERGED_ABBREVIATED_REASONS.has(entry.reason)) {
         return { ok: false, abbreviatedCount: Math.max(abbreviated.length, 1), reason: `changed file(s) stopped before converging (${isObj(entry) && typeof entry.reason === "string" ? entry.reason : "unknown"})` };
       }
-      convergedPaths.add(entry.path);
+      let allowed = convergedReasonsByPath.get(entry.path);
+      if (!allowed) { allowed = new Set<string>(); convergedReasonsByPath.set(entry.path, allowed); }
+      allowed.add(entry.reason);
+      if (typeof lf.lens === "string" && lf.lens !== "") allowed.add(`lens ${lf.lens}: ${entry.reason}`);
     }
   }
-  if (!abbreviated.length) return { ok: true, abbreviatedCount: convergedPaths.size };
+  if (!abbreviated.length) return { ok: true, abbreviatedCount: convergedReasonsByPath.size };
   for (const entry of abbreviated) {
-    if (!isObj(entry) || typeof entry.path !== "string" || !convergedPaths.has(entry.path)) {
+    if (!isObj(entry) || typeof entry.path !== "string" || typeof entry.reason !== "string" || !convergedReasonsByPath.get(entry.path)?.has(entry.reason)) {
       return { ok: false, abbreviatedCount: abbreviated.length, reason: `${abbreviated.length} changed file(s) were abbreviated for an unverified reason` };
     }
   }
@@ -247,6 +254,14 @@ function convergedLegacyPartialReasons(run: LocalRunLike, result: Obj, cov: { ok
   }
   if (!cov.ok) return [`run status is partial; ${cov.reason ?? "coverage is incomplete"}`];
   if (cov.abbreviatedCount === 0) return ["run status is partial; only a completed run can approve"];
+  if (opts?.changedPaths?.length) {
+    const files = isObj(result.files) ? result.files : undefined;
+    const accounted = new Set<string>(generated);
+    for (const p of asList(files?.completed) ?? []) if (typeof p === "string") accounted.add(p);
+    for (const entry of asList(files?.abbreviated) ?? []) if (isObj(entry) && typeof entry.path === "string") accounted.add(entry.path);
+    const missing = opts.changedPaths.filter(p => !accounted.has(p));
+    if (missing.length) return [`run status is partial; ${missing.length} changed file(s) were not accounted for in coverage`];
+  }
   return [];
 }
 
