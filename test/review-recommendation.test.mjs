@@ -444,11 +444,40 @@ test("DITTO-3103: converged wrap_up/max_rounds final turn with zero lens failure
   });
   assert.equal(recommendLocalReview(secondaryFail).verdict, "none");
   assert.match(recommendLocalReview(secondaryFail).reasons.join("; "), /failed to review/);
-  // Non-converged abbreviated stops (budget, compression, empty_rounds) stay none.
+  // Non-converged abbreviated stops (budget, compression, empty_rounds) stay none,
+  // even if top-level files.abbreviated is empty while a lens recorded the stop.
   for (const bad of ["budget", "compression", "empty_rounds"]) {
     assert.equal(recommendLocalReview(withResult({ files: convergedFiles(bad) })).verdict, "none", bad);
-    assert.equal(recommendLocalReview(legacyPartial({ files: convergedFiles(bad) })).verdict, "none", `legacy ${bad}`);
+    const legacyBad = recommendLocalReview(legacyPartial({ files: convergedFiles(bad) }));
+    assert.equal(legacyBad.verdict, "none", `legacy ${bad}`);
+    assert.match(legacyBad.reasons.join("; "), new RegExp(bad));
+    const emptyTopLevel = withResult({
+      files: {
+        completed: ["app.ts"],
+        abbreviated: [],
+        failed: [],
+        lenses: [
+          { lens: "correctness", completed: ["app.ts"], abbreviated: [], failed: [] },
+          { lens: "security, data and concurrency", completed: [], abbreviated: [{ path: "app.ts", reason: bad }], failed: [] },
+        ],
+      },
+    });
+    assert.equal(recommendLocalReview(emptyTopLevel).verdict, "none", `empty top-level ${bad}`);
   }
+  // Legacy partial secondary-lens failure surfaces the specific lens failure reason.
+  const legacySecondaryFail = recommendLocalReview(legacyPartial({
+    files: {
+      completed: [],
+      abbreviated: [{ path: "app.ts", reason: "lens security, data and concurrency did not finish: provider error" }],
+      failed: [],
+      lenses: [
+        { lens: "correctness", completed: ["app.ts"], abbreviated: [], failed: [] },
+        { lens: "security, data and concurrency", completed: [], abbreviated: [], failed: [{ path: "app.ts", reason: "provider error" }] },
+      ],
+    },
+  }));
+  assert.equal(legacySecondaryFail.verdict, "none");
+  assert.match(legacySecondaryFail.reasons.join("; "), /failed to review/);
   // Legacy partial with undecided withheld candidate or non-complete manifest stays none.
   assert.equal(recommendLocalReview(legacyPartial({ findings: [finding("high", { status: "withheld", withheldReason: "verification_unavailable" })] })).verdict, "none");
   assert.equal(recommendLocalReview(legacyPartial({ coverage: { terminal_state: "partial", coverage: { waived: [] } } })).verdict, "none");

@@ -192,19 +192,22 @@ function checkCoverage(files: Obj | undefined): { ok: boolean; abbreviatedCount:
       if (lfFailed.length) return { ok: false, abbreviatedCount: abbreviated.length, reason: `lens ${typeof lf.lens === "string" ? lf.lens : "unknown"} failed to review ${lfFailed.length} changed file(s)` };
     }
   }
-  if (!abbreviated.length) return { ok: true, abbreviatedCount: 0 };
-  if (!lenses || !lenses.length) return { ok: false, abbreviatedCount: abbreviated.length, reason: `${abbreviated.length} changed file(s) were reviewed briefly without per-lens coverage details` };
+  if (!lenses || !lenses.length) {
+    if (!abbreviated.length) return { ok: true, abbreviatedCount: 0 };
+    return { ok: false, abbreviatedCount: abbreviated.length, reason: `${abbreviated.length} changed file(s) were reviewed briefly without per-lens coverage details` };
+  }
   const convergedPaths = new Set<string>();
   for (const lf of lenses as Obj[]) {
     const lfAbbr = "abbreviated" in lf ? asList(lf.abbreviated) : undefined;
     if (!lfAbbr) return { ok: false, abbreviatedCount: abbreviated.length, reason: "per-lens coverage report is missing abbreviated files" };
     for (const entry of lfAbbr) {
       if (!isObj(entry) || typeof entry.path !== "string" || typeof entry.reason !== "string" || !CONVERGED_ABBREVIATED_REASONS.has(entry.reason)) {
-        return { ok: false, abbreviatedCount: abbreviated.length, reason: `${abbreviated.length} changed file(s) stopped before converging (${isObj(entry) && typeof entry.reason === "string" ? entry.reason : "unknown"})` };
+        return { ok: false, abbreviatedCount: Math.max(abbreviated.length, 1), reason: `changed file(s) stopped before converging (${isObj(entry) && typeof entry.reason === "string" ? entry.reason : "unknown"})` };
       }
       convergedPaths.add(entry.path);
     }
   }
+  if (!abbreviated.length) return { ok: true, abbreviatedCount: convergedPaths.size };
   for (const entry of abbreviated) {
     if (!isObj(entry) || typeof entry.path !== "string" || !convergedPaths.has(entry.path)) {
       return { ok: false, abbreviatedCount: abbreviated.length, reason: `${abbreviated.length} changed file(s) were abbreviated for an unverified reason` };
@@ -216,7 +219,7 @@ function checkCoverage(files: Obj | undefined): { ok: boolean; abbreviatedCount:
 /** Check whether a legacy partial receipt (from an engine before DITTO-3103)
  * represents a clean, converged wrap_up/max_rounds run where every other
  * completeness invariant holds. */
-function convergedLegacyPartialReasons(run: LocalRunLike, result: Obj, cov: { ok: boolean; abbreviatedCount: number }, opts?: RecommendOptions): string[] {
+function convergedLegacyPartialReasons(run: LocalRunLike, result: Obj, cov: { ok: boolean; abbreviatedCount: number; reason?: string }, opts?: RecommendOptions): string[] {
   if (!Array.isArray(result.findings)) return ["run status is partial; only a completed run can approve"];
   if (result.tokenLimitReached === true) return ["token limit was reached before the review finished"];
   const manifest = isObj(result.coverage) ? result.coverage : undefined;
@@ -242,7 +245,8 @@ function convergedLegacyPartialReasons(run: LocalRunLike, result: Obj, cov: { ok
   if (nonGeneratedSkipped > 0 && opts?.skippedChanged !== false) {
     return ["run status is partial; skipped files could not be verified as unchanged"];
   }
-  if (!cov.ok || cov.abbreviatedCount === 0) return ["run status is partial; only a completed run can approve"];
+  if (!cov.ok) return [`run status is partial; ${cov.reason ?? "coverage is incomplete"}`];
+  if (cov.abbreviatedCount === 0) return ["run status is partial; only a completed run can approve"];
   return [];
 }
 
