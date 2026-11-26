@@ -183,6 +183,6 @@ export async function setMirrorPolicy(ref: string, policy: { mode: "all" | "some
 }
 
 export function appThreadUrl(threadId: string): string {
-  const base = (process.env.DITTO_APP_URL || "https://app.heyditto.ai").replace(/\/+$/, "");
+  const base = (process.env.DITTO_APP_BASE || process.env.DITTO_APP_URL || "https://app.heyditto.ai").replace(/\/+$/, "");
   return `${base}/chat/${encodeURIComponent(threadId)}`;
 }
